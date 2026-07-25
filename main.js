@@ -4,9 +4,16 @@
 // ============================================================
 const { app, BrowserWindow, Tray, Menu, ipcMain, dialog, nativeImage, powerMonitor, powerSaveBlocker } = require('electron');
 const path = require('path');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const fs = require('fs');
 const pty = require('node-pty');
+
+const { SessionRegistry } = require('./src/main/sessions');
+const { writeJsonAtomic, readJsonStrict, readJsonDir, ensureDir } = require('./src/main/store');
+const { loadSettings, saveSettings } = require('./src/main/settings');
+const {
+  asPlainObject, asId, asText, asCols, asRows,
+} = require('./src/main/validate');
 
 // ── Timestamped Logging ──────────────────────────────────────
 // Prefix every main-process console line with a local HH:MM:SS.mmm
@@ -46,7 +53,7 @@ let cleanupComplete = false;
 let keepAwakeId = null;
 let sleepTimer = null;
 let sleepTarget = null; // epoch ms when hibernate fires (null = none armed)
-const activeProcesses = new Map();
+let sessions = null;    // SessionRegistry, created once the app is ready
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 const isSmokeTest = process.argv.includes('--smoke-test');
 const isSelfTest = process.argv.includes('--self-test');
@@ -58,6 +65,18 @@ function isDirectory(dir) {
   } catch (_e) {
     return false;
   }
+}
+
+/**
+ * Resolve a requested working directory to one that exists.
+ * A missing path makes ConPTY fail with "Cannot create process, error code:
+ * 267" and leaves a dead terminal, so fall back to the user's home instead.
+ */
+function resolveWorkingDir(cwd) {
+  if (isDirectory(cwd)) return cwd;
+  const fallback = app.getPath('home');
+  if (cwd) console.warn(`[Main] cwd not found: "${cwd}" — falling back to "${fallback}"`);
+  return fallback;
 }
 
 function showMainWindow() {
@@ -80,6 +99,48 @@ function sendToRenderer(channel, payload) {
     }
     return false;
   }
+}
+
+// ── PTY Sessions ─────────────────────────────────────────────
+// The app can hold several concurrent PTYs (one per agent account), so a
+// session registry owns them instead of a bare Map of processes. Session
+// metadata sent to the renderer deliberately excludes env and resolved
+// paths — a routed session's env contains canonical account-home paths.
+
+/**
+ * Force-kill a process tree. node-pty's kill() ends the ConPTY, but a routed
+ * session is `pwsh` with a `codex` child, and the child can outlive it.
+ */
+function killProcessTree(pid) {
+  if (!pid) return;
+  if (process.platform === 'win32') {
+    execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, (err) => {
+      // A already-dead tree is the common case; only surface real failures.
+      if (err && !/not found|no running instance/i.test(err.message)) {
+        console.warn(`[Sessions] taskkill ${pid} failed: ${err.message}`);
+      }
+    });
+    return;
+  }
+  try { process.kill(-pid, 'SIGKILL'); } catch (_e) { /* already gone */ }
+}
+
+function createSessionRegistry() {
+  return new SessionRegistry({
+    pty,
+    killTree: killProcessTree,
+    log: (msg) => console.log(msg),
+    onOutput: ({ id, data, stream }) => {
+      // Legacy channel name kept so existing renderer listeners keep working.
+      sendToRenderer('process-output', { id, data, stream });
+    },
+    onExit: ({ id, code }) => {
+      sendToRenderer('process-exit', { id, code });
+    },
+    onStatus: (meta) => {
+      if (meta) sendToRenderer('session-status', meta);
+    },
+  });
 }
 
 // ── Tray Icon ────────────────────────────────────────────────
@@ -116,18 +177,37 @@ function getWindowIcon() {
   return undefined;
 }
 
+// ── Persisted Settings ───────────────────────────────────────
+function settingsFile() {
+  return path.join(app.getPath('userData'), 'settings.json');
+}
+
+/** Save the window's current geometry so the next launch reopens in place. */
+function persistWindowBounds() {
+  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isMinimized()) return;
+  try {
+    saveSettings(settingsFile(), { windowBounds: mainWindow.getNormalBounds() });
+  } catch (err) {
+    console.warn(`[Main] Failed to persist window bounds: ${err.message}`);
+  }
+}
+
 // ── Window Creation ──────────────────────────────────────────
 function createWindow() {
   const icon = getWindowIcon();
+  const stored = loadSettings(settingsFile());
+  const bounds = stored.windowBounds;
 
   mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 920,
+    width: bounds?.width ?? 1440,
+    height: bounds?.height ?? 920,
+    ...(bounds && bounds.x !== undefined && bounds.y !== undefined
+      ? { x: bounds.x, y: bounds.y }
+      : { center: true }),
     minWidth: 1000,
     minHeight: 600,
     backgroundColor: '#0a0a0f',
     show: false,
-    center: true,
     autoHideMenuBar: true,
     ...(icon ? { icon } : {}),
     webPreferences: {
@@ -149,12 +229,23 @@ function createWindow() {
 
   // Clicking X hides to tray instead of quitting
   mainWindow.on('close', (e) => {
+    persistWindowBounds();
     if (!app.isQuitting) {
       e.preventDefault();
       mainWindow.hide();
       console.log('[Main] Window hidden to tray');
     }
   });
+
+  // Debounce geometry writes; a drag/resize fires these continuously.
+  let boundsTimer = null;
+  const scheduleBoundsSave = () => {
+    if (boundsTimer) clearTimeout(boundsTimer);
+    boundsTimer = setTimeout(persistWindowBounds, 800);
+    if (typeof boundsTimer.unref === 'function') boundsTimer.unref();
+  };
+  mainWindow.on('resize', scheduleBoundsSave);
+  mainWindow.on('move', scheduleBoundsSave);
 
   // Debug: log page load errors
   mainWindow.webContents.on('did-fail-load', (_e, code, desc) => {
@@ -243,6 +334,7 @@ if (!gotSingleInstanceLock) {
 
   app.whenReady().then(() => {
     console.log('[Main] App ready, creating window and tray...');
+    sessions = createSessionRegistry();
     createWindow();
     createTray();
     startSchedulerHeartbeat();
@@ -314,17 +406,7 @@ function cancelSleepTimer({ broadcast = false } = {}) {
 }
 
 function killAllActiveProcesses(reason = 'shutdown') {
-  const entries = Array.from(activeProcesses.entries());
-  activeProcesses.clear();
-  for (const [id, proc] of entries) {
-    console.log(`[Main] Killing process (${reason}): ${id}`);
-    try {
-      proc.kill('SIGTERM');
-    } catch (_e) {
-      try { process.kill(proc.pid, 'SIGTERM'); } catch (_e2) { /* ignore */ }
-    }
-  }
-  return entries.length;
+  return sessions ? sessions.killAll(reason) : 0;
 }
 
 function cleanupForQuit() {
@@ -354,52 +436,28 @@ app.on('activate', () => {
 });
 
 // ── IPC: Execute Command ─────────────────────────────────────
-ipcMain.handle('execute-command', async (_event, { id, command, cwd, cols = 80, rows = 24 }) => {
+// Legacy channel: spawns a plain PowerShell session running one command.
+// Kept so workflows saved before the session/agent model still run; it is
+// now just a session with no profile and no account selection (L0-native).
+ipcMain.handle('execute-command', async (_event, payload) => {
+  let id = null;
   try {
-    console.log(`[IPC] execute-command: "${command}" in "${cwd}"`);
+    const p = asPlainObject(payload);
+    id = asId(p.id, 'session id');
+    const command = asText(p.command ?? '', { what: 'command', max: 32_000 });
+    console.log(`[IPC] execute-command: "${command}" in "${p.cwd}"`);
 
-    // If a process is already registered under this id, kill it first so we
-    // never overwrite the Map entry and orphan the old PTY.
-    const existing = activeProcesses.get(id);
-    if (existing) {
-      try { existing.kill(); } catch (e) { /* ignore */ }
-      activeProcesses.delete(id);
-    }
-
-    // Validate the working directory — a missing path makes ConPTY fail with
-    // "Cannot create process, error code: 267" and leaves a dead terminal.
-    let workingDir = cwd;
-    if (!isDirectory(workingDir)) {
-      const fallback = app.getPath('home');
-      if (workingDir) console.warn(`[IPC] cwd not found: "${workingDir}" — falling back to "${fallback}"`);
-      workingDir = fallback;
-    }
-
-    // Using node-pty with ConPTY (wmux-inspired config)
-    const proc = pty.spawn('powershell.exe', ['-NoExit', '-Command', command], {
-      name: 'xterm-color',
-      cols: cols,
-      rows: rows,
-      cwd: workingDir,
+    const { id: sessionId, pid } = sessions.create({
+      file: 'powershell.exe',
+      args: ['-NoExit', '-Command', command],
       env: process.env,
-      useConpty: true,
-      conptyInheritCursor: true
-    });
+      cwd: resolveWorkingDir(p.cwd),
+      agent: 'shell',
+      label: 'Shell',
+      assurance: 'L0-native',
+    }, { id, cols: asCols(p.cols), rows: asRows(p.rows) });
 
-    activeProcesses.set(id, proc);
-
-    proc.onData((data) => {
-      sendToRenderer('process-output', {
-        id, data: data.toString(), stream: 'stdout'
-      });
-    });
-
-    proc.onExit(({ exitCode }) => {
-      activeProcesses.delete(id);
-      sendToRenderer('process-exit', { id, code: exitCode });
-    });
-
-    return { id, pid: proc.pid };
+    return { id: sessionId, pid };
   } catch (err) {
     console.error(`[IPC] execute-command error: ${err.message}`);
     return { id, error: err.message };
@@ -407,43 +465,40 @@ ipcMain.handle('execute-command', async (_event, { id, command, cwd, cols = 80, 
 });
 
 // ── IPC: Send Input to Process ───────────────────────────────
-ipcMain.handle('send-input', async (_event, { id, text }) => {
-  const proc = activeProcesses.get(id);
-  if (proc) {
-    proc.write(text.replace(/\n/g, '\r'));
-    return true;
+ipcMain.handle('send-input', async (_event, payload) => {
+  try {
+    const p = asPlainObject(payload);
+    return sessions.write(asId(p.id, 'session id'), asText(p.text));
+  } catch (err) {
+    console.warn(`[IPC] send-input rejected: ${err.message}`);
+    return false;
   }
-  return false;
 });
 
 // ── IPC: Resize Process ──────────────────────────────────────
-ipcMain.handle('resize-process', async (_event, { id, cols, rows }) => {
-  const proc = activeProcesses.get(id);
-  if (proc && typeof proc.resize === 'function') {
-    try {
-      proc.resize(cols, rows);
-      return true;
-    } catch (e) {
-      console.error(`[IPC] resize error: ${e.message}`);
-    }
+ipcMain.handle('resize-process', async (_event, payload) => {
+  try {
+    const p = asPlainObject(payload);
+    return sessions.resize(asId(p.id, 'session id'), p.cols, p.rows);
+  } catch (err) {
+    console.warn(`[IPC] resize-process rejected: ${err.message}`);
+    return false;
   }
-  return false;
 });
 
 // ── IPC: Kill Process ────────────────────────────────────────
-ipcMain.handle('kill-process', async (_event, { id }) => {
-  const proc = activeProcesses.get(id);
-  if (proc) {
-    activeProcesses.delete(id);
-    try {
-      proc.kill('SIGTERM');
-    } catch (e) {
-      try { process.kill(proc.pid, 'SIGTERM'); } catch (e2) { /* ignore */ }
-    }
-    return true;
+ipcMain.handle('kill-process', async (_event, payload) => {
+  try {
+    const p = asPlainObject(payload);
+    return sessions.remove(asId(p.id, 'session id'));
+  } catch (err) {
+    console.warn(`[IPC] kill-process rejected: ${err.message}`);
+    return false;
   }
-  return false;
 });
+
+// ── IPC: Session Introspection ───────────────────────────────
+ipcMain.handle('list-sessions', async () => (sessions ? sessions.list() : []));
 
 // ── IPC: Keep Awake (power save blocker) ─────────────────────
 // The renderer requests this ON while any future scheduled run is pending,
@@ -525,6 +580,15 @@ ipcMain.handle('kill-all-processes', async () => {
 ipcMain.handle('get-default-directory', async () => app.getPath('home'));
 ipcMain.handle('get-app-version', async () => app.getVersion());
 
+// ── IPC: Settings ────────────────────────────────────────────
+// Preferences and machine-local paths only. Never credentials.
+ipcMain.handle('get-settings', async () => loadSettings(settingsFile()));
+
+ipcMain.handle('update-settings', async (_event, payload) => {
+  const patch = asPlainObject(payload, 'settings patch');
+  return saveSettings(settingsFile(), patch);
+});
+
 // ── IPC: Self-Test Result ────────────────────────────────────
 // The renderer reports the headless engine self-test outcome here; we log it
 // and exit with a matching status code so `npm test` reflects pass/fail.
@@ -556,45 +620,29 @@ function safeWorkflowFileName(workflow) {
 }
 
 function readWorkflowFile(filePath) {
-  const raw = fs.readFileSync(filePath, 'utf-8');
-  const parsed = JSON.parse(raw);
-  return { file: path.basename(filePath), ...parsed };
+  return { file: path.basename(filePath), ...readJsonStrict(filePath) };
 }
 
-ipcMain.handle('save-workflow', async (_event, { workflow, filePath }) => {
+ipcMain.handle('save-workflow', async (_event, payload) => {
+  const { workflow, filePath } = asPlainObject(payload, 'save-workflow payload');
   if (!workflow || typeof workflow !== 'object') {
     throw new Error('Workflow payload is invalid');
   }
-
-  const dir = workflowStoreDir();
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
+  const dir = ensureDir(workflowStoreDir());
   const target = filePath || path.join(dir, safeWorkflowFileName(workflow));
-  const tmp = `${target}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(workflow, null, 2), 'utf-8');
-  fs.renameSync(tmp, target);
-  return target;
+  return writeJsonAtomic(target, workflow);
 });
 
 // ── IPC: Load Workflow ───────────────────────────────────────
-ipcMain.handle('load-workflow', async (_event, { filePath }) => {
+ipcMain.handle('load-workflow', async (_event, payload) => {
+  const { filePath } = asPlainObject(payload, 'load-workflow payload');
   if (filePath) {
     return readWorkflowFile(filePath);
   }
-  const dir = workflowStoreDir();
-  if (!fs.existsSync(dir)) return [];
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
-  const workflows = [];
-  for (const file of files) {
-    const fullPath = path.join(dir, file);
-    try {
-      workflows.push(readWorkflowFile(fullPath));
-    } catch (err) {
-      console.warn(`[IPC] Skipping unreadable workflow "${file}": ${err.message}`);
-    }
-  }
-  return workflows;
+  // One malformed file must not break the whole listing.
+  return readJsonDir(workflowStoreDir(), (file, err) => {
+    console.warn(`[IPC] Skipping unreadable workflow "${file}": ${err.message}`);
+  }).map(({ file, data }) => ({ file, ...data }));
 });
 
 // ── IPC: Delete Workflow ─────────────────────────────────────

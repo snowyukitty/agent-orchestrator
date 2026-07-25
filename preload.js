@@ -14,6 +14,11 @@ contextBridge.exposeInMainWorld('api', {
   resizeProcess: (params) => ipcRenderer.invoke('resize-process', params),
   getDefaultDirectory: () => ipcRenderer.invoke('get-default-directory'),
   getVersion: () => ipcRenderer.invoke('get-app-version'),
+  listSessions: () => ipcRenderer.invoke('list-sessions'),
+
+  // Persisted preferences (theme, window/panel geometry, entrypoint path).
+  getSettings: () => ipcRenderer.invoke('get-settings'),
+  updateSettings: (patch) => ipcRenderer.invoke('update-settings', patch),
 
   // Delayed system hibernate
   armSleep: (params) => ipcRenderer.invoke('arm-sleep', params),
@@ -47,6 +52,11 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('process-error', (_event, data) => callback(data));
   },
 
+  // Session lifecycle metadata (started / exited), one event per change.
+  onSessionStatus: (callback) => {
+    ipcRenderer.on('session-status', (_event, data) => callback(data));
+  },
+
   // Main-process scheduler heartbeat (fires even when hidden/locked)
   onSchedulerTick: (callback) => {
     ipcRenderer.on('scheduler-tick', () => callback());
@@ -58,6 +68,7 @@ contextBridge.exposeInMainWorld('api', {
       'process-output',
       'process-exit',
       'process-error',
+      'session-status',
       'scheduler-tick',
       'sleep-state',
     ]);

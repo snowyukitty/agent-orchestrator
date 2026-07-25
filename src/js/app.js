@@ -311,7 +311,32 @@ class App {
     this._initWorkflows();
     this._initModalDismissal();
     this._initVersionLabel();
+    this._restoreSettings();
     this._updateEmptyState();
+  }
+
+  /** Re-apply preferences persisted by a previous session. */
+  async _restoreSettings() {
+    let stored;
+    try {
+      stored = await window.api.getSettings?.();
+    } catch (_e) { return; }
+    if (!stored) return;
+
+    if (stored.theme) {
+      const select = document.getElementById('theme-selector');
+      if (select) select.value = stored.theme;
+      this._applyTerminalTheme(stored.theme);
+    }
+    if (stored.terminalPanelWidth) {
+      const panel = document.getElementById('terminal-panel');
+      if (panel) panel.style.width = `${stored.terminalPanelWidth}px`;
+    }
+    if (stored.logPaneHeight) {
+      const log = document.getElementById('output-log');
+      if (log) log.style.flex = `0 0 ${stored.logPaneHeight}px`;
+    }
+    if (this.fitAddon) this.fitAddon.fit();
   }
 
   /** Fill the title-bar version from package.json instead of hardcoding it. */
@@ -554,6 +579,8 @@ class App {
     if (themeSelect) {
       themeSelect.addEventListener('change', (e) => {
         this._applyTerminalTheme(e.target.value);
+        // Remember the choice; it used to reset to PowerShell Blue on every launch.
+        window.api.updateSettings?.({ theme: e.target.value }).catch(() => {});
       });
     }
 
@@ -1190,12 +1217,14 @@ class App {
             }).catch(() => {});
           }
         }
+        window.api.updateSettings?.({ terminalPanelWidth: terminalPanel.offsetWidth }).catch(() => {});
       }
       if (isResizingH) {
         isResizingH = false;
         resizerH.classList.remove('dragging');
         document.body.style.cursor = 'default';
         if (this.fitAddon) this.fitAddon.fit();
+        window.api.updateSettings?.({ logPaneHeight: logPane.offsetHeight }).catch(() => {});
       }
     });
   }

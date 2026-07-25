@@ -7,7 +7,9 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "smoke": "electron . --smoke-test",
-    "test": "electron . --self-test",
+    "test": "npm run test:unit && npm run test:app",
+    "test:unit": "node --test \"tests/**/*.test.js\"",
+    "test:app": "electron . --self-test",
     "check": "node scripts/check-syntax.js",
     "icons": "electron scripts/build-icons.js",
     "build": "electron-packager . AgentsOrchestrator --platform=win32 --arch=x64 --overwrite --out=dist --icon=src/assets/icon.ico --ignore=\"(dist|scripts|tests|mcps|icon-source\\.png|\\.gitignore)\" --asar.unpackDir=node_modules/node-pty"
