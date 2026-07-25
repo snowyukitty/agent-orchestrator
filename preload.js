@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('api', {
   setKeepAwake: (on) => ipcRenderer.invoke('set-keep-awake', { on }),
   resizeProcess: (params) => ipcRenderer.invoke('resize-process', params),
   getDefaultDirectory: () => ipcRenderer.invoke('get-default-directory'),
+  getVersion: () => ipcRenderer.invoke('get-app-version'),
 
   // Delayed system hibernate
   armSleep: (params) => ipcRenderer.invoke('arm-sleep', params),

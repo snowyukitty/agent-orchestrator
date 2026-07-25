@@ -523,6 +523,7 @@ ipcMain.handle('kill-all-processes', async () => {
 
 // ── IPC: App Defaults ────────────────────────────────────────
 ipcMain.handle('get-default-directory', async () => app.getPath('home'));
+ipcMain.handle('get-app-version', async () => app.getVersion());
 
 // ── IPC: Self-Test Result ────────────────────────────────────
 // The renderer reports the headless engine self-test outcome here; we log it

@@ -8,18 +8,22 @@
     "dev": "electron . --dev",
     "smoke": "electron . --smoke-test",
     "test": "electron . --self-test",
-    "check": "node --check main.js && node --check preload.js && node --check src/js/app.js && node --check src/js/engine.js && node --check src/js/blocks.js && node --check src/js/templates.js && node --check src/js/schedule.js && node --check scripts/build-icons.js && node --check scripts/create-icon.js",
+    "check": "node scripts/check-syntax.js",
     "icons": "electron scripts/build-icons.js",
-    "build": "electron-packager . AgentsOrchestrator --platform=win32 --arch=x64 --overwrite --out=dist --icon=src/assets/icon.ico --ignore=\"(dist|scripts|mcps|icon-source\\.png|\\.gitignore)\" --asar.unpackDir=node_modules/node-pty"
+    "build": "electron-packager . AgentsOrchestrator --platform=win32 --arch=x64 --overwrite --out=dist --icon=src/assets/icon.ico --ignore=\"(dist|scripts|tests|mcps|icon-source\\.png|\\.gitignore)\" --asar.unpackDir=node_modules/node-pty"
   },
   "devDependencies": {
     "electron": "^35.0.0",
     "electron-packager": "^17.1.2"
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
     "node-pty": "^1.1.0",
-    "sortablejs": "^1.15.6",
-    "xterm": "^5.3.0",
-    "xterm-addon-fit": "^0.8.0"
+    "sortablejs": "^1.15.6"
+  },
+  "allowScripts": {
+    "electron@35.7.5": true,
+    "node-pty@1.1.0": true
   }
 }

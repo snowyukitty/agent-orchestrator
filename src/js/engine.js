@@ -321,15 +321,18 @@ export class ExecutionEngine {
 
     async keypress(block) {
       const key = block.params.key || 'enter';
+      // Enter is CR, matching what a real terminal sends and what the `input`
+      // block uses. LF here made some CLIs treat it as a newline-in-buffer
+      // rather than a submit.
       const keyMap = {
-        'enter':  '\n',
+        'enter':  '\r',
         'ctrl+c': '\x03',
         'ctrl+d': '\x04',
         'escape': '\x1b',
         'tab':    '\t',
       };
 
-      const char = keyMap[key] || '\n';
+      const char = keyMap[key] || '\r';
 
       this._log(`🔑 Key: ${key}`, 'input-echo');
 
