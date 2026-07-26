@@ -97,14 +97,14 @@ class SessionRegistry {
     });
 
     proc.onExit(({ exitCode }) => {
-      const rec = this._sessions.get(sessionId);
-      if (rec) {
-        if (rec.killTimer) { clearTimeout(rec.killTimer); rec.killTimer = null; }
-        rec.status = 'exited';
-        rec.exitCode = exitCode;
-        rec.proc = null;
-        this._onStatus(this.describe(sessionId));
-      }
+      // Update the captured record, not a map lookup: remove() may already
+      // have dropped the entry, and the pending kill escalation reads this
+      // status to decide whether the tree still needs force-killing.
+      if (session.killTimer) { clearTimeout(session.killTimer); session.killTimer = null; }
+      session.status = 'exited';
+      session.exitCode = exitCode;
+      session.proc = null;
+      if (this._sessions.has(sessionId)) this._onStatus(this.describe(sessionId));
       this._onExit({ id: sessionId, code: exitCode });
     });
 
@@ -162,10 +162,11 @@ class SessionRegistry {
         try { process.kill(pid, 'SIGTERM'); } catch (_e2) { /* already gone */ }
       }
       if (s.killTimer) clearTimeout(s.killTimer);
+      // Escalate on the session *record*, not on registry membership: remove()
+      // deletes the entry immediately, and the tree still has to die.
       s.killTimer = setTimeout(() => {
         s.killTimer = null;
-        const still = this._sessions.get(id);
-        if (still && still.status === 'running') this._killTree(pid);
+        if (s.status === 'running') this._killTree(pid);
       }, KILL_GRACE_MS);
       // Do not let a pending kill timer hold the event loop open at quit.
       if (typeof s.killTimer.unref === 'function') s.killTimer.unref();
@@ -198,12 +199,16 @@ class SessionRegistry {
     return removed;
   }
 
-  /** Forget one session outright (used when a tab is closed). */
+  /**
+   * Forget one session outright (used when a tab is closed).
+   * The kill escalation started above keeps running against the detached
+   * record, so a stuck child tree is still force-killed after the grace
+   * window even though the registry no longer lists it.
+   */
   remove(id) {
     const s = this._sessions.get(id);
     if (!s) return false;
     if (s.status === 'running') this.kill(id, 'closed');
-    if (s.killTimer) { clearTimeout(s.killTimer); s.killTimer = null; }
     this._sessions.delete(id);
     return true;
   }

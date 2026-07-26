@@ -216,6 +216,27 @@ test('remove kills a live session and forgets it', () => {
   assert.equal(reg.remove('nope'), false);
 });
 
+test('closing a tab still force-kills a tree that ignores SIGTERM', async () => {
+  // remove() drops the registry entry immediately; the escalation must not
+  // depend on the entry still being there, or a stuck child survives.
+  const { reg, events } = makeRegistry();
+  const { id, pid } = reg.create(SPEC);
+  reg.remove(id);
+
+  await new Promise(r => setTimeout(r, 1700));
+  assert.deepEqual(events.killedTrees, [pid]);
+});
+
+test('closing a tab whose process exits cleanly skips the force-kill', async () => {
+  const { reg, pty, events } = makeRegistry();
+  const { id } = reg.create(SPEC);
+  reg.remove(id);
+  pty.spawned[0].exit(0);
+
+  await new Promise(r => setTimeout(r, 1700));
+  assert.deepEqual(events.killedTrees, []);
+});
+
 test('list returns every session in creation order', () => {
   const { reg } = makeRegistry();
   const a = reg.create({ ...SPEC, label: 'first' }).id;
