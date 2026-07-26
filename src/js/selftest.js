@@ -12,6 +12,8 @@
 import { ExecutionEngine, analyzeLoops, matchingLoopEnd } from './engine.js';
 import { TEMPLATES } from './templates.js';
 import { computeJobTarget, isDue, formatCountdown, DEFAULT_GRACE_MS } from './schedule.js';
+import { typeInto } from './typing.js';
+import { SessionManager, TARGET_ACTIVE, TARGET_ALL, AGENT_TARGET_PREFIX } from './sessions.js';
 
 /**
  * Run every case and return a result summary.
@@ -31,13 +33,11 @@ export async function runSelfTest() {
     await testLoops(eq);
     await testTemplates(eq);
     await testSchedule(eq);
+    await testTyping(eq, ok);
+    await testSessionTargets(eq);
   } catch (err) {
     failures.push(`exception: ${err && err.message ? err.message : err}`);
   }
-
-  // `ok` is part of the shared helper surface; reference it so future cases
-  // can use it without an unused-binding surprise.
-  void ok;
 
   const passed = failures.length === 0;
   return {
@@ -161,4 +161,101 @@ async function testSchedule(eq) {
   eq('fmt-negative', formatCountdown(-5000), '00:00:00');
   eq('fmt-hms', formatCountdown(3_661_000), '01:01:01');
   eq('fmt-days', formatCountdown(90_061_000), '1d 01:01:01');
+}
+
+// ── Human-paced typing (shared by the engine and quick-send) ──
+
+async function testTyping(eq, ok) {
+  // Characters go one at a time, then two Enters: the first dismisses any
+  // autocomplete menu, the second submits.
+  const sent = [];
+  await typeInto({
+    sessionId: 's1',
+    text: 'hi',
+    send: (id, chunk) => { sent.push([id, chunk]); return Promise.resolve(true); },
+    charDelayMs: 0,
+  });
+  eq('typing-sequence', sent, [['s1', 'h'], ['s1', 'i'], ['s1', '\r'], ['s1', '\r']]);
+
+  // pressEnter:false leaves the prompt unsubmitted.
+  const noEnter = [];
+  await typeInto({
+    sessionId: 's1', text: 'ab', pressEnter: false,
+    send: (_id, chunk) => { noEnter.push(chunk); return Promise.resolve(true); },
+    charDelayMs: 0,
+  });
+  eq('typing-no-enter', noEnter, ['a', 'b']);
+
+  // An empty text with pressEnter still submits (a bare "confirm" step).
+  const bare = [];
+  await typeInto({
+    sessionId: 's1', text: '',
+    send: (_id, chunk) => { bare.push(chunk); return Promise.resolve(true); },
+    charDelayMs: 0,
+  });
+  eq('typing-empty-submits', bare, ['\r', '\r']);
+
+  // Abort stops mid-word rather than finishing the prompt.
+  const aborted = [];
+  let calls = 0;
+  const result = await typeInto({
+    sessionId: 's1', text: 'abcdef',
+    send: (_id, chunk) => { aborted.push(chunk); calls++; return Promise.resolve(true); },
+    isAborted: () => calls >= 2,
+    charDelayMs: 0,
+  });
+  eq('typing-abort-stops', aborted, ['a', 'b']);
+  eq('typing-abort-flag', result.aborted, true);
+
+  // A dead session surfaces as an error instead of silently losing the text.
+  let threw = false;
+  try {
+    await typeInto({ sessionId: 's1', text: 'x', send: () => Promise.resolve(false), charDelayMs: 0 });
+  } catch (_e) { threw = true; }
+  ok('typing-dead-session-throws', threw);
+
+  let noTarget = false;
+  try {
+    await typeInto({ sessionId: null, text: 'x', send: () => Promise.resolve(true) });
+  } catch (_e) { noTarget = true; }
+  ok('typing-no-session-throws', noTarget);
+}
+
+// ── Quick-send target resolution ─────────────────────────────
+
+async function testSessionTargets(eq) {
+  const manager = new SessionManager({ api: {} });
+  // Seed the registry directly: resolveTargets is pure over session metadata,
+  // and building real xterms here would need a laid-out DOM.
+  const seed = (id, agent, status = 'running') => {
+    manager._sessions.set(id, { meta: { id, agent, status, label: id }, term: null, fitAddon: null, el: null });
+  };
+  seed('s-claude-work', 'claude');
+  seed('s-claude-personal', 'claude');
+  seed('s-codex-a', 'codex');
+  seed('s-dead', 'claude', 'exited');
+  manager._activeId = 's-codex-a';
+
+  eq('target-active', manager.resolveTargets(TARGET_ACTIVE), ['s-codex-a']);
+  eq('target-default-is-active', manager.resolveTargets(), ['s-codex-a']);
+  eq('target-explicit-id', manager.resolveTargets('s-claude-work'), ['s-claude-work']);
+
+  // Fan-out by agent hits every live account of that agent.
+  eq('target-by-agent', manager.resolveTargets(`${AGENT_TARGET_PREFIX}claude`),
+    ['s-claude-work', 's-claude-personal']);
+  eq('target-by-agent-unknown', manager.resolveTargets(`${AGENT_TARGET_PREFIX}gemini`), []);
+
+  eq('target-all', manager.resolveTargets(TARGET_ALL),
+    ['s-claude-work', 's-claude-personal', 's-codex-a']);
+
+  // Exited sessions are never targeted — input there would vanish silently.
+  eq('target-skips-exited', manager.resolveTargets('s-dead'), []);
+  eq('target-unknown-id', manager.resolveTargets('s-nope'), []);
+
+  // With the active session gone, "current" resolves to nothing rather than
+  // guessing at another account.
+  manager._activeId = 's-dead';
+  eq('target-active-exited', manager.resolveTargets(TARGET_ACTIVE), []);
+  manager._activeId = null;
+  eq('target-active-none', manager.resolveTargets(TARGET_ACTIVE), []);
 }

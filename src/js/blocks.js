@@ -33,6 +33,31 @@ export const BLOCK_TYPES = {
       { key: 'path', label: 'Path', type: 'directory', placeholder: 'Working directory...' }
     ]
   },
+  agentStart: {
+    type: 'agentStart',
+    icon: '🤖',
+    label: 'Agent Session',
+    description: 'Open an agent under a chosen account',
+    color: 'agent',
+    defaultParams: { profileId: '', settleMs: 1500 },
+    params: [
+      { key: 'profileId', label: 'Account', type: 'profile' },
+      { key: 'settleMs', label: 'Settle ms', type: 'number', min: 0, max: 600000 }
+    ]
+  },
+  agentSend: {
+    type: 'agentSend',
+    icon: '📨',
+    label: 'Send to Agent',
+    description: 'Prompt a specific agent session',
+    color: 'agent',
+    defaultParams: { profileId: '', text: '', pressEnter: true },
+    params: [
+      { key: 'profileId', label: 'Account', type: 'profile', allowCurrent: true },
+      { key: 'text', label: 'Text', type: 'text', placeholder: 'Prompt to send...' },
+      { key: 'pressEnter', label: 'Enter', type: 'checkbox' }
+    ]
+  },
   command: {
     type: 'command',
     icon: '⌨️',
@@ -265,6 +290,29 @@ function buildParamField(paramDef, params) {
       break;
     }
 
+    // Agent accounts are discovered at runtime (routed aliases come from
+    // ai-agent-entrypoint), so the options are filled in by the app rather
+    // than declared statically here.
+    case 'profile': {
+      const profiles = getProfileOptions();
+      const known = profiles.some(p => p.id === String(value));
+      const opts = [
+        paramDef.allowCurrent
+          ? `<option value="" ${!value ? 'selected' : ''}>▸ Current session</option>`
+          : `<option value="" ${!value ? 'selected' : ''}>— pick an account —</option>`,
+        // A workflow may name a profile this machine does not have; keep the
+        // saved value visible instead of silently rewriting it on load.
+        ...(value && !known
+          ? [`<option value="${esc(String(value))}" selected>⚠ ${esc(String(value))} (not on this machine)</option>`]
+          : []),
+        ...profiles.map(p =>
+          `<option value="${esc(p.id)}" ${String(value) === p.id ? 'selected' : ''}>${esc(p.icon)} ${esc(p.displayName)}</option>`
+        ),
+      ].join('');
+      inputHtml = `<select data-param="${key}" class="param-profile">${opts}</select>`;
+      break;
+    }
+
     case 'checkbox':
       inputHtml = `<input type="checkbox" data-param="${key}" ${value ? 'checked' : ''} />`;
       break;
@@ -295,6 +343,18 @@ function buildParamField(paramDef, params) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────
+
+/**
+ * Agent accounts available for a `profile` param.
+ * Read from the live AgentsUI when the app is running; empty in the headless
+ * self-test, where no discovery has happened.
+ */
+function getProfileOptions() {
+  const agents = (typeof window !== 'undefined' && window.app) ? window.app.agents : null;
+  if (!agents || typeof agents.allProfiles !== 'function') return [];
+  return agents.allProfiles();
+}
+
 function esc(str) {
   const el = document.createElement('span');
   el.textContent = str;

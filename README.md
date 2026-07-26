@@ -2,11 +2,56 @@
 
 A desktop orchestrator application built with Electron, allowing users to automate interactions with command-line AI agents (such as Claude and Codex) through a drag-and-drop block interface and an embedded pseudo-terminal (PTY).
 
+Several agents can run at once — one session per account — with a tab per session and a quick-send bar for ad-hoc prompts.
+
 ## Project Status
 
-**Version**: 0.1.9 MVP
+**Version**: 0.2.0
+
+## Multi-account agent control
+
+Each session is "which agent, as which account", and the guarantee behind that
+pairing is stated rather than implied:
+
+| Level | What it means | How a session starts |
+|---|---|---|
+| **L1 · routed** | A Codex alias owned by [`ai-agent-entrypoint`](../ai-agent-entrypoint), which builds the child environment | `agent-entrypoint.ps1 codex shell <alias>` |
+| **L2 · env-only** | A local profile that points the agent at its own state directory (`CLAUDE_CONFIG_DIR`, `GROK_HOME`, …) for that child process | `powershell.exe` with env overrides |
+| **L0 · native** | No account selected | plain `powershell.exe` |
+
+- **Routed accounts are discovered, not configured here.** The app asks
+  `ai-agent-entrypoint` for its Codex aliases and launches through it. This app
+  never reads or writes that manifest and is not a source of account truth.
+- **Local profiles cover the CLIs nobody manages yet.** Claude Code, Grok, and
+  Gemini have no managed routing layer, so a profile gives each account its own
+  state directory and you log in once inside that session. This is a weaker
+  guarantee than a routed account, and the UI says so — it is never described
+  as isolation.
+- **No credentials are stored by this app.** Profile environments accept paths
+  and flags only; a key that looks like a token, API key, or password is
+  rejected with an explanation. Discovery output containing canonical account
+  paths is stripped before it reaches the UI, the log, or an exported workflow.
+- **Routed launches fail closed.** If an alias cannot be resolved, the session
+  refuses to start rather than quietly falling back to the native login.
+
+Sessions appear as tabs above the terminal; all of them keep running and
+buffering while hidden. The quick-send bar targets the current session, every
+session of one agent, or all of them at once.
 
 ### Release Notes
+
+#### v0.2.0 (multi-account agents)
+- **Multiple concurrent agent sessions**, one per account, each with its own terminal tab, status dot, and assurance badge. Background sessions keep rendering, so nothing is lost while you watch another one.
+- **Agent accounts panel** listing routed Codex accounts discovered from `ai-agent-entrypoint` alongside local env-only profiles you manage here. Click one to open a session.
+- **Quick-send bar** for ad-hoc prompts to one session, all sessions of one agent, or every session — using the same human-paced typing as the workflow engine.
+- **New blocks**: `🤖 Agent Session` opens an account, `📨 Send to Agent` prompts a specific one. Existing workflows keep working unchanged.
+- **A workflow run no longer kills every process.** It closes only the sessions the previous run opened; sessions you started by hand are left alone.
+- **Killing a session kills its process tree** (SIGTERM, then `taskkill /T` after a grace window), so a routed `pwsh` with an agent child leaves nothing behind.
+- **Validated IPC.** Payloads are type- and range-checked; `send-input` previously threw on any non-string.
+- **Persisted settings**: terminal theme, window geometry, and panel sizes survive a restart.
+- **Real test suites**: `npm run test:unit` (`node --test` over the main-process modules) plus the Electron self-test, now covering typing, quick-send targeting, launch specs, the credential boundary, and the path-leak boundary.
+- Fixed: declaration-order fragility in the panel resizers, two competing Escape handlers, and `keypress` "enter" sending LF where the input block sent CR.
+- Replaced the deprecated `xterm` / `xterm-addon-fit` packages with `@xterm/xterm` and `@xterm/addon-fit`; the title-bar version is read from `package.json` instead of hardcoded.
 
 #### v0.1.9 (review & fixes)
 - **Fixed: opening a saved workflow disarmed its schedule.** Opening or importing a workflow wrongly marked its next scheduled occurrence as already-fired (a suppression only meant for freshly-created/template schedules that default to "now"). Saved workflows with a future schedule now stay armed when opened.
@@ -54,7 +99,9 @@ A desktop orchestrator application built with Electron, allowing users to automa
 - Ignored local `mcps/` tool descriptor caches in Git and packaged builds.
 
 ### Completed Features
-- **Visual Workflow Builder**: Users can construct automation workflows by combining blocks (Schedule, Directory, Command, Wait, Send Input, Keypress, Loop / End Loop, Log, Hibernate PC).
+- **Multi-Account Agent Sessions**: Several agents run at once, one PTY per account, each with a terminal tab carrying its agent, account name, live status dot, and assurance badge. Hidden sessions keep running and buffering. Routed Codex accounts come from `ai-agent-entrypoint`; local env-only profiles cover the CLIs it does not manage yet. See "Multi-account agent control" above.
+- **Quick Send**: A prompt bar under the terminal fires an ad-hoc command at the current session, every session of one agent, or all of them — using the same human-paced typing as the workflow engine.
+- **Visual Workflow Builder**: Users can construct automation workflows by combining blocks (Schedule, Directory, Agent Session, Send to Agent, Command, Wait, Send Input, Keypress, Loop / End Loop, Log, Hibernate PC).
 - **Loops**: A **Loop** block repeats every block up to its matching **End Loop** a configurable number of times. Nested loops are supported and the loop body is indented (with a continuous nesting rail) so the structure is readable at a glance. A live iteration badge (`2/3`) tracks progress during a run, unbalanced loop markers are flagged inline (dashed outline + tooltip) and summarized in a banner, and the engine still runs safely by skipping broken markers.
 - **Drag-to-Position Editing**: Blocks dragged from the palette land exactly where they are dropped (with a live insertion-line preview); they can still be reordered afterward by their drag handles.
 - **Templates**: A **🧩 Templates** picker provides pre-built workflows (including a Loop example) as one-click starting points.
@@ -63,10 +110,10 @@ A desktop orchestrator application built with Electron, allowing users to automa
 - **Automated PTY Execution**: The engine executes terminal applications in the background using `node-pty` with modern Windows `ConPTY` enabled, providing full ANSI color support and proper terminal layout.
 - **Dual-Pane Output**: The UI features a horizontally resizable right panel split into:
   - **Log**: A clear visual timeline of automation steps and system messages.
-  - **Terminal**: A fully interactive `xterm.js` terminal representing the spawned process.
-- **Theme Switcher**: Users can toggle between three terminal themes (PowerShell Blue, Hacker Dark, and Light Mode).
-- **Interactive Terminal**: Terminal stays fully interactive. All keystrokes in the UI are forwarded via IPC to the actual background PowerShell process.
-- **Process Cleanup**: At the start of every run, `kill-all-processes` clears the default shell and any leftover PTYs from previous runs, and each spawned PTY is tracked so aborting kills them all — preventing zombie/orphaned processes.
+  - **Terminal**: A tabbed stack of fully interactive `xterm.js` terminals, one per live session.
+- **Theme Switcher**: Users can toggle between three terminal themes (PowerShell Blue, Hacker Dark, and Light Mode). The choice is remembered across restarts, along with window geometry and panel sizes.
+- **Interactive Terminal**: Terminals stay fully interactive. Keystrokes are forwarded via IPC to the PTY behind the visible tab.
+- **Process Cleanup**: Starting a run closes only the sessions the *previous* run opened — sessions you started by hand are left alone. Aborting kills every PTY the run spawned, and each kill escalates from SIGTERM to a whole-tree `taskkill` after a grace window, so a routed shell with an agent child leaves nothing behind.
 - **Single-Instance Guard**: Electron's single-instance lock prevents duplicate tray apps, duplicate scheduler ticks, and conflicting hibernate timers. Launching a second instance focuses the existing window instead.
 - **Input Simulation**: Simulates human typing speeds for text input blocks to avoid characters being swallowed by async CLI UI redrawing loops.
 - **Scheduled Countdown Board**: A **⏱ Schedules** panel lists every scheduled workflow (saved on disk + the one being edited), each with a **live countdown** to its next run. The bottom toolbar always shows "next in HH:MM:SS". Due `once` jobs auto-run at their time; `cron` mode repeats daily.
@@ -76,6 +123,9 @@ A desktop orchestrator application built with Electron, allowing users to automa
 - **Custom App Icon**: A real snowflake icon (PNG + multi-size Windows `.ico`) is used for the window, taskbar, tray, and packaged `.exe` — no default Electron icon. Regenerate from `src/assets/icon-source.png` with `npm run icons`.
 
 ### Architecture Notes
+- **Account routing is delegated, not reimplemented.** `ai-agent-entrypoint` owns the Codex account manifest and child-environment construction; this app discovers its aliases and launches through it. Bringing another CLI under managed routing is a decision for that repository. `AGENTS.md` records the boundary and the rules the code enforces.
+- **Sessions are first class.** `src/main/sessions.js` holds a registry of PTYs, each tagged with its profile and assurance level. Its `describe()` deliberately omits env, cwd, and the resolved executable, because a routed session's environment contains canonical account-home paths.
+- **Main-process modules are CommonJS and unit-tested** (`src/main/`, `tests/*.test.js`); renderer modules are ES modules covered by the Electron self-test. Pure logic lives in whichever half can test it deterministically.
 - The renderer (`app.js`) owns the single, persistent set of process IPC listeners (output/exit/error); the engine reacts via `handleProcessExit` / `handleProcessError` hooks rather than registering its own listeners. This avoids the terminal listener being torn down between runs and prevents double-rendered output.
 - Main-process lifecycle cleanup is centralized and idempotent. `before-quit` and `will-quit` both run the same shutdown path so timers, power blockers, tray state, and PTYs are cleaned up consistently.
 - `mcps/` is treated as a local tool descriptor cache. It is not part of the app source and is ignored by Git and packaged builds.
@@ -94,14 +144,18 @@ npm install
 # Run locally
 npm start
 
-# Syntax-check JavaScript entrypoints and scripts
+# Syntax-check every JavaScript file under the source roots
 npm run check
 
 # Run a quick Electron startup/shutdown smoke test
 npm run smoke
 
-# Run the headless engine self-test (loop control flow regression)
+# Run both suites: main-process unit tests + the headless renderer self-test
 npm test
+
+# Either half on its own
+npm run test:unit   # node --test over src/main/
+npm run test:app    # electron . --self-test
 
 # Regenerate icon assets (icon.png + icon.ico) from src/assets/icon-source.png
 npm run icons

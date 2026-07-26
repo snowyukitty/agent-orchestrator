@@ -97,8 +97,23 @@
       </div>
       <!-- Horizontal resizer -->
       <div class="resizer-h" id="resizer-h"></div>
-      <!-- Terminal pane (xterm.js) -->
-      <div class="output-term" id="terminal-output">
+
+      <!-- Session tab strip: one tab per live agent session -->
+      <div class="session-bar">
+        <div class="session-tabs" id="session-tabs"></div>
+        <button class="btn btn-icon btn-sm session-add" id="btn-add-session"
+                title="Start an agent session">＋</button>
+      </div>
+
+      <!-- Terminal stack: one xterm per session, only the active one visible -->
+      <div class="output-term" id="terminal-output"></div>
+
+      <!-- Quick-send: fire a prompt at one agent, one account, or all of them -->
+      <div class="quick-send" id="quick-send">
+        <select class="quick-target" id="quick-target" title="Where to send"></select>
+        <input type="text" class="quick-input" id="quick-input" spellcheck="false"
+               placeholder="Type a command or prompt, then Enter…">
+        <button class="btn btn-primary btn-sm" id="btn-quick-send" title="Send (Enter)">⏎ Send</button>
       </div>
     </aside>
   </div>
@@ -125,6 +140,9 @@
       </button>
       <button class="btn btn-secondary" id="btn-export">
         <span>📤</span> Export
+      </button>
+      <button class="btn btn-secondary" id="btn-agents" title="Agent accounts and sessions">
+        <span>🤖</span> Agents <span class="sched-badge" id="agents-badge">0</span>
       </button>
       <button class="btn btn-secondary" id="btn-schedules" title="Scheduled workflow runs">
         <span>⏱</span> Schedules <span class="sched-badge" id="sched-badge">0</span>
@@ -174,6 +192,108 @@
         <div class="modal-footer-actions">
           <button class="btn btn-secondary btn-sm" id="btn-import-workflow" title="Open a .json from disk">📥 Import file…</button>
           <button class="btn btn-primary btn-sm" id="btn-new-workflow" title="Start a blank workflow">＋ New</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Agents Modal ═══ -->
+  <div class="modal-overlay hidden" id="agents-modal">
+    <div class="modal-card modal-wide">
+      <div class="modal-header">
+        <h2>🤖 Agent Accounts</h2>
+        <button class="btn btn-icon btn-sm" id="btn-close-agents" title="Close">✕</button>
+      </div>
+
+      <div class="modal-body" id="agents-body">
+        <!-- Routed accounts (owned by ai-agent-entrypoint) -->
+        <div class="agents-section">
+          <div class="agents-section-head">
+            <h3>Routed accounts</h3>
+            <span class="assurance-chip L1-routed">L1 · routed</span>
+          </div>
+          <p class="agents-section-note">
+            Codex accounts resolved by <strong>ai-agent-entrypoint</strong>, which owns the
+            account manifest and builds each child environment. This app only launches them.
+          </p>
+          <div id="agents-routed-list"></div>
+        </div>
+
+        <!-- Local env-only profiles -->
+        <div class="agents-section">
+          <div class="agents-section-head">
+            <h3>Local profiles</h3>
+            <span class="assurance-chip L2-env">L2 · env-only</span>
+          </div>
+          <p class="agents-section-note">
+            For CLIs ai-agent-entrypoint does not manage yet. A profile points the agent at its own
+            state directory (for example <code>CLAUDE_CONFIG_DIR</code>) for that child process only,
+            then you log in inside the session. This is a weaker guarantee than a routed account
+            — and <strong>never put an API key or token here</strong>; the app rejects them.
+          </p>
+          <div id="agents-local-list"></div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <span class="modal-hint" id="agents-hint">Click an account to start a session.</span>
+        <div class="modal-footer-actions">
+          <button class="btn btn-secondary btn-sm" id="btn-refresh-agents" title="Re-run account discovery">🔄 Refresh</button>
+          <button class="btn btn-primary btn-sm" id="btn-new-agent" title="Add a local profile">＋ New profile</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Agent Profile Editor Modal ═══ -->
+  <div class="modal-overlay hidden" id="agent-edit-modal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <h2 id="agent-edit-title">＋ New profile</h2>
+        <button class="btn btn-icon btn-sm" id="btn-close-agent-edit" title="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <form class="agent-form" id="agent-form" autocomplete="off">
+          <label class="agent-field">
+            <span>Agent</span>
+            <select id="agent-field-kind"></select>
+          </label>
+          <label class="agent-field">
+            <span>Account name</span>
+            <input type="text" id="agent-field-name" placeholder="e.g. Claude · work" spellcheck="false" required>
+          </label>
+          <label class="agent-field">
+            <span>Profile id</span>
+            <input type="text" id="agent-field-id" placeholder="claude-work" spellcheck="false" required>
+            <small>Referenced by workflows. Letters, digits, <code>_ : . -</code></small>
+          </label>
+          <label class="agent-field">
+            <span>State directory</span>
+            <span class="agent-dir-row">
+              <input type="text" id="agent-field-home" placeholder="Pick a folder for this account…" spellcheck="false">
+              <button class="btn btn-icon btn-sm" id="btn-browse-home" type="button" title="Browse">📂</button>
+            </span>
+            <small id="agent-field-home-hint">Sets the agent's config/state directory for this session only.</small>
+          </label>
+          <label class="agent-field">
+            <span>Launch command</span>
+            <input type="text" id="agent-field-command" placeholder="claude" spellcheck="false">
+          </label>
+          <label class="agent-field">
+            <span>Working directory</span>
+            <span class="agent-dir-row">
+              <input type="text" id="agent-field-cwd" placeholder="(workflow default)" spellcheck="false">
+              <button class="btn btn-icon btn-sm" id="btn-browse-cwd" type="button" title="Browse">📂</button>
+            </span>
+          </label>
+          <div class="agent-form-error hidden" id="agent-form-error"></div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <span class="modal-hint">Paths and flags only. Credentials stay in the agent's own state directory.</span>
+        <div class="modal-footer-actions">
+          <button class="btn btn-secondary btn-sm" id="btn-cancel-agent">Cancel</button>
+          <button class="btn btn-primary btn-sm" id="btn-save-agent">💾 Save profile</button>
         </div>
       </div>
     </div>

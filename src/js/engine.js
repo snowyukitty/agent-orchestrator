@@ -3,6 +3,8 @@
 // Runs blocks sequentially, managing processes & timing
 // ============================================================
 
+import { typeInto } from './typing.js';
+
 export class ExecutionEngine {
   constructor() {
     this.running = false;
@@ -22,6 +24,7 @@ export class ExecutionEngine {
     this.onComplete = null;       // (success) => void
     this.onStatusChange = null;   // (status) => void
     this.onLoopIteration = null;  // (loopIndex, iter, total, done) => void
+    this.onSessionSpawned = null; // (sessionMeta) => void — lets the UI adopt it
   }
 
   // ── Public API ─────────────────────────────────────────────
@@ -211,15 +214,14 @@ export class ExecutionEngine {
       this.currentProcessId = procId;
       this._spawnedIds.add(procId);
 
-      const termCols = (window.app && window.app.term) ? window.app.term.cols : 80;
-      const termRows = (window.app && window.app.term) ? window.app.term.rows : 24;
+      const { cols, rows } = this._geometry();
 
       const result = await window.api.executeCommand({
         id: procId,
         command: cmd,
         cwd: this.cwd,
-        cols: termCols,
-        rows: termRows
+        cols,
+        rows,
       });
 
       if (result.error) {
@@ -228,13 +230,70 @@ export class ExecutionEngine {
 
       this._log(`   PID: ${result.pid}`, 'system');
 
-      // Route the terminal's keystrokes + output to this freshly spawned PTY.
-      if (window.app) {
-        window.app.activeProcessId = procId;
-      }
+      // Hand the new PTY to the UI so it gets a tab and its output is rendered.
+      this._notifySessionSpawned({
+        id: procId,
+        label: shortLabel(cmd),
+        agent: 'shell',
+        assurance: 'L0-native',
+        status: 'running',
+      });
 
       // Give the process a moment to initialize
       await this._sleep(800);
+    },
+
+    /**
+     * Open a session for a named agent profile and make it the target of the
+     * blocks that follow. This is how one workflow drives several accounts.
+     */
+    async agentStart(block) {
+      const profileId = block.params.profileId;
+      if (!profileId) throw new Error('No agent profile selected');
+
+      const { cols, rows } = this._geometry();
+      const result = await window.api.createSession({
+        profileId,
+        cwd: block.params.cwd || this.cwd,
+        cols,
+        rows,
+      });
+
+      // A routed profile that cannot be resolved fails closed; surface that
+      // rather than continuing against whatever session happened to be active.
+      if (!result || result.error) {
+        throw new Error(result?.error || `Could not start agent "${profileId}"`);
+      }
+
+      const meta = result.session || { id: result.id, label: profileId, agent: 'shell', assurance: 'L0-native', status: 'running' };
+      this.currentProcessId = result.id;
+      this._spawnedIds.add(result.id);
+      this._log(`🤖 Agent session: ${meta.label} [${meta.assurance}]`, 'system');
+      this._notifySessionSpawned(meta);
+
+      await this._sleep(Number(block.params.settleMs) || 1500);
+    },
+
+    /** Send a prompt to a specific agent session (or the current one). */
+    async agentSend(block) {
+      const target = block.params.profileId;
+      const text = block.params.text || '';
+      const pressEnter = block.params.pressEnter !== false;
+
+      const sessionId = target ? this._sessionForProfile(target) : this.currentProcessId;
+      if (!sessionId) {
+        throw new Error(target
+          ? `No live session for agent profile "${target}" — add an Agent Session block first`
+          : 'No active session to receive input');
+      }
+
+      this._log(`📨 → ${target || 'current session'}: "${text}"${pressEnter ? ' ⏎' : ''}`, 'input-echo');
+      await typeInto({
+        sessionId,
+        text,
+        pressEnter,
+        isAborted: () => this.aborted,
+      });
     },
 
     async wait(block) {
@@ -279,44 +338,13 @@ export class ExecutionEngine {
         'input-echo'
       );
 
-      // Simulate human typing so interactive CLIs don't drop fast chunks
-      if (text) {
-        for (const char of text) {
-          if (this.aborted) return;
-          const sent = await window.api.sendInput({
-            id: this.currentProcessId,
-            text: char,
-          });
-          if (!sent) {
-            throw new Error('No active process to receive input');
-          }
-          await this._sleep(75); // Slower typing (75ms) to give CLI event loops time to process
-        }
-      }
-
-      if (pressEnter) {
-        if (this.aborted) return;
-        // Send first Enter to confirm any potential autocomplete menu selection
-        const firstEnter = await window.api.sendInput({
-          id: this.currentProcessId,
-          text: '\r',
-        });
-        if (!firstEnter) {
-          throw new Error('No active process to receive Enter');
-        }
-        
-        await this._sleep(150); // Small wait for UI to update
-        if (this.aborted) return;
-        
-        // Send second Enter to actually submit the prompt
-        const secondEnter = await window.api.sendInput({
-          id: this.currentProcessId,
-          text: '\r',
-        });
-        if (!secondEnter) {
-          throw new Error('No active process to receive Enter');
-        }
-      }
+      // Shared with the quick-send bar so their pacing can never drift apart.
+      await typeInto({
+        sessionId: this.currentProcessId,
+        text,
+        pressEnter,
+        isAborted: () => this.aborted,
+      });
     },
 
     async keypress(block) {
@@ -405,6 +433,32 @@ export class ExecutionEngine {
     return new Promise(resolve => setTimeout(resolve, Math.max(0, ms)));
   }
 
+  /** Terminal geometry to spawn a PTY with, from the visible session. */
+  _geometry() {
+    const term = (typeof window !== 'undefined' && window.app) ? window.app.term : null;
+    return { cols: term?.cols ?? 80, rows: term?.rows ?? 24 };
+  }
+
+  /** Announce a PTY this run opened so the UI can give it a tab. */
+  _notifySessionSpawned(meta) {
+    this._spawnedIds.add(meta.id);
+    this.currentProcessId = meta.id;
+    if (this.onSessionSpawned) this.onSessionSpawned(meta);
+  }
+
+  /**
+   * The live session id for an agent profile, if this run started one.
+   * Lets a later Send block address "the Claude · work session" by profile.
+   */
+  _sessionForProfile(profileId) {
+    const sessions = (typeof window !== 'undefined' && window.app) ? window.app.sessions : null;
+    if (!sessions) return null;
+    const match = sessions.list().find(
+      s => s.profileId === profileId && s.status !== 'exited' && this._spawnedIds.has(s.id)
+    );
+    return match ? match.id : null;
+  }
+
   _logAbortOnce() {
     if (this._abortLogged) return;
     this._abortLogged = true;
@@ -422,6 +476,12 @@ export class ExecutionEngine {
   _notifyLoop(frame, done) {
     if (this.onLoopIteration) this.onLoopIteration(frame.start, frame.iter, frame.total, done);
   }
+}
+
+/** A short, readable tab label for an ad-hoc command session. */
+function shortLabel(command) {
+  const first = String(command).trim().split(/\s+/)[0] || 'shell';
+  return first.length > 24 ? `${first.slice(0, 23)}…` : first;
 }
 
 // ── Loop Structure Helpers ───────────────────────────────────

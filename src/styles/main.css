@@ -58,6 +58,13 @@
   --block-loop: #ec4899;
   --block-log: #6b7280;
   --block-sleep: #818cf8;
+  --block-agent: #22d3ee;
+
+  /* Assurance levels — routed is the strong guarantee, env-only is weaker.
+     The colours must not make L2 look equivalent to L1. */
+  --assurance-routed: #10b981;
+  --assurance-env: #f59e0b;
+  --assurance-native: #6e7a86;
 
   /* Spacing scale */
   --sp-1: 4px;
@@ -268,6 +275,8 @@ html, body {
 .palette-block[data-type="loopEnd"]::before  { background: var(--block-loop); }
 .palette-block[data-type="log"]::before      { background: var(--block-log); }
 .palette-block[data-type="sleep"]::before    { background: var(--block-sleep); }
+.palette-block[data-type="agentStart"]::before { background: var(--block-agent); }
+.palette-block[data-type="agentSend"]::before  { background: var(--block-agent); }
 
 .palette-footer {
   padding: var(--sp-2) var(--sp-3);
@@ -463,6 +472,8 @@ html, body {
 .block-stripe.loopEnd   { background: var(--block-loop); }
 .block-stripe.log       { background: var(--block-log); }
 .block-stripe.sleep     { background: var(--block-sleep); }
+.block-stripe.agentStart { background: var(--block-agent); }
+.block-stripe.agentSend  { background: var(--block-agent); }
 
 /* Drag handle */
 .drag-handle {
@@ -782,14 +793,166 @@ html, body {
   background: var(--accent-cyan);
 }
 
-/* Terminal pane (xterm) */
+/* ── Session Tabs ──────────────────────────────────────────────
+   One tab per live PTY. Every session keeps running and buffering while
+   hidden — switching tabs only changes which terminal is visible. */
+.session-bar {
+  display: flex;
+  align-items: stretch;
+  gap: var(--sp-1);
+  padding: var(--sp-1) var(--sp-2);
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+  min-height: 34px;
+}
+
+.session-tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  overflow-x: auto;
+  overflow-y: hidden;
+  flex: 1;
+  scrollbar-width: thin;
+}
+
+.session-tabs-empty {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  white-space: nowrap;
+  align-self: center;
+  padding-left: var(--sp-1);
+}
+
+.session-tab {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-glass);
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+
+.session-tab:hover { background: var(--surface-glass-hover); }
+
+.session-tab.active {
+  background: var(--surface-glass-active);
+  border-color: var(--accent-cyan);
+  color: var(--text-primary);
+}
+
+.session-tab.exited { opacity: 0.55; }
+
+.session-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-green);
+  flex-shrink: 0;
+}
+
+.session-tab.exited .session-dot { background: var(--text-muted); }
+
+/* Unread output arrived while this tab was in the background. */
+.session-tab.unread .session-dot {
+  background: var(--accent-cyan);
+  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.22);
+}
+
+.session-tab-label { max-width: 190px; overflow: hidden; text-overflow: ellipsis; }
+
+.session-assurance {
+  font-size: var(--font-size-xs);
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--assurance-native);
+  text-transform: lowercase;
+}
+
+.session-assurance.L1-routed { color: var(--assurance-routed); }
+.session-assurance.L2-env    { color: var(--assurance-env); }
+
+.session-close {
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: var(--font-size-xs);
+  line-height: 1;
+}
+
+.session-close:hover { color: var(--accent-red); }
+
+.session-add { flex-shrink: 0; align-self: center; }
+
+/* Terminal stack — one xterm per session, only the active one shown */
 .output-term {
   flex: 1;
   overflow: hidden;
   background: #0c0c0c;
   padding: 0;
   min-height: 80px;
+  position: relative;
 }
+
+.term-pane {
+  position: absolute;
+  inset: 0;
+}
+
+.term-pane.hidden { display: none; }
+
+/* ── Quick Send ────────────────────────────────────────────────
+   Ad-hoc prompt to one session, every session of one agent, or all. */
+.quick-send {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.quick-target {
+  flex-shrink: 0;
+  max-width: 180px;
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-1) var(--sp-2);
+  font-size: var(--font-size-sm);
+}
+
+.quick-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  font-size: var(--font-size-sm);
+  font-family: 'Cascadia Mono', 'Consolas', monospace;
+}
+
+.quick-input:focus {
+  outline: none;
+  border-color: var(--accent-cyan);
+}
+
+.quick-input:disabled { opacity: 0.5; }
 
 /* ── Sleep Countdown Banner ────────────────────────────────── */
 .sleep-banner {
@@ -1312,4 +1475,202 @@ html, body {
   font-size: 12px;
   line-height: 1;
   flex-shrink: 0;
+}
+
+/* ── Agents Modal ──────────────────────────────────────────────
+   Two lists with deliberately different framing: routed accounts are owned
+   by ai-agent-entrypoint and read-only here; local profiles are env-only and
+   weaker. The assurance chip on every row keeps that difference visible. */
+.modal-wide { max-width: 780px; }
+
+.agents-section { margin-bottom: var(--sp-5); }
+
+.agents-section-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-1);
+}
+
+.agents-section-head h3 {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--text-secondary);
+}
+
+.agents-section-note {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin-bottom: var(--sp-2);
+}
+
+.agents-section-note code {
+  font-family: var(--font-mono);
+  background: rgba(255, 255, 255, 0.06);
+  padding: 0 3px;
+  border-radius: 3px;
+}
+
+.assurance-chip {
+  font-size: var(--font-size-xs);
+  padding: 1px 7px;
+  border-radius: 10px;
+  border: 1px solid currentColor;
+  color: var(--assurance-native);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.assurance-chip.L1-routed { color: var(--assurance-routed); }
+.assurance-chip.L2-env    { color: var(--assurance-env); }
+
+.agent-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-glass);
+  cursor: pointer;
+  margin-bottom: var(--sp-2);
+  transition: background var(--t-fast), border-color var(--t-fast);
+}
+
+.agent-row:hover {
+  background: var(--surface-glass-hover);
+  border-color: var(--border-medium);
+}
+
+/* An account the entrypoint reports as broken cannot be started from here. */
+.agent-row.unavailable {
+  cursor: not-allowed;
+  opacity: 0.6;
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+.agent-row.unavailable:hover { background: var(--surface-glass); }
+
+.agent-icon { font-size: 16px; flex-shrink: 0; }
+
+.agent-main { flex: 1; min-width: 0; }
+
+.agent-name {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.agent-alias {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-left: var(--sp-1);
+}
+
+.agent-sub {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-actions {
+  display: flex;
+  gap: var(--sp-1);
+  flex-shrink: 0;
+  opacity: 0.55;
+  transition: opacity var(--t-fast);
+}
+
+.agent-row:hover .agent-actions { opacity: 1; }
+
+.agents-empty {
+  padding: var(--sp-4);
+  text-align: center;
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+  line-height: 1.7;
+}
+
+.agents-empty.error {
+  border-color: rgba(239, 68, 68, 0.35);
+  color: var(--text-secondary);
+}
+
+.agents-empty-detail {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  margin-top: var(--sp-1);
+}
+
+/* ── Agent Profile Editor ────────────────────────────────────── */
+.agent-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.agent-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.agent-field > span:first-child {
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+
+.agent-field input[type="text"],
+.agent-field select {
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: var(--sp-2);
+  font-size: var(--font-size-sm);
+  width: 100%;
+}
+
+.agent-field input[type="text"]:focus,
+.agent-field select:focus {
+  outline: none;
+  border-color: var(--accent-cyan);
+}
+
+.agent-field input:disabled { opacity: 0.55; }
+
+.agent-field small {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.agent-dir-row {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
+/* Where the credential-key rejection lands. */
+.agent-form-error {
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--radius-sm);
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
+  font-size: var(--font-size-xs);
+  line-height: 1.6;
 }

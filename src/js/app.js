@@ -12,6 +12,8 @@ import { ExecutionEngine, analyzeLoops } from './engine.js';
 import { TEMPLATES } from './templates.js';
 import { computeJobTarget, isDue, formatCountdown, DEFAULT_GRACE_MS } from './schedule.js';
 import { runSelfTest } from './selftest.js';
+import { SessionManager, TARGET_ACTIVE } from './sessions.js';
+import { AgentsUI } from './agents-ui.js';
 
 class App {
   constructor() {
@@ -309,6 +311,7 @@ class App {
     this._initSleep();
     this._initTemplates();
     this._initWorkflows();
+    this._initAgents();
     this._initModalDismissal();
     this._initVersionLabel();
     this._restoreSettings();
@@ -337,6 +340,30 @@ class App {
       if (log) log.style.flex = `0 0 ${stored.logPaneHeight}px`;
     }
     if (this.fitAddon) this.fitAddon.fit();
+  }
+
+  /**
+   * Agent accounts: routed Codex aliases discovered from ai-agent-entrypoint
+   * plus this app's own env-only profiles. Starting one opens a session tab.
+   */
+  _initAgents() {
+    this.agents = new AgentsUI({
+      onLog: (msg, type) => this._termLog(msg, type),
+      onStartSession: async (profileId) => {
+        const id = await this.sessions.startProfile(profileId, {
+          cwd: this.workflow?.defaultDirectory || this._defaultDirectory,
+        });
+        if (id) this._switchToTerminalTab();
+      },
+    });
+    this.agents.init();
+    // Populate the badge and the block-parameter dropdown without opening the modal.
+    this.agents.refresh().catch(() => {});
+  }
+
+  /** Bring the Terminal pane forward (used after starting a session). */
+  _switchToTerminalTab() {
+    document.getElementById('tab-term')?.click();
   }
 
   /** Fill the title-bar version from package.json instead of hardcoding it. */
@@ -591,7 +618,7 @@ class App {
     });
 
     document.getElementById('btn-clear-terminal').addEventListener('click', () => {
-      this.term.clear();
+      this.sessions.clearActive();
     });
 
     // Tab switching
@@ -621,8 +648,16 @@ class App {
 
   _initEngine() {
     const engine = this.engine;
+    this._runSessionIds = new Set();
 
     engine.onLog = (msg, type) => this._termLog(msg, type);
+
+    // Every PTY a run opens gets a tab, and is remembered so the *next* run
+    // can close it without touching sessions started by hand.
+    engine.onSessionSpawned = (meta) => {
+      this._runSessionIds.add(meta.id);
+      this.sessions.adopt(meta);
+    };
 
     engine.onBlockStart = (index) => {
       this._forEachBlock((el, i) => {
@@ -917,14 +952,12 @@ class App {
       this.engine.abort();
     }
 
-    // Prevent zombie processes: clear the default shell and anything left
-    // over from previous runs before spawning fresh PTYs.
-    await window.api.killAllProcesses().catch(() => {});
-    this.activeProcessId = null;
+    // Close only the sessions a *previous run* opened. Sessions you started
+    // yourself from the Agents panel are left alone — killing a logged-in
+    // agent because a workflow happened to start would be hostile.
+    this._closePreviousRunSessions();
 
-    // Clear log and terminal
     document.getElementById('output-log').innerHTML = '';
-    this.term.clear();
     this._clearLoopBadges();
     if (note) this._appendLog(note, 'system');
 
@@ -955,6 +988,17 @@ class App {
       dot.className = 'status-indicator error';
       document.getElementById('status-text').textContent = 'Failed';
     }
+  }
+
+  /**
+   * Close the sessions the last workflow run opened, leaving manually started
+   * ones untouched. Before multi-session this was a blanket killAllProcesses().
+   */
+  _closePreviousRunSessions() {
+    for (const id of this._runSessionIds || []) {
+      if (this.sessions.has(id)) this.sessions.close(id);
+    }
+    this._runSessionIds = new Set();
   }
 
   _syncParams() {
@@ -1040,73 +1084,32 @@ class App {
   // ── Terminal Output ────────────────────────────────────────
 
   _initTerminal() {
-    // Track the active PTY process ID for keyboard interaction
-    // (separate from engine.currentProcessId which resets between steps)
-    this.activeProcessId = null;
-
-    this.term = new Terminal({
-      fontFamily: "'Cascadia Mono', 'Cascadia Code', 'Consolas', monospace",
-      fontSize: 14,
-      cursorBlink: true,
-      cursorStyle: 'bar',
-      disableStdin: false
+    // Terminals are owned by the SessionManager: one xterm per live PTY, all
+    // rendering in the background, only the active tab visible. `activeProcessId`
+    // stays as the "session the engine and keyboard target" so the engine and
+    // saved workflows keep working unchanged.
+    this.sessions = new SessionManager({
+      onLog: (msg, type) => this._termLog(msg, type),
+      onActiveChange: (id) => { this.activeProcessId = id; },
     });
-    this._applyTerminalTheme('ps'); // default
-
-    this.fitAddon = new FitAddon.FitAddon();
-    this.term.loadAddon(this.fitAddon);
-
-    const container = document.getElementById('terminal-output');
-    container.innerHTML = '';
-    this.term.open(container);
-    this.fitAddon.fit();
-
-    // Handle resizes
-    window.addEventListener('resize', () => this.fitAddon.fit());
-    this.term.onResize(({ cols, rows }) => {
-      const pid = this.activeProcessId;
-      if (pid) {
-        window.api.resizeProcess({ id: pid, cols, rows }).catch(() => {});
-      }
+    this.sessions.mount({
+      stack: document.getElementById('terminal-output'),
+      tabs: document.getElementById('session-tabs'),
+      target: document.getElementById('quick-target'),
     });
-
-    // Support Ctrl+C Copy (if selection exists, copy; otherwise send SIGINT)
-    this.term.attachCustomKeyEventHandler((e) => {
-      if (e.ctrlKey && e.code === 'KeyC' && e.type === 'keydown') {
-        const selection = this.term.getSelection();
-        if (selection) {
-          navigator.clipboard.writeText(selection);
-          this.term.clearSelection();
-          return false;
-        }
-      }
-      return true;
-    });
-
-    // Forward ALL keystrokes to the running process
-    this.term.onData((data) => {
-      const pid = this.activeProcessId;
-      if (pid) {
-        window.api.sendInput({ id: pid, text: data }).catch(() => {});
-      }
-    });
+    this._applyTerminalTheme('ps'); // default until settings load
 
     // The app owns the single, persistent set of process IPC listeners.
-    // They are registered exactly once here and never removed, so the
-    // terminal keeps rendering across multiple workflow runs.
+    // They are registered exactly once here and never removed, so terminals
+    // keep rendering across multiple workflow runs.
     window.api.onProcessOutput((data) => {
-      if (data.id === this.activeProcessId) {
-        if (data.stream === 'stdout' || data.stream === 'stderr') {
-          this.term.write(data.data);
-        }
+      if (data.stream === 'stdout' || data.stream === 'stderr') {
+        this.sessions.handleOutput(data);
       }
     });
 
     window.api.onProcessExit((data) => {
-      if (data.id === this.activeProcessId) {
-        this.term.write(`\r\n\x1b[90m⬡ Process exited (code ${data.code})\x1b[0m\r\n`);
-        this.activeProcessId = null;
-      }
+      this.sessions.handleExit(data);
       if (this.engine) this.engine.handleProcessExit(data);
     });
 
@@ -1114,30 +1117,86 @@ class App {
       if (this.engine) this.engine.handleProcessError(data);
     });
 
-    // Start a default PowerShell session immediately so the terminal is interactive on load
+    window.api.onSessionStatus?.((meta) => this.sessions.handleStatus(meta));
+
+    this._initQuickSend();
+
+    // Start a plain shell so the terminal is interactive on load.
     this._spawnDefaultShell();
+  }
+
+  /** The active session's xterm. Engine and toolbar read cols/rows from this. */
+  get term() { return this.sessions?.activeTerm || null; }
+  get fitAddon() { return this.sessions?.activeFitAddon || null; }
+
+  // ── Quick Send ─────────────────────────────────────────────
+  // Fire an ad-hoc command or prompt at one session, every session of one
+  // agent, or all of them, using the same human-paced typing the engine uses.
+
+  _initQuickSend() {
+    const input = document.getElementById('quick-input');
+    const target = document.getElementById('quick-target');
+    const button = document.getElementById('btn-quick-send');
+
+    const send = async () => {
+      const text = input?.value ?? '';
+      if (!text.trim()) return;
+      const selector = target?.value || TARGET_ACTIVE;
+      const ids = this.sessions.resolveTargets(selector);
+      if (ids.length === 0) {
+        this._flashStatus('No live session to send to');
+        return;
+      }
+
+      input.value = '';
+      input.disabled = true;
+      if (button) button.disabled = true;
+      try {
+        const delivered = await this.sessions.sendTo(selector, text);
+        if (delivered.length) {
+          this._appendLog(`▸ Sent to ${delivered.join(', ')}: ${text}`, 'input-echo');
+        }
+      } finally {
+        input.disabled = false;
+        if (button) button.disabled = false;
+        input.focus();
+      }
+    };
+
+    button?.addEventListener('click', send);
+    input?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        send();
+      }
+    });
   }
 
   async _spawnDefaultShell() {
     try {
+      const id = 'default-shell-' + Date.now();
       const result = await window.api.executeCommand({
-        id: 'default-shell-' + Date.now(),
+        id,
         command: '', // Empty command drops into an interactive PowerShell session
         cwd: this.workflow?.defaultDirectory || this._defaultDirectory || '.',
-        cols: this.term.cols,
-        rows: this.term.rows
+        cols: 80,
+        rows: 24,
       });
-      if (result.error) {
-        throw new Error(result.error);
-      }
-      this.activeProcessId = result.id;
+      if (result.error) throw new Error(result.error);
+      this.sessions.adopt({
+        id: result.id,
+        label: 'Shell',
+        agent: 'shell',
+        assurance: 'L0-native',
+        status: 'running',
+      });
     } catch (e) {
       console.error('Failed to start default shell', e);
     }
   }
 
   _applyTerminalTheme(themeName) {
-    if (!this.term) return;
+    if (!this.sessions) return;
     const baseColors = {
       black: '#0c0c0c', red: '#c50f1f', green: '#13a10e', yellow: '#c19c00',
       blue: '#3b78ff', magenta: '#881798', cyan: '#3a96dd', white: '#cccccc',
@@ -1146,14 +1205,17 @@ class App {
       brightCyan: '#61d6d6', brightWhite: '#f2f2f2'
     };
     
+    let theme;
     if (themeName === 'dark') {
-      this.term.options.theme = { ...baseColors, background: '#0c0c0c', foreground: '#cccccc', cursor: '#ffffff', selectionBackground: '#264f78' };
+      theme = { ...baseColors, background: '#0c0c0c', foreground: '#cccccc', cursor: '#ffffff', selectionBackground: '#264f78' };
     } else if (themeName === 'light') {
-      this.term.options.theme = { ...baseColors, background: '#ffffff', foreground: '#333333', cursor: '#000000', selectionBackground: '#cce2ff' };
+      theme = { ...baseColors, background: '#ffffff', foreground: '#333333', cursor: '#000000', selectionBackground: '#cce2ff' };
     } else {
       // ps default
-      this.term.options.theme = { ...baseColors, background: '#012456', foreground: '#f2f2f2', cursor: '#ffffff', selectionBackground: '#264f78' };
+      theme = { ...baseColors, background: '#012456', foreground: '#f2f2f2', cursor: '#ffffff', selectionBackground: '#264f78' };
     }
+    // Applies to every session's terminal, present and future.
+    this.sessions.setTheme(theme);
   }
 
   _initResizer() {

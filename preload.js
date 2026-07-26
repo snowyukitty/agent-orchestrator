@@ -16,6 +16,13 @@ contextBridge.exposeInMainWorld('api', {
   getVersion: () => ipcRenderer.invoke('get-app-version'),
   listSessions: () => ipcRenderer.invoke('list-sessions'),
 
+  // Agent profiles: local (env-only) profiles plus routed accounts
+  // discovered from ai-agent-entrypoint.
+  listAgents: (params) => ipcRenderer.invoke('agents:list', params || {}),
+  saveAgentProfile: (profile) => ipcRenderer.invoke('agents:save', { profile }),
+  deleteAgentProfile: (id) => ipcRenderer.invoke('agents:delete', { id }),
+  createSession: (params) => ipcRenderer.invoke('session:create', params),
+
   // Persisted preferences (theme, window/panel geometry, entrypoint path).
   getSettings: () => ipcRenderer.invoke('get-settings'),
   updateSettings: (patch) => ipcRenderer.invoke('update-settings', patch),

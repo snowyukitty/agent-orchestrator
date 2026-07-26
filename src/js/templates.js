@@ -57,6 +57,20 @@ export const TEMPLATES = [
     ],
   },
   {
+    id: 'tpl-multi-account',
+    name: 'Two accounts, one workflow',
+    description: 'Open two agent accounts side by side and prompt each one. Pick the accounts in the Agent Session blocks.',
+    blocks: [
+      { type: 'directory', params: { path: '' } },
+      { type: 'agentStart', params: { profileId: '', settleMs: 8000 } },
+      { type: 'agentSend', params: { profileId: '', text: 'ping. reply ok only.', pressEnter: true } },
+      { type: 'agentStart', params: { profileId: '', settleMs: 8000 } },
+      { type: 'agentSend', params: { profileId: '', text: 'ping. reply ok only.', pressEnter: true } },
+      { type: 'wait', params: { duration: 60, unit: 'seconds' } },
+      { type: 'log', params: { message: 'Both accounts have been prompted.' } },
+    ],
+  },
+  {
     id: 'tpl-quick-command',
     name: 'Quick command',
     description: 'A minimal workflow: pick a directory and run a single command.',

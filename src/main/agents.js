@@ -1,0 +1,398 @@
+// ============================================================
+// Agent Profiles (main process)
+//
+// A profile is "which agent, as which account". There are two kinds, and
+// the difference in guarantee between them is real, so it is carried
+// explicitly rather than smoothed over:
+//
+//   routed (L1) — a Codex alias owned by ai-agent-entrypoint. We discover
+//                 aliases through its `codex doctor --all --json` route and
+//                 launch through `codex shell <alias>`. This app never
+//                 constructs the account environment and never reads the
+//                 manifest itself; it is a launch surface, not a source of
+//                 account truth.
+//
+//   local (L2)  — an orchestrator-local profile that sets a state-home
+//                 environment variable (CLAUDE_CONFIG_DIR, GROK_HOME, …) on
+//                 the child process only. ai-agent-entrypoint does not manage
+//                 those CLIs yet, so this is a weaker, env-only guarantee and
+//                 must never be described as account isolation.
+//
+// Boundaries this module enforces:
+//   • profile env may hold paths and flags, never secrets (see SECRET_KEY_PATTERN);
+//   • doctor output carries canonical account-home paths — sanitizeDoctorReport
+//     strips them before anything leaves this module;
+//   • an unresolvable routed alias fails closed instead of falling back to a
+//     native login.
+// ============================================================
+const path = require('path');
+const fs = require('fs');
+const { execFile } = require('child_process');
+
+const { readJson, writeJsonAtomic } = require('./store');
+
+const SCHEMA_VERSION = 1;
+
+/** Profile ids appear in workflow JSON and DOM attributes; keep them tame. */
+const PROFILE_ID_PATTERN = /^[A-Za-z0-9_:.-]{1,64}$/;
+
+/**
+ * Environment keys a profile may never set. Credentials belong in the tool's
+ * own state directory (which is exactly what the *_HOME / *_CONFIG_DIR
+ * variables select), not in this app's config file.
+ */
+const SECRET_KEY_PATTERN = /(TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API[_-]?KEY|APIKEY|ACCESS[_-]?KEY|PRIVATE[_-]?KEY)/i;
+
+/** Known CLI agents and the env var that selects their state directory. */
+const AGENT_KINDS = Object.freeze({
+  claude: { label: 'Claude Code', icon: '◆', command: 'claude', homeEnv: 'CLAUDE_CONFIG_DIR' },
+  codex:  { label: 'Codex',       icon: '◇', command: 'codex',  homeEnv: 'CODEX_HOME' },
+  grok:   { label: 'Grok',        icon: '▲', command: 'grok',   homeEnv: 'GROK_HOME' },
+  gemini: { label: 'Gemini',      icon: '●', command: 'gemini', homeEnv: 'GEMINI_CONFIG_DIR' },
+  shell:  { label: 'Shell',       icon: '⬡', command: '',       homeEnv: null },
+});
+
+const ASSURANCE = Object.freeze({
+  ROUTED: 'L1-routed',
+  ENV: 'L2-env',
+  NATIVE: 'L0-native',
+});
+
+/** Human wording for each level. Never call L2 "isolated". */
+const ASSURANCE_LABEL = Object.freeze({
+  [ASSURANCE.ROUTED]: 'routed by ai-agent-entrypoint',
+  [ASSURANCE.ENV]: 'env-only — a weaker guarantee than routed',
+  [ASSURANCE.NATIVE]: 'native login, no account selected',
+});
+
+// ── Validation ───────────────────────────────────────────────
+
+/**
+ * Reject secret-shaped environment keys.
+ * @throws Error naming the offending key.
+ */
+function assertSafeEnv(env) {
+  if (env === undefined || env === null) return {};
+  if (typeof env !== 'object' || Array.isArray(env)) {
+    throw new Error('Profile env must be an object of NAME → value');
+  }
+  const out = {};
+  for (const [rawKey, rawValue] of Object.entries(env)) {
+    const key = String(rawKey).trim();
+    if (!key) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      throw new Error(`Invalid environment variable name: "${key}"`);
+    }
+    if (SECRET_KEY_PATTERN.test(key)) {
+      throw new Error(
+        `"${key}" looks like a credential. This app stores paths and flags only — ` +
+        `point the agent at its own state directory instead (for example CLAUDE_CONFIG_DIR) ` +
+        `and log in inside that session.`
+      );
+    }
+    out[key] = String(rawValue ?? '');
+  }
+  return out;
+}
+
+/** Coerce stored/incoming profile JSON into a known-good record. */
+function normalizeProfile(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('Profile must be an object');
+  }
+  const id = String(raw.id ?? '').trim();
+  if (!PROFILE_ID_PATTERN.test(id)) {
+    throw new Error('Profile id must be 1-64 chars of letters, digits, and _ : . -');
+  }
+  const agent = String(raw.agent ?? 'shell').trim();
+  if (!AGENT_KINDS[agent]) {
+    throw new Error(`Unknown agent "${agent}". Known: ${Object.keys(AGENT_KINDS).join(', ')}`);
+  }
+  const displayName = String(raw.displayName ?? '').trim();
+  if (!displayName) throw new Error('Profile needs a display name');
+  if (displayName.length > 80) throw new Error('Display name is limited to 80 characters');
+
+  const command = String(raw.command ?? '').trim();
+  if (command.length > 2000) throw new Error('Command is too long');
+
+  const cwd = String(raw.cwd ?? '').trim();
+
+  return {
+    id,
+    kind: 'local',
+    agent,
+    displayName,
+    command: command || AGENT_KINDS[agent].command || '',
+    env: assertSafeEnv(raw.env),
+    cwd,
+  };
+}
+
+// ── Local profile store ──────────────────────────────────────
+
+function emptyProfileFile() {
+  return { schemaVersion: SCHEMA_VERSION, profiles: [] };
+}
+
+/**
+ * Read local profiles. A malformed entry is skipped rather than failing the
+ * whole list, so one bad profile never hides the rest.
+ */
+function loadLocalProfiles(filePath, onError = null) {
+  const raw = readJson(filePath, null);
+  const list = Array.isArray(raw?.profiles) ? raw.profiles : [];
+  const out = [];
+  for (const entry of list) {
+    try {
+      out.push(normalizeProfile(entry));
+    } catch (err) {
+      if (onError) onError(entry?.id ?? '(unnamed)', err);
+    }
+  }
+  return out;
+}
+
+/**
+ * Insert or replace one profile by id. Returns the saved profile.
+ *
+ * Omitting `env` on an existing profile keeps the stored env. That matters
+ * because env *values* are never sent to the renderer (they are machine-local
+ * paths), so the editor cannot echo them back on a rename — an omitted field
+ * means "unchanged", while an explicit `{}` clears the account selection.
+ */
+function saveLocalProfile(filePath, raw) {
+  const profiles = loadLocalProfiles(filePath);
+  const existing = profiles.find(p => p.id === String(raw?.id ?? '').trim());
+  const incoming = (raw && raw.env === undefined && existing)
+    ? { ...raw, env: existing.env }
+    : raw;
+
+  const profile = normalizeProfile(incoming);
+  const idx = profiles.findIndex(p => p.id === profile.id);
+  if (idx >= 0) profiles[idx] = profile;
+  else profiles.push(profile);
+  writeJsonAtomic(filePath, { schemaVersion: SCHEMA_VERSION, profiles });
+  return profile;
+}
+
+/** Remove one profile by id. Returns true when something was removed. */
+function deleteLocalProfile(filePath, id) {
+  const profiles = loadLocalProfiles(filePath);
+  const kept = profiles.filter(p => p.id !== id);
+  if (kept.length === profiles.length) return false;
+  writeJsonAtomic(filePath, { schemaVersion: SCHEMA_VERSION, profiles: kept });
+  return true;
+}
+
+// ── ai-agent-entrypoint integration ──────────────────────────
+
+/**
+ * Locate the ai-agent-entrypoint checkout.
+ * Prefers an explicit setting; otherwise looks for a sibling of the app
+ * directory. No absolute path is baked in — the workspace root's drive and
+ * location are not fixed.
+ *
+ * @returns {string|null} the repo root, or null when it cannot be found.
+ */
+function resolveEntrypointPath({ configured, appRoot, exists = fs.existsSync } = {}) {
+  const candidates = [];
+  if (configured && String(configured).trim()) candidates.push(String(configured).trim());
+  if (appRoot) {
+    candidates.push(path.resolve(appRoot, '..', 'ai-agent-entrypoint'));
+    candidates.push(path.resolve(appRoot, '..', '..', 'ai-agent-entrypoint'));
+  }
+  for (const candidate of candidates) {
+    if (exists(entrypointScript(candidate))) return candidate;
+  }
+  return null;
+}
+
+function entrypointScript(repoRoot) {
+  return path.join(repoRoot, 'bin', 'agent-entrypoint.ps1');
+}
+
+/**
+ * Strip a doctor report down to what the UI may see.
+ *
+ * `Home` and `ManifestPath` are canonical account-home paths. The entrypoint
+ * project classifies them as secret-adjacent metadata, so they are dropped
+ * here and never reach the renderer, a log line, or an exported workflow.
+ */
+function sanitizeDoctorReport(report) {
+  if (!report || typeof report !== 'object') return null;
+  const alias = String(report.Alias ?? '').trim();
+  if (!alias) return null;
+  return {
+    id: `codex:${alias}`,
+    kind: 'routed',
+    agent: 'codex',
+    alias,
+    displayName: String(report.DisplayName ?? `Codex ${alias}`),
+    assurance: ASSURANCE.ROUTED,
+    status: String(report.Status ?? 'unknown'),
+    authenticated: report.AuthenticationStatePresent === true,
+    errors: Array.isArray(report.Errors) ? report.Errors.map(String) : [],
+    warnings: Array.isArray(report.Warnings) ? report.Warnings.map(String) : [],
+  };
+}
+
+/** Parse a doctor `--json` payload into sanitized routed profiles. */
+function parseDoctorOutput(stdout) {
+  const parsed = JSON.parse(stdout);
+  const list = Array.isArray(parsed) ? parsed : [parsed];
+  return list.map(sanitizeDoctorReport).filter(Boolean);
+}
+
+/**
+ * Discover routed Codex accounts by asking ai-agent-entrypoint.
+ * Never throws: returns `{ profiles, error }` so a missing or invalid
+ * manifest shows up in the UI as "unavailable" instead of breaking startup.
+ */
+function discoverRoutedProfiles({ entrypointPath, timeoutMs = 20_000, run = execFile } = {}) {
+  return new Promise((resolve) => {
+    if (!entrypointPath) {
+      resolve({ profiles: [], error: 'ai-agent-entrypoint was not found. Set its path in Agents ▸ Settings to use routed Codex accounts.' });
+      return;
+    }
+    const script = entrypointScript(entrypointPath);
+    if (!fs.existsSync(script)) {
+      resolve({ profiles: [], error: `No agent-entrypoint.ps1 under "${entrypointPath}".` });
+      return;
+    }
+
+    run(
+      'pwsh',
+      ['-NoLogo', '-NoProfile', '-File', script, 'codex', 'doctor', '--all', '--json'],
+      { timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err && !stdout) {
+          const detail = String(stderr || err.message || '').trim().split('\n')[0];
+          resolve({ profiles: [], error: `Codex account discovery failed: ${detail || 'unknown error'}` });
+          return;
+        }
+        try {
+          resolve({ profiles: parseDoctorOutput(stdout), error: null });
+        } catch (parseErr) {
+          resolve({ profiles: [], error: `Could not read the account list: ${parseErr.message}` });
+        }
+      }
+    );
+  });
+}
+
+// ── Launch spec ──────────────────────────────────────────────
+
+/**
+ * Turn a profile into everything SessionRegistry.create() needs.
+ *
+ * @param {object} profile  a local profile, or a routed one from discovery
+ * @param {object} ctx
+ * @param {object} ctx.baseEnv        environment to inherit (usually process.env)
+ * @param {string} [ctx.entrypointPath] required for routed profiles
+ * @param {string} [ctx.defaultCwd]   used when the profile sets none
+ * @param {function} [ctx.exists]     injected for tests
+ * @returns {{file, args, env, cwd, profileId, agent, label, assurance}}
+ */
+function buildLaunchSpec(profile, ctx = {}) {
+  if (!profile || typeof profile !== 'object') {
+    throw new Error('No agent profile given');
+  }
+  const { baseEnv = {}, entrypointPath = null, defaultCwd = undefined, exists = fs.existsSync } = ctx;
+
+  if (profile.kind === 'routed') {
+    // Fail closed. Silently starting a native Codex when a managed account was
+    // requested would hand the wrong identity to whatever runs next.
+    if (!entrypointPath) {
+      throw new Error(
+        `Cannot start "${profile.displayName}": ai-agent-entrypoint was not found, ` +
+        `and a routed account must never fall back to the native login.`
+      );
+    }
+    const script = entrypointScript(entrypointPath);
+    if (!exists(script)) {
+      throw new Error(`Cannot start "${profile.displayName}": no agent-entrypoint.ps1 under "${entrypointPath}".`);
+    }
+    if (!profile.alias) {
+      throw new Error(`Cannot start "${profile.displayName}": the account alias is missing.`);
+    }
+    return {
+      // The entrypoint constructs the child environment itself; we pass ours
+      // through untouched rather than second-guessing its routing.
+      file: 'pwsh.exe',
+      args: ['-NoLogo', '-NoProfile', '-File', script, 'codex', 'shell', profile.alias],
+      env: { ...baseEnv },
+      cwd: profile.cwd || defaultCwd,
+      profileId: profile.id,
+      agent: 'codex',
+      label: profile.displayName,
+      assurance: ASSURANCE.ROUTED,
+    };
+  }
+
+  const local = normalizeProfile(profile);
+  const overrides = local.env;
+  const hasOverrides = Object.keys(overrides).length > 0;
+
+  return {
+    file: 'powershell.exe',
+    args: local.command ? ['-NoExit', '-Command', local.command] : ['-NoExit'],
+    env: { ...baseEnv, ...overrides },
+    cwd: local.cwd || defaultCwd,
+    profileId: local.id,
+    agent: local.agent,
+    label: local.displayName,
+    // An env-only profile is L2; one with no overrides selects no account at all.
+    assurance: hasOverrides ? ASSURANCE.ENV : ASSURANCE.NATIVE,
+  };
+}
+
+/** Public metadata for a profile — safe to send to the renderer. */
+function describeProfile(profile) {
+  if (!profile) return null;
+  const kind = profile.kind === 'routed' ? 'routed' : 'local';
+  const agent = AGENT_KINDS[profile.agent] ? profile.agent : 'shell';
+  const base = {
+    id: profile.id,
+    kind,
+    agent,
+    icon: AGENT_KINDS[agent].icon,
+    agentLabel: AGENT_KINDS[agent].label,
+    displayName: profile.displayName,
+    assurance: kind === 'routed'
+      ? ASSURANCE.ROUTED
+      : (Object.keys(profile.env || {}).length ? ASSURANCE.ENV : ASSURANCE.NATIVE),
+  };
+  base.assuranceLabel = ASSURANCE_LABEL[base.assurance];
+  if (kind === 'routed') {
+    return { ...base, alias: profile.alias, status: profile.status, authenticated: profile.authenticated, errors: profile.errors, warnings: profile.warnings };
+  }
+  return {
+    ...base,
+    command: profile.command,
+    cwd: profile.cwd,
+    // Names only — values can be machine-local paths the user may not want on screen.
+    envKeys: Object.keys(profile.env || {}),
+  };
+}
+
+module.exports = {
+  SCHEMA_VERSION,
+  PROFILE_ID_PATTERN,
+  SECRET_KEY_PATTERN,
+  AGENT_KINDS,
+  ASSURANCE,
+  ASSURANCE_LABEL,
+  assertSafeEnv,
+  normalizeProfile,
+  emptyProfileFile,
+  loadLocalProfiles,
+  saveLocalProfile,
+  deleteLocalProfile,
+  resolveEntrypointPath,
+  entrypointScript,
+  sanitizeDoctorReport,
+  parseDoctorOutput,
+  discoverRoutedProfiles,
+  buildLaunchSpec,
+  describeProfile,
+};

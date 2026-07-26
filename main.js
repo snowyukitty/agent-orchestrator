@@ -9,6 +9,7 @@ const fs = require('fs');
 const pty = require('node-pty');
 
 const { SessionRegistry } = require('./src/main/sessions');
+const agentProfiles = require('./src/main/agents');
 const { writeJsonAtomic, readJsonStrict, readJsonDir, ensureDir } = require('./src/main/store');
 const { loadSettings, saveSettings } = require('./src/main/settings');
 const {
@@ -250,6 +251,15 @@ function createWindow() {
   // Debug: log page load errors
   mainWindow.webContents.on('did-fail-load', (_e, code, desc) => {
     console.error(`[Main] Page load failed: ${code} - ${desc}`);
+  });
+
+  // Surface renderer errors in the main log. Without this a thrown exception
+  // in the renderer is invisible unless DevTools happens to be open.
+  mainWindow.webContents.on('console-message', (event) => {
+    const { level, message, lineNumber, sourceId } = event;
+    if (level !== 'error' && level !== 'warning') return;
+    const where = sourceId ? ` (${path.basename(sourceId)}:${lineNumber})` : '';
+    console.error(`[Renderer:${level}] ${message}${where}`);
   });
 
   mainWindow.webContents.on('did-finish-load', () => {
@@ -499,6 +509,100 @@ ipcMain.handle('kill-process', async (_event, payload) => {
 
 // ── IPC: Session Introspection ───────────────────────────────
 ipcMain.handle('list-sessions', async () => (sessions ? sessions.list() : []));
+
+// ── Agent Profiles ───────────────────────────────────────────
+// Local (L2 env-only) profiles live here; routed (L1) Codex accounts are
+// discovered from ai-agent-entrypoint, which owns them. See src/main/agents.js.
+
+let routedCache = { profiles: [], error: null, at: 0 };
+const ROUTED_CACHE_MS = 60_000;
+
+function agentProfileFile() {
+  return path.join(app.getPath('userData'), 'agents.json');
+}
+
+/** Where ai-agent-entrypoint lives: an explicit setting, else a sibling checkout. */
+function entrypointPath() {
+  const configured = loadSettings(settingsFile()).entrypointPath;
+  return agentProfiles.resolveEntrypointPath({ configured, appRoot: __dirname });
+}
+
+async function getRoutedProfiles({ force = false } = {}) {
+  if (!force && routedCache.at && Date.now() - routedCache.at < ROUTED_CACHE_MS) {
+    return routedCache;
+  }
+  const result = await agentProfiles.discoverRoutedProfiles({ entrypointPath: entrypointPath() });
+  routedCache = { ...result, at: Date.now() };
+  if (result.error) console.warn(`[Agents] routed discovery: ${result.error}`);
+  else console.log(`[Agents] discovered ${result.profiles.length} routed Codex account(s)`);
+  return routedCache;
+}
+
+function getLocalProfiles() {
+  return agentProfiles.loadLocalProfiles(agentProfileFile(), (id, err) => {
+    console.warn(`[Agents] Skipping malformed profile "${id}": ${err.message}`);
+  });
+}
+
+/** Find a profile by id across both sources. */
+async function findProfile(id) {
+  const local = getLocalProfiles().find(p => p.id === id);
+  if (local) return local;
+  const { profiles } = await getRoutedProfiles();
+  return profiles.find(p => p.id === id) || null;
+}
+
+ipcMain.handle('agents:list', async (_event, payload) => {
+  const { force = false } = payload && typeof payload === 'object' ? payload : {};
+  const routed = await getRoutedProfiles({ force });
+  return {
+    local: getLocalProfiles().map(agentProfiles.describeProfile),
+    routed: routed.profiles.map(agentProfiles.describeProfile),
+    routedError: routed.error,
+    entrypointFound: !!entrypointPath(),
+    agentKinds: Object.entries(agentProfiles.AGENT_KINDS).map(([key, def]) => ({
+      key, label: def.label, icon: def.icon, command: def.command, homeEnv: def.homeEnv,
+    })),
+  };
+});
+
+ipcMain.handle('agents:save', async (_event, payload) => {
+  const { profile } = asPlainObject(payload, 'agents:save payload');
+  // Throws with a user-facing message on a credential-shaped env key.
+  const saved = agentProfiles.saveLocalProfile(agentProfileFile(), profile);
+  console.log(`[Agents] saved local profile "${saved.id}"`);
+  return agentProfiles.describeProfile(saved);
+});
+
+ipcMain.handle('agents:delete', async (_event, payload) => {
+  const { id } = asPlainObject(payload, 'agents:delete payload');
+  const removed = agentProfiles.deleteLocalProfile(agentProfileFile(), String(id ?? ''));
+  if (removed) console.log(`[Agents] deleted local profile "${id}"`);
+  return removed;
+});
+
+// ── IPC: Start a Session from a Profile ──────────────────────
+ipcMain.handle('session:create', async (_event, payload) => {
+  try {
+    const p = asPlainObject(payload, 'session:create payload');
+    const profile = await findProfile(String(p.profileId ?? ''));
+    if (!profile) throw new Error(`No agent profile named "${p.profileId}"`);
+
+    const spec = agentProfiles.buildLaunchSpec(profile, {
+      baseEnv: process.env,
+      entrypointPath: entrypointPath(),
+      defaultCwd: resolveWorkingDir(p.cwd),
+    });
+    spec.cwd = resolveWorkingDir(spec.cwd);
+
+    const { id, pid } = sessions.create(spec, { cols: asCols(p.cols), rows: asRows(p.rows) });
+    return { id, pid, session: sessions.describe(id) };
+  } catch (err) {
+    // Fail-closed errors (a routed alias that cannot be resolved) land here.
+    console.error(`[IPC] session:create failed: ${err.message}`);
+    return { error: err.message };
+  }
+});
 
 // ── IPC: Keep Awake (power save blocker) ─────────────────────
 // The renderer requests this ON while any future scheduled run is pending,
