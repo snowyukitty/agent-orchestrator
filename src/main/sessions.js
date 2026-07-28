@@ -17,12 +17,44 @@ const { asCols, asRows } = require('./validate');
 /** How long to wait for a graceful exit before force-killing the tree. */
 const KILL_GRACE_MS = 1500;
 
+/** Enough rolling output to match text that straddles PTY chunks. Main-only. */
+const OUTPUT_HISTORY_CHARS = 64 * 1024;
+const MAX_WAIT_PATTERN_CHARS = 1000;
+const MATCH_WINDOW_CHARS = 8 * 1024;
+const MAX_IDLE_MS = 60 * 60 * 1000;
+const MAX_WAIT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+const TERMINATION_TIMEOUT_MS = 5000;
+
 let seq = 0;
+let waitSeq = 0;
 
 /** Mint a session id that satisfies validate.ID_PATTERN. */
 function nextSessionId(prefix = 'sess') {
   seq += 1;
   return `${prefix}-${Date.now().toString(36)}-${seq}`;
+}
+
+function nextWaitId() {
+  waitSeq += 1;
+  return `wait-${Date.now().toString(36)}-${waitSeq}`;
+}
+
+function asWaitMs(value, { name, allowZero, max }) {
+  const n = Number(value);
+  const min = allowZero ? 0 : 1;
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < min || n > max) {
+    throw new Error(`${name} must be an integer from ${min} to ${max} ms`);
+  }
+  return n;
+}
+
+/** Strip terminal control sequences before user-visible text matching. */
+function textForMatch(value) {
+  return String(value)
+    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
+    .replace(/\x1B(?:[@-_]|\[[0-?]*[ -/]*[@-~])/g, '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .toLowerCase();
 }
 
 class SessionRegistry {
@@ -44,6 +76,11 @@ class SessionRegistry {
     this._log = log || (() => {});
     /** @type {Map<string, object>} id → session record */
     this._sessions = new Map();
+    // node-pty's Windows ConPTY addon removes process batons from native exit
+    // threads without a lock. Serializing requested exits avoids racing those
+    // threads when several tabs are closed or the app quits at once.
+    this._terminationQueue = Promise.resolve();
+    this._pendingTerminations = 0;
   }
 
   /**
@@ -63,6 +100,7 @@ class SessionRegistry {
 
     // Never silently overwrite a live entry — that used to orphan the old PTY.
     if (this._sessions.has(sessionId)) {
+      this._settleAllWaiters(this._sessions.get(sessionId), 'replaced');
       this.kill(sessionId, 'replaced');
     }
 
@@ -76,6 +114,8 @@ class SessionRegistry {
       conptyInheritCursor: true,
     });
 
+    let resolveExit;
+    const exitPromise = new Promise(resolve => { resolveExit = resolve; });
     const session = {
       id: sessionId,
       pid: proc.pid,
@@ -89,11 +129,19 @@ class SessionRegistry {
       status: 'running',
       exitCode: null,
       killTimer: null,
+      outputSeq: 0,
+      outputChunks: [],
+      outputChars: 0,
+      waiters: new Map(),
+      exitPromise,
+      resolveExit,
     };
     this._sessions.set(sessionId, session);
 
     proc.onData((data) => {
-      this._onOutput({ id: sessionId, data: data.toString(), stream: 'stdout' });
+      const text = data.toString();
+      this._recordOutput(session, text);
+      this._onOutput({ id: sessionId, data: text, stream: 'stdout' });
     });
 
     proc.onExit(({ exitCode }) => {
@@ -104,6 +152,8 @@ class SessionRegistry {
       session.status = 'exited';
       session.exitCode = exitCode;
       session.proc = null;
+      session.resolveExit();
+      this._settleAllWaiters(session, 'exit');
       if (this._sessions.has(sessionId)) this._onStatus(this.describe(sessionId));
       this._onExit({ id: sessionId, code: exitCode });
     });
@@ -121,6 +171,101 @@ class SessionRegistry {
   isRunning(id) {
     const s = this._sessions.get(id);
     return !!(s && s.status === 'running' && s.proc);
+  }
+
+  /**
+   * Return an opaque output position. The renderer may hand this number back
+   * to waitForOutput, but never receives the buffered PTY text itself.
+   */
+  checkpoint(id) {
+    const s = this._sessions.get(id);
+    if (!s) return null;
+    return { outputSeq: s.outputSeq };
+  }
+
+  /**
+   * Wait until new output goes idle, contains a literal text pattern, the
+   * session exits, or the timeout backstop fires. Idle never completes before
+   * at least one output chunk after `afterSeq`; an already-quiet terminal is
+   * not evidence that an agent finished the prompt just sent.
+   *
+   * @returns {Promise<{reason, elapsedMs, outputSeq}>}
+   */
+  waitForOutput(id, {
+    waitId = nextWaitId(),
+    afterSeq,
+    idleMs = 2000,
+    pattern = '',
+    timeoutMs = 120_000,
+  } = {}) {
+    const s = this._sessions.get(id);
+    if (!s) throw new Error(`No session named "${id}"`);
+
+    const normalizedIdleMs = asWaitMs(idleMs, {
+      name: 'idleMs', allowZero: true, max: MAX_IDLE_MS,
+    });
+    const normalizedTimeoutMs = asWaitMs(timeoutMs, {
+      name: 'timeoutMs', allowZero: false, max: MAX_WAIT_TIMEOUT_MS,
+    });
+    if (typeof pattern !== 'string') throw new Error('pattern must be a string');
+    if (pattern.length > MAX_WAIT_PATTERN_CHARS) {
+      throw new Error(`pattern exceeds ${MAX_WAIT_PATTERN_CHARS} characters`);
+    }
+    if (!normalizedIdleMs && !pattern) {
+      throw new Error('Wait for agent needs idleMs or an output pattern');
+    }
+    if (typeof waitId !== 'string' || !waitId) throw new Error('waitId must be a non-empty string');
+    if (s.waiters.has(waitId)) throw new Error(`Wait "${waitId}" already exists`);
+
+    const requestedSeq = afterSeq === undefined || afterSeq === null
+      ? s.outputSeq
+      : Number(afterSeq);
+    if (!Number.isInteger(requestedSeq) || requestedSeq < 0) {
+      throw new Error('afterSeq must be a non-negative integer');
+    }
+    const startSeq = Math.min(requestedSeq, s.outputSeq);
+
+    if (s.status !== 'running' || !s.proc) {
+      return Promise.resolve({ reason: 'exit', elapsedMs: 0, outputSeq: s.outputSeq });
+    }
+
+    return new Promise((resolve) => {
+      const waiter = {
+        id: waitId,
+        afterSeq: startSeq,
+        idleMs: normalizedIdleMs,
+        pattern: textForMatch(pattern),
+        timeoutMs: normalizedTimeoutMs,
+        startedAt: Date.now(),
+        matchBuffer: '',
+        sawOutput: false,
+        lastOutputAt: null,
+        idleTimer: null,
+        timeoutTimer: null,
+        resolve,
+      };
+      s.waiters.set(waitId, waiter);
+
+      waiter.timeoutTimer = setTimeout(() => {
+        this._settleWaiter(s, waiter, 'timeout');
+      }, normalizedTimeoutMs);
+
+      // Include output that raced between the renderer's checkpoint and this
+      // IPC call. That is why the registry keeps a small bounded history.
+      for (const chunk of s.outputChunks) {
+        if (chunk.seq > startSeq) this._consumeWaiterOutput(s, waiter, chunk);
+        if (!s.waiters.has(waitId)) break;
+      }
+    });
+  }
+
+  /** Cancel one pending wait, normally because the workflow was stopped. */
+  cancelWait(id, waitId) {
+    const s = this._sessions.get(id);
+    const waiter = s?.waiters.get(waitId);
+    if (!s || !waiter) return false;
+    this._settleWaiter(s, waiter, 'cancelled');
+    return true;
   }
 
   write(id, text) {
@@ -141,6 +286,103 @@ class SessionRegistry {
       this._log(`[Sessions] resize failed for ${id}: ${err.message}`);
       return false;
     }
+  }
+
+  _recordOutput(s, data) {
+    const chunk = { seq: ++s.outputSeq, data, at: Date.now() };
+    s.outputChunks.push(chunk);
+    s.outputChars += data.length;
+
+    // Active waiters see the complete chunk even when it is larger than the
+    // rolling history retained for a later checkpoint-based wait.
+    for (const waiter of [...s.waiters.values()]) {
+      if (chunk.seq > waiter.afterSeq) this._consumeWaiterOutput(s, waiter, chunk);
+    }
+
+    while (s.outputChars > OUTPUT_HISTORY_CHARS && s.outputChunks.length > 1) {
+      const removed = s.outputChunks.shift();
+      s.outputChars -= removed.data.length;
+    }
+    if (s.outputChars > OUTPUT_HISTORY_CHARS && s.outputChunks.length === 1) {
+      const only = s.outputChunks[0];
+      only.data = only.data.slice(-OUTPUT_HISTORY_CHARS);
+      s.outputChars = only.data.length;
+    }
+  }
+
+  _consumeWaiterOutput(s, waiter, chunk) {
+    if (!s.waiters.has(waiter.id)) return;
+    waiter.sawOutput = true;
+    waiter.lastOutputAt = chunk.at;
+
+    if (waiter.pattern) {
+      const candidate = waiter.matchBuffer + chunk.data;
+      if (textForMatch(candidate).includes(waiter.pattern)) {
+        this._settleWaiter(s, waiter, 'match');
+        return;
+      }
+      // Keep enough raw overlap for a literal match (and its ANSI dressing)
+      // across the next PTY chunk without re-scanning the full 64 KiB history
+      // for every spinner redraw.
+      waiter.matchBuffer = candidate.slice(-MATCH_WINDOW_CHARS);
+    }
+    if (waiter.idleMs) this._armIdleTimer(s, waiter);
+  }
+
+  _armIdleTimer(s, waiter) {
+    if (!s.waiters.has(waiter.id) || !waiter.sawOutput || !waiter.idleMs) return;
+    if (waiter.idleTimer) clearTimeout(waiter.idleTimer);
+    const delay = Math.max(0, waiter.lastOutputAt + waiter.idleMs - Date.now());
+    waiter.idleTimer = setTimeout(() => {
+      this._settleWaiter(s, waiter, 'idle');
+    }, delay);
+  }
+
+  _settleWaiter(s, waiter, reason) {
+    if (!s.waiters.has(waiter.id)) return false;
+    s.waiters.delete(waiter.id);
+    if (waiter.idleTimer) clearTimeout(waiter.idleTimer);
+    if (waiter.timeoutTimer) clearTimeout(waiter.timeoutTimer);
+    waiter.resolve({
+      reason,
+      elapsedMs: Math.max(0, Date.now() - waiter.startedAt),
+      outputSeq: s.outputSeq,
+    });
+    return true;
+  }
+
+  _settleAllWaiters(s, reason) {
+    if (!s?.waiters) return;
+    for (const waiter of [...s.waiters.values()]) {
+      this._settleWaiter(s, waiter, reason);
+    }
+  }
+
+  _enqueueTermination(task) {
+    this._pendingTerminations += 1;
+    const queued = this._terminationQueue.then(task, task).finally(() => {
+      this._pendingTerminations -= 1;
+    });
+    // Keep the queue usable after one failed task without creating an
+    // unhandled rejection on the internal tail promise.
+    this._terminationQueue = queued.then(() => undefined, () => undefined);
+    return queued;
+  }
+
+  /** Wait until every queued ConPTY termination has delivered its exit event. */
+  whenTerminationsComplete() {
+    return this._terminationQueue;
+  }
+
+  _waitForExit(s, timeoutMs = TERMINATION_TIMEOUT_MS) {
+    if (!s || s.status === 'exited' || !s.proc) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      s.exitPromise.then(() => {
+        clearTimeout(timer);
+        resolve(true);
+      });
+    });
   }
 
   /**
@@ -186,6 +428,25 @@ class SessionRegistry {
     return killed;
   }
 
+  /**
+   * Kill live sessions one at a time and wait for node-pty's JS exit callback
+   * before initiating the next exit. This is the safe path for multi-session
+   * shutdown and bulk-close operations on Windows.
+   */
+  killAllSequential(reason = 'shutdown') {
+    return this._enqueueTermination(async () => {
+      const live = [...this._sessions.values()].filter(s => s.status === 'running');
+      for (const s of live) {
+        if (s.status !== 'running') continue;
+        this.kill(s.id, reason);
+        if (!await this._waitForExit(s)) {
+          this._log(`[Sessions] timed out waiting for ${s.id} to exit before terminating the next session`);
+        }
+      }
+      return live.length;
+    });
+  }
+
   /** Drop exited sessions from the registry. Returns how many were removed. */
   prune() {
     let removed = 0;
@@ -208,9 +469,26 @@ class SessionRegistry {
   remove(id) {
     const s = this._sessions.get(id);
     if (!s) return false;
+    this._settleAllWaiters(s, 'removed');
     if (s.status === 'running') this.kill(id, 'closed');
     this._sessions.delete(id);
     return true;
+  }
+
+  /**
+   * Queued counterpart to remove(), used by IPC so rapid tab closes and
+   * workflow aborts do not terminate several ConPTY sessions concurrently.
+   */
+  removeAndWait(id) {
+    return this._enqueueTermination(async () => {
+      const s = this._sessions.get(id);
+      if (!s) return false;
+      this.remove(id);
+      if (!await this._waitForExit(s)) {
+        this._log(`[Sessions] timed out waiting for removed session ${id} to exit`);
+      }
+      return true;
+    });
   }
 
   /**
@@ -242,6 +520,10 @@ class SessionRegistry {
 
   get size() {
     return this._sessions.size;
+  }
+
+  get hasPendingTermination() {
+    return this._pendingTerminations > 0;
   }
 }
 

@@ -216,6 +216,21 @@
             Codex accounts resolved by <strong>ai-agent-entrypoint</strong>, which owns the
             account manifest and builds each child environment. This app only launches them.
           </p>
+          <div class="agents-entrypoint-setting">
+            <label for="agents-entrypoint-path">Routed account source</label>
+            <div class="agents-entrypoint-row">
+              <input type="text" id="agents-entrypoint-path"
+                     placeholder="Auto-detect a sibling ai-agent-entrypoint checkout"
+                     spellcheck="false">
+              <button class="btn btn-icon btn-sm" id="btn-browse-entrypoint"
+                      type="button" title="Choose ai-agent-entrypoint folder">📂</button>
+              <button class="btn btn-secondary btn-sm" id="btn-save-entrypoint"
+                      type="button">Save</button>
+            </div>
+            <small id="agents-entrypoint-status">
+              Leave blank to auto-detect a sibling checkout. This stores a machine-local path only.
+            </small>
+          </div>
           <div id="agents-routed-list"></div>
         </div>
 

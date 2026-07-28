@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="default-src 'self'; connect-src 'none'; img-src 'self'; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+  >
+  <meta
+    name="description"
+    content="A practical field guide to routing accounts, running concurrent CLI agents, and synchronizing workflows on real output."
+  >
+  <meta name="theme-color" content="#07111f">
+  <title>Agents Orchestrator — Field Guide</title>
+  <link rel="icon" href="assets/icon.png">
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+
+  <header class="site-header" aria-label="Site header">
+    <a class="brand" href="#top" aria-label="Agents Orchestrator field guide home">
+      <img src="assets/icon.png" alt="" width="34" height="34">
+      <span>
+        <strong>Agents Orchestrator</strong>
+        <small>Field guide · v0.2</small>
+      </span>
+    </a>
+
+    <nav class="site-nav" aria-label="Field guide">
+      <a href="#start">Start</a>
+      <a href="#assurance">Accounts</a>
+      <a href="#compose">Compose</a>
+      <a href="#wait">Wait Lab</a>
+      <a href="#architecture">Boundaries</a>
+    </nav>
+
+    <a
+      class="repo-link"
+      href="https://github.com/snowyukitty/agents-orchestrator"
+      target="_blank"
+      rel="noreferrer"
+    >
+      GitHub
+      <span aria-hidden="true">↗</span>
+    </a>
+  </header>
+
+  <main id="main-content">
+    <section class="hero section-shell" id="top" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="pulse-dot" aria-hidden="true"></span> Desktop control plane for CLI agents</p>
+        <h1 id="hero-title">Run many agents.<br><span>Continue on signal.</span></h1>
+        <p class="hero-lede">
+          Give every account its own terminal, fan work out in parallel, and move
+          the workflow forward when the output says it is ready—not when a timer
+          merely hopes it is.
+        </p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="#compose">Build a fan-out recipe</a>
+          <a class="button button-quiet" href="#start">Follow the first-run path</a>
+        </div>
+        <ul class="trust-strip" aria-label="Product guarantees">
+          <li>No credentials stored</li>
+          <li>Fail-closed routing</li>
+          <li>Output stays main-process-only</li>
+        </ul>
+      </div>
+
+      <div class="signal-board" aria-label="Three agent sessions advancing on output signals">
+        <div class="board-topline">
+          <span>LIVE WORKFLOW</span>
+          <span class="board-sequence">SEQ 1842</span>
+        </div>
+
+        <div class="agent-lane lane-codex">
+          <div class="lane-identity">
+            <span class="agent-mark">C</span>
+            <span><strong>Codex · build</strong><small>L1 · routed</small></span>
+          </div>
+          <div class="lane-track" aria-hidden="true">
+            <span class="track-fill"></span>
+            <span class="track-node node-start"></span>
+            <span class="track-node node-live"></span>
+            <span class="track-node node-end"></span>
+          </div>
+          <span class="lane-state state-match">MATCHED</span>
+        </div>
+
+        <div class="agent-lane lane-claude">
+          <div class="lane-identity">
+            <span class="agent-mark">A</span>
+            <span><strong>Claude · review</strong><small>L2 · env-only</small></span>
+          </div>
+          <div class="lane-track" aria-hidden="true">
+            <span class="track-fill"></span>
+            <span class="track-node node-start"></span>
+            <span class="track-node node-live"></span>
+            <span class="track-node node-end"></span>
+          </div>
+          <span class="lane-state state-working">WORKING</span>
+        </div>
+
+        <div class="agent-lane lane-shell">
+          <div class="lane-identity">
+            <span class="agent-mark">›_</span>
+            <span><strong>PowerShell · verify</strong><small>L0 · native</small></span>
+          </div>
+          <div class="lane-track" aria-hidden="true">
+            <span class="track-fill"></span>
+            <span class="track-node node-start"></span>
+            <span class="track-node node-live"></span>
+            <span class="track-node node-end"></span>
+          </div>
+          <span class="lane-state state-queued">QUEUED</span>
+        </div>
+
+        <div class="board-footer">
+          <span class="checkpoint-icon" aria-hidden="true">◇</span>
+          <span><strong>Wait for Agent</strong><small>output contains “REVIEW_COMPLETE”</small></span>
+          <span class="board-ready">2 / 3 ready</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="principles section-shell" aria-label="Core product model">
+      <article>
+        <span class="principle-number">01</span>
+        <h2>Route identity</h2>
+        <p>Select an agent and an account. The assurance badge tells you what the launch can actually guarantee.</p>
+      </article>
+      <article>
+        <span class="principle-number">02</span>
+        <h2>Fan out work</h2>
+        <p>Sessions keep running behind their tabs, so one workflow can prompt several accounts without losing output.</p>
+      </article>
+      <article>
+        <span class="principle-number">03</span>
+        <h2>Join on evidence</h2>
+        <p>Checkpoint before submission, then continue on a literal output marker or a period of new-output silence.</p>
+      </article>
+    </section>
+
+    <section class="guide-section section-shell" id="start" aria-labelledby="start-title">
+      <div class="section-heading">
+        <p class="section-kicker">FIRST RUN</p>
+        <h2 id="start-title">From install to a trustworthy run.</h2>
+        <p>Use the smallest path that matches the account guarantee you really have.</p>
+      </div>
+
+      <ol class="step-rail">
+        <li>
+          <span class="step-index">1</span>
+          <div>
+            <h3>Open Agent Accounts</h3>
+            <p>Choose <strong>Agents</strong> in the bottom toolbar. Routed Codex accounts are discovered; local profiles are created here.</p>
+          </div>
+          <span class="step-tag">Inspect</span>
+        </li>
+        <li>
+          <span class="step-index">2</span>
+          <div>
+            <h3>Confirm the badge</h3>
+            <p>L1 means routed. L2 means env-only. L0 means native. These are different guarantees, not cosmetic labels.</p>
+          </div>
+          <span class="step-tag">Verify</span>
+        </li>
+        <li>
+          <span class="step-index">3</span>
+          <div>
+            <h3>Start one session</h3>
+            <p>Open the account and log in inside its terminal if needed. The app does not accept or persist credentials.</p>
+          </div>
+          <span class="step-tag">Connect</span>
+        </li>
+        <li>
+          <span class="step-index">4</span>
+          <div>
+            <h3>Graduate to a workflow</h3>
+            <p>Pair Agent Session, Send to Agent, and Wait for Agent blocks. Add the second account only after the first path is sound.</p>
+          </div>
+          <span class="step-tag">Automate</span>
+        </li>
+      </ol>
+
+      <aside class="recovery-callout">
+        <div>
+          <span class="callout-label">ROUTED SOURCE NOT FOUND?</span>
+          <h3>Fix it where the error points.</h3>
+          <p>
+            In <strong>Agent Accounts → Routed account source</strong>, browse to
+            the local <code>ai-agent-entrypoint</code> checkout, save, and refresh.
+            Leave it blank to use sibling auto-detection.
+          </p>
+        </div>
+        <span class="callout-route" aria-hidden="true">Agents <b>→</b> Source <b>→</b> Refresh</span>
+      </aside>
+    </section>
+
+    <section class="guide-section assurance-section" id="assurance" aria-labelledby="assurance-title">
+      <div class="section-shell">
+        <div class="section-heading split-heading">
+          <div>
+            <p class="section-kicker">ACCOUNT ASSURANCE</p>
+            <h2 id="assurance-title">Say exactly what the launch guarantees.</h2>
+          </div>
+          <p>Assurance describes construction of the child session. It never claims that an upstream agent service is available or authenticated.</p>
+        </div>
+
+        <div class="assurance-explorer">
+          <div class="assurance-tabs" role="tablist" aria-label="Assurance levels">
+            <button
+              id="tab-l1"
+              class="assurance-tab is-active"
+              type="button"
+              role="tab"
+              aria-selected="true"
+              aria-controls="panel-l1"
+              data-tab-target="panel-l1"
+            >
+              <span class="level-dot level-l1" aria-hidden="true"></span>
+              <span><strong>L1 · routed</strong><small>Managed account route</small></span>
+            </button>
+            <button
+              id="tab-l2"
+              class="assurance-tab"
+              type="button"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-l2"
+              data-tab-target="panel-l2"
+              tabindex="-1"
+            >
+              <span class="level-dot level-l2" aria-hidden="true"></span>
+              <span><strong>L2 · env-only</strong><small>Child environment profile</small></span>
+            </button>
+            <button
+              id="tab-l0"
+              class="assurance-tab"
+              type="button"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-l0"
+              data-tab-target="panel-l0"
+              tabindex="-1"
+            >
+              <span class="level-dot level-l0" aria-hidden="true"></span>
+              <span><strong>L0 · native</strong><small>No account selected</small></span>
+            </button>
+          </div>
+
+          <div class="assurance-panels">
+            <article id="panel-l1" class="assurance-panel" role="tabpanel" aria-labelledby="tab-l1">
+              <div class="panel-level level-copy-l1">L1</div>
+              <div>
+                <p class="panel-overline">STRONGEST AVAILABLE ROUTE</p>
+                <h3>Alias resolution is owned by <code>ai-agent-entrypoint</code>.</h3>
+                <p>
+                  The orchestrator discovers Codex aliases with doctor output and
+                  launches through <code>codex shell &lt;alias&gt;</code>. If that
+                  route cannot be resolved, launch fails closed.
+                </p>
+                <ul class="boundary-list">
+                  <li><span>✓</span> Account route is centrally resolved</li>
+                  <li><span>✓</span> Canonical paths are sanitized before UI</li>
+                  <li><span>—</span> Manifest is never edited by this app</li>
+                </ul>
+              </div>
+              <div class="truth-card">
+                <span>Use this wording</span>
+                <strong>Routed account</strong>
+                <p>Do not expand this into a claim about service-side isolation.</p>
+              </div>
+            </article>
+
+            <article id="panel-l2" class="assurance-panel" role="tabpanel" aria-labelledby="tab-l2" hidden>
+              <div class="panel-level level-copy-l2">L2</div>
+              <div>
+                <p class="panel-overline">LOCAL CHILD ENVIRONMENT</p>
+                <h3>A profile sets state-home paths on one child process.</h3>
+                <p>
+                  Use this for agent CLIs without managed routing. Create a profile
+                  with path or flag environment values, then authenticate inside
+                  the resulting terminal.
+                </p>
+                <ul class="boundary-list">
+                  <li><span>✓</span> Profile environment applies to one child</li>
+                  <li><span>✓</span> Secret-looking keys are rejected</li>
+                  <li><span>—</span> It is weaker than managed routing</li>
+                </ul>
+              </div>
+              <div class="truth-card">
+                <span>Use this wording</span>
+                <strong>Env-only profile</strong>
+                <p>Never call this account-isolated or equivalent to L1.</p>
+              </div>
+            </article>
+
+            <article id="panel-l0" class="assurance-panel" role="tabpanel" aria-labelledby="tab-l0" hidden>
+              <div class="panel-level level-copy-l0">L0</div>
+              <div>
+                <p class="panel-overline">PLAIN NATIVE SHELL</p>
+                <h3>No account route or profile is selected.</h3>
+                <p>
+                  The orchestrator opens the native shell with no account-specific
+                  construction. It is useful for ordinary commands and explicit
+                  manual work.
+                </p>
+                <ul class="boundary-list">
+                  <li><span>✓</span> Minimal, predictable shell launch</li>
+                  <li><span>✓</span> Useful for verification commands</li>
+                  <li><span>—</span> No account guarantee is claimed</li>
+                </ul>
+              </div>
+              <div class="truth-card">
+                <span>Use this wording</span>
+                <strong>Native session</strong>
+                <p>Identity is whatever the unmodified shell already provides.</p>
+              </div>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="guide-section section-shell" id="compose" aria-labelledby="compose-title">
+      <div class="section-heading split-heading">
+        <div>
+          <p class="section-kicker">RECIPE COMPOSER</p>
+          <h2 id="compose-title">Turn a team shape into blocks.</h2>
+        </div>
+        <p>
+          The composer is a planning aid. It keeps profile IDs blank so the
+          resulting idea stays portable across machines.
+        </p>
+      </div>
+
+      <div class="composer">
+        <div class="composer-controls" aria-label="Recipe controls">
+          <label>
+            Team shape
+            <select id="topology-select">
+              <option value="pair">Builder + reviewer</option>
+              <option value="triad">Builder + reviewer + verifier</option>
+              <option value="compare">Two proposals + synthesizer</option>
+            </select>
+          </label>
+          <label>
+            Completion marker
+            <input id="marker-input" type="text" maxlength="64" value="REVIEW_COMPLETE" spellcheck="false">
+          </label>
+          <label>
+            Idle fallback
+            <span class="number-field"><input id="idle-input" type="number" min="100" max="600000" step="100" value="3000"><span>ms</span></span>
+          </label>
+          <label>
+            Safety timeout
+            <span class="number-field"><input id="timeout-input" type="number" min="100" max="3600000" step="1000" value="90000"><span>ms</span></span>
+          </label>
+        </div>
+
+        <div class="recipe-output">
+          <div class="recipe-toolbar">
+            <div>
+              <span class="recipe-label">BLOCK PLAN</span>
+              <strong id="recipe-title">Builder + reviewer</strong>
+            </div>
+            <button class="copy-button" type="button" id="copy-recipe" data-copy-target="recipe-summary">
+              Copy plan
+            </button>
+          </div>
+          <div class="recipe-lanes" id="recipe-lanes" aria-live="polite"></div>
+          <pre class="recipe-summary" id="recipe-summary" tabindex="0"></pre>
+          <p class="recipe-note">
+            <span aria-hidden="true">◇</span>
+            Sends can happen back-to-back; each session works concurrently.
+            Wait blocks then join those lanes on output evidence.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <section class="guide-section wait-section" id="wait" aria-labelledby="wait-title">
+      <div class="section-shell">
+        <div class="section-heading split-heading">
+          <div>
+            <p class="section-kicker">OUTPUT-AWARE WAIT LAB</p>
+            <h2 id="wait-title">A fast reply should never fall through the gap.</h2>
+          </div>
+          <p>
+            The checkpoint is captured after text is typed and before Enter is
+            submitted. Matching starts from that opaque sequence, even if output
+            arrives before the next block begins.
+          </p>
+        </div>
+
+        <div class="wait-lab">
+          <div class="wait-console">
+            <div class="console-header">
+              <span><i></i><i></i><i></i></span>
+              <strong>session / review</strong>
+              <span id="simulation-clock">ready</span>
+            </div>
+            <div class="console-body" id="simulation-log" aria-live="polite" aria-atomic="false">
+              <p><span>00</span> Press replay to watch a race-safe wait.</p>
+            </div>
+            <div class="signal-progress" aria-hidden="true"><span></span></div>
+            <div class="console-actions">
+              <button class="button button-primary" type="button" id="run-simulation">Replay the wait</button>
+              <span id="simulation-result" class="simulation-result">Waiting for a run</span>
+            </div>
+          </div>
+
+          <div class="wait-rules">
+            <article>
+              <span class="rule-number">1</span>
+              <div><h3>Checkpoint</h3><p>An opaque output sequence is captured before submission.</p></div>
+            </article>
+            <article>
+              <span class="rule-number">2</span>
+              <div><h3>Observe</h3><p>Only new, bounded PTY activity is considered; ANSI controls are ignored for literal matching.</p></div>
+            </article>
+            <article>
+              <span class="rule-number">3</span>
+              <div><h3>Continue</h3><p>A case-insensitive literal match or idle period wins. Timeout logs a warning and continues.</p></div>
+            </article>
+            <div class="rule-advice">
+              <span>BEST PRACTICE</span>
+              Ask the agent to emit one distinctive marker such as
+              <code>REVIEW_COMPLETE</code>. Idle observes silence, not semantic success.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="guide-section section-shell" id="architecture" aria-labelledby="architecture-title">
+      <div class="section-heading split-heading">
+        <div>
+          <p class="section-kicker">TRUST BOUNDARIES</p>
+          <h2 id="architecture-title">The UI gets status. The matcher keeps output.</h2>
+        </div>
+        <p>
+          Renderer-facing objects are deliberately boring: session IDs, labels,
+          assurance, state, elapsed time, and opaque sequence numbers.
+        </p>
+      </div>
+
+      <div class="boundary-map" aria-label="Data flow from renderer through the main process to PTY sessions">
+        <article>
+          <span class="boundary-tag">RENDERER</span>
+          <h3>Workflow + terminals</h3>
+          <ul>
+            <li>Block parameters</li>
+            <li>Session tabs and status</li>
+            <li>Opaque checkpoints</li>
+          </ul>
+        </article>
+        <div class="boundary-bridge" aria-hidden="true">
+          <span>validated IPC</span>
+          <b>→</b>
+        </div>
+        <article class="boundary-core">
+          <span class="boundary-tag">MAIN PROCESS</span>
+          <h3>SessionRegistry</h3>
+          <ul>
+            <li>Bounded 64 KiB history</li>
+            <li>Idle and pattern waiters</li>
+            <li>Serialized ConPTY exits</li>
+          </ul>
+        </article>
+        <div class="boundary-bridge" aria-hidden="true">
+          <span>PTY stream</span>
+          <b>↔</b>
+        </div>
+        <article>
+          <span class="boundary-tag">CHILD PROCESS</span>
+          <h3>Agent session</h3>
+          <ul>
+            <li>Routed or local launch</li>
+            <li>Interactive CLI output</li>
+            <li>Process-tree lifecycle</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="never-crosses">
+        <span class="never-icon" aria-hidden="true">⊘</span>
+        <div>
+          <strong>Never crosses into workflow JSON or session metadata</strong>
+          <p>PTY text, child environment values, canonical account-home paths, and the resolved executable.</p>
+        </div>
+      </div>
+
+      <div class="operations-grid">
+        <article>
+          <span class="operation-label">WHEN A ROUTE BREAKS</span>
+          <h3>Fail closed, then repair the source.</h3>
+          <p>A missing routed alias does not silently open the native login. Correct discovery and retry.</p>
+        </article>
+        <article>
+          <span class="operation-label">WHEN A WAIT TIMES OUT</span>
+          <h3>Treat timeout as a backstop.</h3>
+          <p>Inspect the session, choose a more distinctive output marker, and budget for the agent’s slow path.</p>
+        </article>
+        <article>
+          <span class="operation-label">WHEN A RUN STOPS</span>
+          <h3>Close only what the run owns.</h3>
+          <p>Manually started sessions remain available; workflow-owned process trees are terminated in sequence.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="guide-section developer-section" id="develop" aria-labelledby="develop-title">
+      <div class="section-shell">
+        <div class="section-heading split-heading">
+          <div>
+            <p class="section-kicker">DEVELOPER HANDOFF</p>
+            <h2 id="develop-title">One local loop. Three honest checks.</h2>
+          </div>
+          <p>
+            Main-process logic is CommonJS and unit tested. Renderer modules are
+            exercised by the Electron self-test.
+          </p>
+        </div>
+
+        <div class="developer-grid">
+          <div class="command-card">
+            <div class="command-card-head">
+              <span>PowerShell</span>
+              <button class="copy-button" type="button" data-copy-target="dev-commands">Copy commands</button>
+            </div>
+            <pre id="dev-commands"><code>npm install
+npm start
+
+npm run check
+npm test
+npm run smoke</code></pre>
+          </div>
+
+          <div class="check-stack">
+            <article><code>npm run check</code><span>Syntax + static docs contract</span></article>
+            <article><code>npm test</code><span>Main-process + renderer behavior</span></article>
+            <article><code>npm run smoke</code><span>Electron startup and cleanup path</span></article>
+            <a
+              href="https://github.com/snowyukitty/agents-orchestrator#development"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Read the repository guide <span aria-hidden="true">↗</span>
+            </a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div>
+      <img src="assets/icon.png" alt="" width="28" height="28">
+      <span><strong>Agents Orchestrator</strong><small>Signal-aware automation for CLI agents.</small></span>
+    </div>
+    <p>No backend · No analytics · No credential collection</p>
+    <span>© <span id="current-year">2026</span></span>
+  </footer>
+</body>
+</html>

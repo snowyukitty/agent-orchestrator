@@ -14,7 +14,7 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..');
 
 // Directories walked recursively, plus individual entrypoints at the root.
-const DIRS = ['src/js', 'src/main', 'scripts', 'tests'];
+const DIRS = ['src/js', 'src/main', 'scripts', 'tests', 'docs'];
 const FILES = ['main.js', 'preload.js'];
 const SKIP_DIRS = new Set(['node_modules', 'dist', 'mcps', '.git']);
 

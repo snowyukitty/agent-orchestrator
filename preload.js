@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('api', {
   getDefaultDirectory: () => ipcRenderer.invoke('get-default-directory'),
   getVersion: () => ipcRenderer.invoke('get-app-version'),
   listSessions: () => ipcRenderer.invoke('list-sessions'),
+  sessionCheckpoint: (params) => ipcRenderer.invoke('session:checkpoint', params),
+  waitForSession: (params) => ipcRenderer.invoke('session:wait', params),
+  cancelSessionWait: (params) => ipcRenderer.invoke('session:cancel-wait', params),
 
   // Agent profiles: local (env-only) profiles plus routed accounts
   // discovered from ai-agent-entrypoint.

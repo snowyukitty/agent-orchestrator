@@ -269,6 +269,7 @@ html, body {
 .palette-block[data-type="directory"]::before { background: var(--block-directory); }
 .palette-block[data-type="command"]::before  { background: var(--block-command); }
 .palette-block[data-type="wait"]::before     { background: var(--block-wait); }
+.palette-block[data-type="agentWait"]::before { background: var(--block-wait); }
 .palette-block[data-type="input"]::before    { background: var(--block-input); }
 .palette-block[data-type="keypress"]::before { background: var(--block-keypress); }
 .palette-block[data-type="loop"]::before     { background: var(--block-loop); }
@@ -816,6 +817,7 @@ html, body {
   overflow-y: hidden;
   flex: 1;
   scrollbar-width: thin;
+  scroll-behavior: smooth;
 }
 
 .session-tabs-empty {
@@ -839,6 +841,7 @@ html, body {
   font-size: var(--font-size-sm);
   color: var(--text-secondary);
   transition: background var(--t-fast), border-color var(--t-fast);
+  flex: 0 0 auto;
 }
 
 .session-tab:hover { background: var(--surface-glass-hover); }
@@ -953,6 +956,23 @@ html, body {
 }
 
 .quick-input:disabled { opacity: 0.5; }
+
+/* The terminal pane is resizable independently of the window. Container
+   queries keep the send controls usable even when that pane is narrow. */
+.panel-terminal { container-type: inline-size; }
+
+@container (max-width: 360px) {
+  .quick-send {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .quick-target {
+    grid-column: 1 / -1;
+    width: 100%;
+    max-width: none;
+  }
+}
 
 /* ── Sleep Countdown Banner ────────────────────────────────── */
 .sleep-banner {
@@ -1481,7 +1501,10 @@ html, body {
    Two lists with deliberately different framing: routed accounts are owned
    by ai-agent-entrypoint and read-only here; local profiles are env-only and
    weaker. The assurance chip on every row keeps that difference visible. */
-.modal-wide { max-width: 780px; }
+.modal-wide {
+  width: min(780px, 92vw);
+  max-width: 780px;
+}
 
 .agents-section { margin-bottom: var(--sp-5); }
 
@@ -1513,6 +1536,57 @@ html, body {
   padding: 0 3px;
   border-radius: 3px;
 }
+
+.agents-entrypoint-setting {
+  margin: var(--sp-3) 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.agents-entrypoint-setting > label {
+  display: block;
+  margin-bottom: var(--sp-2);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+}
+
+.agents-entrypoint-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.agents-entrypoint-row input {
+  min-width: 0;
+  flex: 1;
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.agents-entrypoint-row input:focus {
+  outline: none;
+  border-color: var(--accent-cyan);
+}
+
+.agents-entrypoint-setting small {
+  display: block;
+  margin-top: var(--sp-2);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+}
+
+.agents-entrypoint-setting small.error { color: #fca5a5; }
 
 .assurance-chip {
   font-size: var(--font-size-xs);

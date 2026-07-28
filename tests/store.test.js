@@ -82,13 +82,19 @@ test('settings round-trip a patch through disk', () => {
   const file = path.join(tmpDir(), 'settings.json');
   assert.deepEqual(settings.loadSettings(file), settings.DEFAULTS);
 
-  const saved = settings.saveSettings(file, { theme: 'light', terminalPanelWidth: 520 });
+  const saved = settings.saveSettings(file, {
+    theme: 'light',
+    terminalPanelWidth: 520,
+    entrypointPath: ' C:/tools/ai-agent-entrypoint ',
+  });
   assert.equal(saved.theme, 'light');
   assert.equal(saved.terminalPanelWidth, 520);
+  assert.equal(saved.entrypointPath, 'C:/tools/ai-agent-entrypoint');
 
   const reloaded = settings.loadSettings(file);
   assert.equal(reloaded.theme, 'light');
   assert.equal(reloaded.terminalPanelWidth, 520);
+  assert.equal(reloaded.entrypointPath, 'C:/tools/ai-agent-entrypoint');
 
   // A later patch merges rather than replacing.
   const merged = settings.saveSettings(file, { theme: 'dark' });

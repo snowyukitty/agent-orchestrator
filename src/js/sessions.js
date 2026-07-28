@@ -214,6 +214,9 @@ export class SessionManager {
     }
     this.renderTabs();
     this.fitActive();
+    this._els.tabs
+      ?.querySelector(`[data-session-id="${cssEsc(id)}"]`)
+      ?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
     this._sessions.get(id)?.term.focus();
     this._onActiveChange(id);
     return true;
@@ -388,4 +391,9 @@ function esc(str) {
   const el = document.createElement('span');
   el.textContent = String(str ?? '');
   return el.innerHTML;
+}
+
+function cssEsc(str) {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(String(str));
+  return String(str).replace(/["\\]/g, '\\$&');
 }

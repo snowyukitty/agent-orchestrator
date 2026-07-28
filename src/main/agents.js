@@ -251,7 +251,7 @@ function parseDoctorOutput(stdout) {
 function discoverRoutedProfiles({ entrypointPath, timeoutMs = 20_000, run = execFile } = {}) {
   return new Promise((resolve) => {
     if (!entrypointPath) {
-      resolve({ profiles: [], error: 'ai-agent-entrypoint was not found. Set its path in Agents ▸ Settings to use routed Codex accounts.' });
+      resolve({ profiles: [], error: 'ai-agent-entrypoint was not found. Choose its folder under Agent Accounts → Routed account source to use routed Codex accounts.' });
       return;
     }
     const script = entrypointScript(entrypointPath);

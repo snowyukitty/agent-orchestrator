@@ -10,6 +10,7 @@
 // ============================================================
 
 import { ExecutionEngine, analyzeLoops, matchingLoopEnd } from './engine.js';
+import { BLOCK_TYPES } from './blocks.js';
 import { TEMPLATES } from './templates.js';
 import { computeJobTarget, isDue, formatCountdown, DEFAULT_GRACE_MS } from './schedule.js';
 import { typeInto } from './typing.js';
@@ -127,6 +128,18 @@ async function testTemplates(eq) {
   TEMPLATES.forEach(t => {
     eq(`template-balanced:${t.id}`, analyzeLoops(t.blocks).errors.length, 0);
   });
+
+  eq('agent-wait-defaults', BLOCK_TYPES.agentWait.defaultParams,
+    { profileId: '', idleMs: 2000, pattern: '', timeoutMs: 120000 });
+
+  // Shipped profile references deliberately stay blank: templates travel
+  // between machines whose account ids are owned by their local setup.
+  const multi = TEMPLATES.find(t => t.id === 'tpl-multi-account');
+  eq('multi-account-template-portable-profile-ids',
+    multi.blocks.filter(b => Object.hasOwn(b.params || {}, 'profileId')).map(b => b.params.profileId),
+    ['', '', '', '', '', '']);
+  eq('multi-account-template-output-aware-waits',
+    multi.blocks.filter(b => b.type === 'agentWait').length, 2);
 }
 
 // ── Schedule time math ───────────────────────────────────────
@@ -176,6 +189,17 @@ async function testTyping(eq, ok) {
     charDelayMs: 0,
   });
   eq('typing-sequence', sent, [['s1', 'h'], ['s1', 'i'], ['s1', '\r'], ['s1', '\r']]);
+
+  // The output checkpoint hook runs after prompt echo, before either Enter.
+  const checkpointOrder = [];
+  await typeInto({
+    sessionId: 's1',
+    text: 'x',
+    send: (_id, chunk) => { checkpointOrder.push(chunk); return Promise.resolve(true); },
+    onTyped: () => { checkpointOrder.push('checkpoint'); },
+    charDelayMs: 0,
+  });
+  eq('typing-checkpoint-before-enter', checkpointOrder, ['x', 'checkpoint', '\r', '\r']);
 
   // pressEnter:false leaves the prompt unsubmitted.
   const noEnter = [];

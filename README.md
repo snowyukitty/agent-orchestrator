@@ -8,6 +8,14 @@ Several agents can run at once — one session per account — with a tab per se
 
 **Version**: 0.2.0
 
+## Field guide
+
+The [`docs/`](docs/README.md) field guide turns the account model, first-run
+recovery path, multi-agent recipe, output-aware waiting, and privacy boundaries
+into a responsive, interactive walkthrough. It is plain HTML, CSS, and
+JavaScript: no build step, backend, analytics, remote runtime assets, or account
+data access. Open `docs/index.html` directly in a browser.
+
 ## Multi-account agent control
 
 Each session is "which agent, as which account", and the guarantee behind that
@@ -44,9 +52,11 @@ session of one agent, or all of them at once.
 - **Multiple concurrent agent sessions**, one per account, each with its own terminal tab, status dot, and assurance badge. Background sessions keep rendering, so nothing is lost while you watch another one.
 - **Agent accounts panel** listing routed Codex accounts discovered from `ai-agent-entrypoint` alongside local env-only profiles you manage here. Click one to open a session.
 - **Quick-send bar** for ad-hoc prompts to one session, all sessions of one agent, or every session — using the same human-paced typing as the workflow engine.
-- **New blocks**: `🤖 Agent Session` opens an account, `📨 Send to Agent` prompts a specific one. Existing workflows keep working unchanged.
+- **New blocks**: `🤖 Agent Session` opens an account, `📨 Send to Agent` prompts a specific one, and `👂 Wait for Agent` continues when new PTY output goes idle or contains chosen text. Its timeout is a logged backstop, not the normal synchronization mechanism. Existing workflows keep working unchanged.
+- **Output-aware waiting lives beside the PTY.** `SessionRegistry` keeps a bounded, main-process-only activity buffer; workflow sends take an opaque sequence checkpoint so a fast reply cannot disappear between blocks. Buffered output never crosses into workflow JSON or session metadata.
+- **Routed account source setting**: the Agents panel can browse, save, or clear the machine-local `ai-agent-entrypoint` checkout path. A blank value keeps sibling auto-detection, so a machine without the sibling checkout now has an in-app recovery path.
 - **A workflow run no longer kills every process.** It closes only the sessions the previous run opened; sessions you started by hand are left alone.
-- **Killing a session kills its process tree** (SIGTERM, then `taskkill /T` after a grace window), so a routed `pwsh` with an agent child leaves nothing behind.
+- **Killing a session kills its process tree** (SIGTERM, then `taskkill /T` after a grace window), so a routed `pwsh` with an agent child leaves nothing behind. Bulk closes and app shutdown serialize ConPTY exits to avoid a native `node-pty` baton-removal race.
 - **Validated IPC.** Payloads are type- and range-checked; `send-input` previously threw on any non-string.
 - **Persisted settings**: terminal theme, window geometry, and panel sizes survive a restart.
 - **Real test suites**: `npm run test:unit` (`node --test` over the main-process modules) plus the Electron self-test, now covering typing, quick-send targeting, launch specs, the credential boundary, and the path-leak boundary.
@@ -101,7 +111,7 @@ session of one agent, or all of them at once.
 ### Completed Features
 - **Multi-Account Agent Sessions**: Several agents run at once, one PTY per account, each with a terminal tab carrying its agent, account name, live status dot, and assurance badge. Hidden sessions keep running and buffering. Routed Codex accounts come from `ai-agent-entrypoint`; local env-only profiles cover the CLIs it does not manage yet. See "Multi-account agent control" above.
 - **Quick Send**: A prompt bar under the terminal fires an ad-hoc command at the current session, every session of one agent, or all of them — using the same human-paced typing as the workflow engine.
-- **Visual Workflow Builder**: Users can construct automation workflows by combining blocks (Schedule, Directory, Agent Session, Send to Agent, Command, Wait, Send Input, Keypress, Loop / End Loop, Log, Hibernate PC).
+- **Visual Workflow Builder**: Users can construct automation workflows by combining blocks (Schedule, Directory, Agent Session, Send to Agent, Wait for Agent, Command, Wait, Send Input, Keypress, Loop / End Loop, Log, Hibernate PC).
 - **Loops**: A **Loop** block repeats every block up to its matching **End Loop** a configurable number of times. Nested loops are supported and the loop body is indented (with a continuous nesting rail) so the structure is readable at a glance. A live iteration badge (`2/3`) tracks progress during a run, unbalanced loop markers are flagged inline (dashed outline + tooltip) and summarized in a banner, and the engine still runs safely by skipping broken markers.
 - **Drag-to-Position Editing**: Blocks dragged from the palette land exactly where they are dropped (with a live insertion-line preview); they can still be reordered afterward by their drag handles.
 - **Templates**: A **🧩 Templates** picker provides pre-built workflows (including a Loop example) as one-click starting points.
@@ -124,7 +134,7 @@ session of one agent, or all of them at once.
 
 ### Architecture Notes
 - **Account routing is delegated, not reimplemented.** `ai-agent-entrypoint` owns the Codex account manifest and child-environment construction; this app discovers its aliases and launches through it. Bringing another CLI under managed routing is a decision for that repository. `AGENTS.md` records the boundary and the rules the code enforces.
-- **Sessions are first class.** `src/main/sessions.js` holds a registry of PTYs, each tagged with its profile and assurance level. Its `describe()` deliberately omits env, cwd, and the resolved executable, because a routed session's environment contains canonical account-home paths.
+- **Sessions are first class.** `src/main/sessions.js` holds a registry of PTYs, each tagged with its profile and assurance level. It also owns output activity checkpoints and bounded matching buffers for `Wait for Agent`. Its `describe()` deliberately omits env, cwd, the resolved executable, and all PTY text, because a routed session's environment and output can contain machine-local paths.
 - **Main-process modules are CommonJS and unit-tested** (`src/main/`, `tests/*.test.js`); renderer modules are ES modules covered by the Electron self-test. Pure logic lives in whichever half can test it deterministically.
 - The renderer (`app.js`) owns the single, persistent set of process IPC listeners (output/exit/error); the engine reacts via `handleProcessExit` / `handleProcessError` hooks rather than registering its own listeners. This avoids the terminal listener being torn down between runs and prevents double-rendered output.
 - Main-process lifecycle cleanup is centralized and idempotent. `before-quit` and `will-quit` both run the same shutdown path so timers, power blockers, tray state, and PTYs are cleaned up consistently.
@@ -132,7 +142,7 @@ session of one agent, or all of them at once.
 - Pure, side-effect-free logic is factored into dependency-free modules so it can be unit-tested deterministically: loop structure (`matchingLoopEnd` / `analyzeLoops` in `engine.js`) and scheduling time math (`schedule.js`). The headless `npm test` (`electron . --self-test`) exercises these with no real PTYs and exits non-zero on regression.
 
 ### Known Issues & Unfinished Work
-- **Complex Autocomplete Stealing Enter Key**: Highly interactive CLIs (like `@inquirer/prompts` used by Claude CLI) pop up autocomplete menus that can intercept `\r` (Enter) inputs from the engine. A "double-tap" Enter is implemented to bypass the menu but may still need per-CLI tweaking.
+- **CLI-specific prompt controls**: Highly interactive CLIs can consume the first Enter, so typed submission still uses a deliberate double-tap. When a workflow needs proof of a semantic response, configure `Wait for Agent` with **Output contains**; idle-only completion observes silence, not success.
 - **Terminal Layout Shifts**: Xterm dimensions may occasionally desync with the internal PTY dimensions if the window is resized very rapidly while a process is initializing.
 
 ## Development

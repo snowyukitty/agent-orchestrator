@@ -233,6 +233,7 @@ test('discovery reports a missing entrypoint instead of throwing', async () => {
   const r = await agents.discoverRoutedProfiles({ entrypointPath: null });
   assert.deepEqual(r.profiles, []);
   assert.match(r.error, /not found/);
+  assert.match(r.error, /Routed account source/);
 });
 
 test('discovery surfaces a failed doctor run as an error, not a crash', async () => {

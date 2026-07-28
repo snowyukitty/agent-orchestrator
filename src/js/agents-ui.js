@@ -47,7 +47,10 @@ export class AgentsUI {
     const modal = document.getElementById('agents-modal');
     const editModal = document.getElementById('agent-edit-modal');
 
-    this.open = async () => { modal?.classList.remove('hidden'); await this.refresh(); };
+    this.open = async () => {
+      modal?.classList.remove('hidden');
+      await Promise.all([this._loadEntrypointSetting(), this.refresh()]);
+    };
     const close = () => modal?.classList.add('hidden');
     const closeEdit = () => editModal?.classList.add('hidden');
 
@@ -58,6 +61,17 @@ export class AgentsUI {
 
     document.getElementById('btn-refresh-agents')?.addEventListener('click', () => this.refresh({ force: true }));
     document.getElementById('btn-new-agent')?.addEventListener('click', () => this._openEditor(null));
+    document.getElementById('btn-browse-entrypoint')?.addEventListener('click', async () => {
+      const dir = await this._api.selectDirectory();
+      if (dir) document.getElementById('agents-entrypoint-path').value = dir;
+    });
+    document.getElementById('btn-save-entrypoint')?.addEventListener('click', () => this._saveEntrypointSetting());
+    document.getElementById('agents-entrypoint-path')?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        this._saveEntrypointSetting();
+      }
+    });
 
     document.getElementById('btn-close-agent-edit')?.addEventListener('click', closeEdit);
     document.getElementById('btn-cancel-agent')?.addEventListener('click', closeEdit);
@@ -115,6 +129,47 @@ export class AgentsUI {
       return;
     }
     this.render();
+  }
+
+  async _loadEntrypointSetting() {
+    const input = document.getElementById('agents-entrypoint-path');
+    if (!input) return;
+    try {
+      const settings = await this._api.getSettings();
+      input.value = settings?.entrypointPath || '';
+      this._setEntrypointStatus(null);
+    } catch (err) {
+      this._setEntrypointStatus(`Could not load the saved path: ${err.message}`, true);
+    }
+  }
+
+  async _saveEntrypointSetting() {
+    const input = document.getElementById('agents-entrypoint-path');
+    const button = document.getElementById('btn-save-entrypoint');
+    if (!input || !button) return;
+
+    const entrypointPath = input.value.trim();
+    button.disabled = true;
+    this._setEntrypointStatus('Saving and refreshing routed accounts…');
+    try {
+      await this._api.updateSettings({ entrypointPath });
+      await this.refresh({ force: true });
+      this._setEntrypointStatus(entrypointPath
+        ? 'Saved. Routed account discovery now uses this folder.'
+        : 'Saved. Routed account discovery now uses sibling auto-detection.');
+      this._onLog('🤖 Updated the routed account source', 'system');
+    } catch (err) {
+      this._setEntrypointStatus(`Could not save the path: ${err.message}`, true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  _setEntrypointStatus(message, isError = false) {
+    const status = document.getElementById('agents-entrypoint-status');
+    if (!status) return;
+    status.textContent = message || 'Leave blank to auto-detect a sibling checkout. This stores a machine-local path only.';
+    status.classList.toggle('error', isError);
   }
 
   /** Every startable profile, routed first. Used by the block param dropdown. */

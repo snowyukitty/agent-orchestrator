@@ -165,6 +165,122 @@ test('output is tagged with its session id', () => {
   assert.notEqual(a, b);
 });
 
+test('output checkpoints are opaque counters and buffered text stays out of metadata', () => {
+  const { reg, pty } = makeRegistry();
+  const { id } = reg.create(SPEC);
+  assert.deepEqual(reg.checkpoint(id), { outputSeq: 0 });
+
+  pty.spawned[0].emitData('C:/private/path should stay main-only');
+  assert.deepEqual(reg.checkpoint(id), { outputSeq: 1 });
+  assert.ok(!JSON.stringify(reg.describe(id)).includes('private'));
+  assert.equal(reg.checkpoint('missing'), null);
+});
+
+test('waitForOutput matches case-insensitive text across ANSI-decorated chunks', async () => {
+  const { reg, pty } = makeRegistry();
+  const { id } = reg.create(SPEC);
+  const checkpoint = reg.checkpoint(id);
+  const waiting = reg.waitForOutput(id, {
+    afterSeq: checkpoint.outputSeq,
+    idleMs: 0,
+    pattern: 'rate limit',
+    timeoutMs: 500,
+  });
+
+  pty.spawned[0].emitData('\x1b[31mRa');
+  pty.spawned[0].emitData('te LIMIT\x1b[0m');
+  const result = await waiting;
+  assert.equal(result.reason, 'match');
+  assert.equal(result.outputSeq, 2);
+});
+
+test('waitForOutput sees output that raced between checkpoint and registration', async () => {
+  const { reg, pty } = makeRegistry();
+  const { id } = reg.create(SPEC);
+  const checkpoint = reg.checkpoint(id);
+  pty.spawned[0].emitData('fast reply: done');
+
+  const result = await reg.waitForOutput(id, {
+    afterSeq: checkpoint.outputSeq,
+    idleMs: 1000,
+    pattern: 'DONE',
+    timeoutMs: 500,
+  });
+  assert.equal(result.reason, 'match');
+});
+
+test('idle waiting starts only after new output and resets on every chunk', async () => {
+  const { reg, pty } = makeRegistry();
+  const { id } = reg.create(SPEC);
+  const checkpoint = reg.checkpoint(id);
+  const waiting = reg.waitForOutput(id, {
+    afterSeq: checkpoint.outputSeq,
+    idleMs: 50,
+    timeoutMs: 500,
+  });
+
+  pty.spawned[0].emitData('first');
+  await new Promise(resolve => setTimeout(resolve, 30));
+  pty.spawned[0].emitData('second');
+  const result = await waiting;
+  assert.equal(result.reason, 'idle');
+  assert.equal(result.outputSeq, 2);
+});
+
+test('an already-idle terminal reaches the timeout backstop without new output', async () => {
+  const { reg, pty } = makeRegistry();
+  const { id } = reg.create(SPEC);
+  pty.spawned[0].emitData('old prompt');
+  const checkpoint = reg.checkpoint(id);
+
+  const result = await reg.waitForOutput(id, {
+    afterSeq: checkpoint.outputSeq,
+    idleMs: 10,
+    timeoutMs: 30,
+  });
+  assert.equal(result.reason, 'timeout');
+});
+
+test('pending output waits resolve on cancellation, exit, and removal', async () => {
+  const { reg, pty } = makeRegistry();
+  const first = reg.create(SPEC).id;
+  const cancelled = reg.waitForOutput(first, {
+    waitId: 'wait-cancel',
+    idleMs: 1000,
+    timeoutMs: 5000,
+  });
+  assert.equal(reg.cancelWait(first, 'wait-cancel'), true);
+  assert.equal((await cancelled).reason, 'cancelled');
+  assert.equal(reg.cancelWait(first, 'wait-cancel'), false);
+
+  const second = reg.create(SPEC).id;
+  const exited = reg.waitForOutput(second, { idleMs: 1000, timeoutMs: 5000 });
+  pty.spawned[1].exit(0);
+  assert.equal((await exited).reason, 'exit');
+
+  const third = reg.create(SPEC).id;
+  const removed = reg.waitForOutput(third, { idleMs: 1000, timeoutMs: 5000 });
+  reg.remove(third);
+  assert.equal((await removed).reason, 'removed');
+});
+
+test('waitForOutput validates its completion conditions', () => {
+  const { reg } = makeRegistry();
+  const { id } = reg.create(SPEC);
+  assert.throws(
+    () => reg.waitForOutput(id, { idleMs: 0, pattern: '', timeoutMs: 100 }),
+    /needs idleMs or an output pattern/
+  );
+  assert.throws(
+    () => reg.waitForOutput(id, { idleMs: 1.5, timeoutMs: 100 }),
+    /idleMs must be an integer/
+  );
+  assert.throws(
+    () => reg.waitForOutput(id, { idleMs: 10, timeoutMs: 0 }),
+    /timeoutMs must be an integer/
+  );
+});
+
 test('a session that ignores SIGTERM gets its process tree force-killed', async () => {
   const { reg, pty, events } = makeRegistry();
   const { id, pid } = reg.create(SPEC);
@@ -194,6 +310,51 @@ test('killAll counts only live sessions', () => {
 
   assert.equal(reg.killAll(), 1);
   assert.equal(reg.describe(b).status, 'exited');
+});
+
+test('killAllSequential waits for each exit before killing the next PTY', async () => {
+  const { reg, pty } = makeRegistry();
+  reg.create(SPEC);
+  reg.create(SPEC);
+
+  const stopping = reg.killAllSequential('test shutdown');
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pty.spawned[0].killed, 'SIGTERM');
+  assert.equal(pty.spawned[1].killed, null);
+
+  pty.spawned[0].exit(0);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pty.spawned[1].killed, 'SIGTERM');
+  pty.spawned[1].exit(0);
+  assert.equal(await stopping, 2);
+});
+
+test('removeAndWait serializes rapid tab closes', async () => {
+  const { reg, pty } = makeRegistry();
+  const first = reg.create(SPEC).id;
+  const second = reg.create(SPEC).id;
+
+  const firstRemoval = reg.removeAndWait(first);
+  const secondRemoval = reg.removeAndWait(second);
+  let queueDrained = false;
+  const drained = reg.whenTerminationsComplete().then(() => { queueDrained = true; });
+  assert.equal(reg.hasPendingTermination, true);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(queueDrained, false);
+  assert.equal(pty.spawned[0].killed, 'SIGTERM');
+  assert.equal(pty.spawned[1].killed, null);
+  assert.equal(reg.has(first), false);
+  assert.equal(reg.has(second), true);
+
+  pty.spawned[0].exit(0);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pty.spawned[1].killed, 'SIGTERM');
+  assert.equal(reg.has(second), false);
+  pty.spawned[1].exit(0);
+  assert.deepEqual(await Promise.all([firstRemoval, secondRemoval]), [true, true]);
+  await drained;
+  assert.equal(queueDrained, true);
+  assert.equal(reg.hasPendingTermination, false);
 });
 
 test('prune drops exited sessions and keeps live ones', () => {

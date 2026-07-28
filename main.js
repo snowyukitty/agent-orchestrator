@@ -51,6 +51,8 @@ let schedulerHeartbeatTimer = null;
 let powerResumeHandler = null;
 let powerUnlockHandler = null;
 let cleanupComplete = false;
+let gracefulQuitStarted = false;
+let gracefulQuitReady = false;
 let keepAwakeId = null;
 let sleepTimer = null;
 let sleepTarget = null; // epoch ms when hibernate fires (null = none armed)
@@ -419,18 +421,52 @@ function killAllActiveProcesses(reason = 'shutdown') {
   return sessions ? sessions.killAll(reason) : 0;
 }
 
-function cleanupForQuit() {
-  if (cleanupComplete) return;
+function cleanupNonProcessState() {
+  if (cleanupComplete) return false;
   cleanupComplete = true;
   app.isQuitting = true;
   stopSchedulerHeartbeat();
   cancelSleepTimer();
   stopKeepAwake();
-  killAllActiveProcesses('shutdown');
   if (tray) {
     tray.destroy();
     tray = null;
   }
+  return true;
+}
+
+function cleanupForQuit() {
+  if (!cleanupNonProcessState()) return;
+  killAllActiveProcesses('shutdown');
+}
+
+function handleBeforeQuit(event) {
+  if (gracefulQuitReady) {
+    cleanupNonProcessState();
+    return;
+  }
+
+  const liveCount = sessions
+    ? sessions.list().filter(session => session.status === 'running').length
+    : 0;
+  if (liveCount <= 1 && !sessions?.hasPendingTermination) {
+    cleanupForQuit();
+    return;
+  }
+
+  // node-pty's ConPTY addon can assert when several native exit callbacks
+  // remove their batons concurrently. Hold the Electron quit long enough to
+  // terminate each PTY and receive its JS exit callback in sequence.
+  event.preventDefault();
+  if (gracefulQuitStarted) return;
+  gracefulQuitStarted = true;
+  cleanupNonProcessState();
+  sessions.killAllSequential('shutdown')
+    .catch(err => console.error(`[Sessions] sequential shutdown failed: ${err.message}`))
+    .finally(() => {
+      gracefulQuitReady = true;
+      app.quit();
+    });
 }
 
 app.on('window-all-closed', () => {
@@ -438,7 +474,7 @@ app.on('window-all-closed', () => {
   // Only quit if isQuitting flag is set
 });
 
-app.on('before-quit', cleanupForQuit);
+app.on('before-quit', handleBeforeQuit);
 app.on('will-quit', cleanupForQuit);
 
 app.on('activate', () => {
@@ -457,6 +493,7 @@ ipcMain.handle('execute-command', async (_event, payload) => {
     const command = asText(p.command ?? '', { what: 'command', max: 32_000 });
     console.log(`[IPC] execute-command: "${command}" in "${p.cwd}"`);
 
+    await sessions.whenTerminationsComplete();
     const { id: sessionId, pid } = sessions.create({
       file: 'powershell.exe',
       args: ['-NoExit', '-Command', command],
@@ -500,7 +537,7 @@ ipcMain.handle('resize-process', async (_event, payload) => {
 ipcMain.handle('kill-process', async (_event, payload) => {
   try {
     const p = asPlainObject(payload);
-    return sessions.remove(asId(p.id, 'session id'));
+    return await sessions.removeAndWait(asId(p.id, 'session id'));
   } catch (err) {
     console.warn(`[IPC] kill-process rejected: ${err.message}`);
     return false;
@@ -509,6 +546,39 @@ ipcMain.handle('kill-process', async (_event, payload) => {
 
 // ── IPC: Session Introspection ───────────────────────────────
 ipcMain.handle('list-sessions', async () => (sessions ? sessions.list() : []));
+
+// Output-aware workflow waiting. The checkpoint is an opaque sequence number;
+// PTY text remains in the main-process registry and never crosses this bridge.
+ipcMain.handle('session:checkpoint', async (_event, payload) => {
+  const p = asPlainObject(payload, 'session:checkpoint payload');
+  const id = asId(p.id, 'session id');
+  if (!sessions) throw new Error('Session registry is not ready');
+  const checkpoint = sessions.checkpoint(id);
+  if (!checkpoint) throw new Error(`No session named "${id}"`);
+  return checkpoint;
+});
+
+ipcMain.handle('session:wait', async (_event, payload) => {
+  const p = asPlainObject(payload, 'session:wait payload');
+  const id = asId(p.id, 'session id');
+  const waitId = asId(p.waitId, 'wait id');
+  const pattern = asText(p.pattern ?? '', { max: 1000, what: 'output pattern' });
+  if (!sessions) throw new Error('Session registry is not ready');
+  return sessions.waitForOutput(id, {
+    waitId,
+    afterSeq: p.afterSeq,
+    idleMs: p.idleMs,
+    pattern,
+    timeoutMs: p.timeoutMs,
+  });
+});
+
+ipcMain.handle('session:cancel-wait', async (_event, payload) => {
+  const p = asPlainObject(payload, 'session:cancel-wait payload');
+  const id = asId(p.id, 'session id');
+  const waitId = asId(p.waitId, 'wait id');
+  return sessions ? sessions.cancelWait(id, waitId) : false;
+});
 
 // ── Agent Profiles ───────────────────────────────────────────
 // Local (L2 env-only) profiles live here; routed (L1) Codex accounts are
@@ -595,6 +665,7 @@ ipcMain.handle('session:create', async (_event, payload) => {
     });
     spec.cwd = resolveWorkingDir(spec.cwd);
 
+    await sessions.whenTerminationsComplete();
     const { id, pid } = sessions.create(spec, { cols: asCols(p.cols), rows: asRows(p.rows) });
     return { id, pid, session: sessions.describe(id) };
   } catch (err) {
@@ -675,7 +746,7 @@ ipcMain.handle('get-sleep-state', async () => ({ target: sleepTarget }));
 // Used at the start of a run to clear the default shell and any
 // leftover processes from previous runs, preventing PTY leaks.
 ipcMain.handle('kill-all-processes', async () => {
-  const count = killAllActiveProcesses('renderer request');
+  const count = sessions ? await sessions.killAllSequential('renderer request') : 0;
   if (count) console.log(`[IPC] kill-all-processes: terminated ${count} process(es)`);
   return count;
 });

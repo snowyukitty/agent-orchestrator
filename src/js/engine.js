@@ -12,7 +12,10 @@ export class ExecutionEngine {
     this.runId = null;
     this.currentProcessId = null;   // the PTY currently targeted by input/keypress
     this._procSeq = 0;
+    this._waitSeq = 0;
     this._spawnedIds = new Set();   // every PTY this run spawned (for abort cleanup)
+    this._outputCheckpoints = new Map(); // session id → main-process output sequence
+    this._activeWait = null;
     this.currentBlockIndex = -1;
     this.cwd = null;
     this._abortLogged = false;
@@ -38,7 +41,10 @@ export class ExecutionEngine {
     this.runId = `run-${Date.now()}`;
     this.currentProcessId = null;
     this._procSeq = 0;
+    this._waitSeq = 0;
     this._spawnedIds = new Set();
+    this._outputCheckpoints = new Map();
+    this._activeWait = null;
     this._abortLogged = false;
     this._dryRun = !!opts.dryRun;   // record-only mode for tests (no PTY, no waits)
     this._trace = [];               // [{ index, type, iter? }] executed-block log
@@ -52,6 +58,7 @@ export class ExecutionEngine {
     try {
       success = await this._drive(blocks);
     } finally {
+      this._activeWait = null;
       this.running = false;
       this.currentBlockIndex = -1;
       this._setStatus(success ? 'completed' : 'error');
@@ -163,6 +170,9 @@ export class ExecutionEngine {
 
   abort() {
     this.aborted = true;
+    if (this._activeWait) {
+      window.api.cancelSessionWait?.(this._activeWait).catch(() => {});
+    }
     // Kill every PTY this run spawned, not just the latest one.
     for (const id of this._spawnedIds) {
       window.api.killProcess({ id }).catch(() => {});
@@ -238,6 +248,7 @@ export class ExecutionEngine {
         assurance: 'L0-native',
         status: 'running',
       });
+      this._outputCheckpoints.set(procId, 0);
 
       // Give the process a moment to initialize
       await this._sleep(800);
@@ -270,6 +281,7 @@ export class ExecutionEngine {
       this._spawnedIds.add(result.id);
       this._log(`🤖 Agent session: ${meta.label} [${meta.assurance}]`, 'system');
       this._notifySessionSpawned(meta);
+      this._outputCheckpoints.set(result.id, 0);
 
       await this._sleep(Number(block.params.settleMs) || 1500);
     },
@@ -293,7 +305,80 @@ export class ExecutionEngine {
         text,
         pressEnter,
         isAborted: () => this.aborted,
+        onTyped: () => this._rememberOutputCheckpoint(sessionId),
       });
+    },
+
+    async agentWait(block) {
+      const target = block.params.profileId;
+      const idleMs = Number(block.params.idleMs ?? 2000);
+      const pattern = String(block.params.pattern || '');
+      const timeoutMs = Number(block.params.timeoutMs ?? 120000);
+      const sessionId = target ? this._sessionForProfile(target) : this.currentProcessId;
+
+      if (!sessionId) {
+        throw new Error(target
+          ? `No live session for agent profile "${target}" — add an Agent Session block first`
+          : 'No active agent session to wait for');
+      }
+      if (!idleMs && !pattern) {
+        throw new Error('Wait for Agent needs an idle duration or output text');
+      }
+
+      let afterSeq = this._outputCheckpoints.get(sessionId);
+      if (!Number.isInteger(afterSeq)) {
+        afterSeq = await this._rememberOutputCheckpoint(sessionId);
+      }
+
+      const waitId = `${this.runId}-w${++this._waitSeq}`;
+      const criteria = [
+        idleMs ? `${idleMs} ms idle` : '',
+        pattern ? `output contains "${shortText(pattern)}"` : '',
+      ].filter(Boolean).join(' or ');
+      this._log(`👂 Waiting for ${target || 'current agent'}: ${criteria} (timeout ${timeoutMs} ms)…`, 'system');
+      this._setStatus('👂 Waiting for agent');
+
+      const activeWait = { id: sessionId, waitId };
+      this._activeWait = activeWait;
+      let result;
+      try {
+        result = await window.api.waitForSession({
+          id: sessionId,
+          waitId,
+          afterSeq,
+          idleMs,
+          pattern,
+          timeoutMs,
+        });
+      } finally {
+        if (this._activeWait === activeWait) this._activeWait = null;
+      }
+
+      if (Number.isInteger(result?.outputSeq)) {
+        this._outputCheckpoints.set(sessionId, result.outputSeq);
+      }
+      switch (result?.reason) {
+        case 'match':
+          this._log('👂 Wait complete — output text matched', 'system');
+          break;
+        case 'idle':
+          this._log(`👂 Wait complete — agent output was idle for ${idleMs} ms`, 'system');
+          break;
+        case 'timeout':
+          this._log(`⚠️ Wait for Agent reached its ${timeoutMs} ms timeout; continuing`, 'system');
+          break;
+        case 'exit':
+          this._log('⬡ Wait complete — agent session exited', 'system');
+          break;
+        case 'cancelled':
+          if (!this.aborted) throw new Error('Wait for Agent was cancelled');
+          break;
+        case 'removed':
+        case 'replaced':
+          throw new Error('Agent session was closed while waiting');
+        default:
+          throw new Error('Wait for Agent returned no completion reason');
+      }
     },
 
     async wait(block) {
@@ -344,6 +429,7 @@ export class ExecutionEngine {
         text,
         pressEnter,
         isAborted: () => this.aborted,
+        onTyped: () => this._rememberOutputCheckpoint(this.currentProcessId),
       });
     },
 
@@ -368,6 +454,7 @@ export class ExecutionEngine {
         throw new Error('No active process to receive keypress');
       }
 
+      await this._rememberOutputCheckpoint(this.currentProcessId);
       const sent = await window.api.sendInput({
         id: this.currentProcessId,
         text: char,
@@ -439,6 +526,18 @@ export class ExecutionEngine {
     return { cols: term?.cols ?? 80, rows: term?.rows ?? 24 };
   }
 
+  async _rememberOutputCheckpoint(sessionId) {
+    if (!window.api?.sessionCheckpoint) {
+      throw new Error('Output-aware waiting is unavailable in this build');
+    }
+    const checkpoint = await window.api.sessionCheckpoint({ id: sessionId });
+    if (!Number.isInteger(checkpoint?.outputSeq)) {
+      throw new Error('Could not read the agent output checkpoint');
+    }
+    this._outputCheckpoints.set(sessionId, checkpoint.outputSeq);
+    return checkpoint.outputSeq;
+  }
+
   /** Announce a PTY this run opened so the UI can give it a tab. */
   _notifySessionSpawned(meta) {
     this._spawnedIds.add(meta.id);
@@ -482,6 +581,11 @@ export class ExecutionEngine {
 function shortLabel(command) {
   const first = String(command).trim().split(/\s+/)[0] || 'shell';
   return first.length > 24 ? `${first.slice(0, 23)}…` : first;
+}
+
+function shortText(text, max = 80) {
+  const flat = String(text).replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
 // ── Loop Structure Helpers ───────────────────────────────────

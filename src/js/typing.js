@@ -25,6 +25,7 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, Math.max(0, ms)
  * @param {boolean} [opts.pressEnter]   submit afterwards (default true)
  * @param {function} [opts.send]        (sessionId, text) => Promise<boolean>
  * @param {function} [opts.isAborted]   () => boolean, checked between keys
+ * @param {function} [opts.onTyped]     async hook after text, before Enter
  * @param {number} [opts.charDelayMs]
  * @returns {Promise<{ sent: boolean, aborted: boolean }>}
  * @throws when the target session refuses input (it exited, or never existed)
@@ -35,6 +36,7 @@ export async function typeInto({
   pressEnter = true,
   send,
   isAborted = () => false,
+  onTyped,
   charDelayMs = CHAR_DELAY_MS,
 } = {}) {
   if (!sessionId) throw new Error('No active session to receive input');
@@ -47,6 +49,11 @@ export async function typeInto({
     }
     await sleep(charDelayMs);
   }
+
+  // Output-aware workflows take their activity checkpoint here: prompt echo
+  // has had one character delay to drain, while even a very fast response
+  // cannot start until after the Enter below.
+  if (onTyped) await onTyped();
 
   if (!pressEnter) return { sent: true, aborted: false };
   if (isAborted()) return { sent: false, aborted: true };

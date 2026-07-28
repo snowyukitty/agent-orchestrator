@@ -58,6 +58,20 @@ export const BLOCK_TYPES = {
       { key: 'pressEnter', label: 'Enter', type: 'checkbox' }
     ]
   },
+  agentWait: {
+    type: 'agentWait',
+    icon: '👂',
+    label: 'Wait for Agent',
+    description: 'Continue when output settles or contains text',
+    color: 'wait',
+    defaultParams: { profileId: '', idleMs: 2000, pattern: '', timeoutMs: 120000 },
+    params: [
+      { key: 'profileId', label: 'Account', type: 'profile', allowCurrent: true },
+      { key: 'idleMs', label: 'Idle ms', type: 'number', min: 0, max: 3600000 },
+      { key: 'pattern', label: 'Output contains', type: 'text', placeholder: 'Optional, case-insensitive text...' },
+      { key: 'timeoutMs', label: 'Timeout ms', type: 'number', min: 1, max: 86400000 }
+    ]
+  },
   command: {
     type: 'command',
     icon: '⌨️',
