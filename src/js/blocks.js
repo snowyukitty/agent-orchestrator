@@ -2,6 +2,8 @@
 // Block Type Definitions & Rendering
 // ============================================================
 
+import { WORKFLOW_AGENT_TARGET } from './agent-targets.js';
+
 // ── Block Type Registry ──────────────────────────────────────
 export const BLOCK_TYPES = {
   schedule: {
@@ -48,12 +50,18 @@ export const BLOCK_TYPES = {
   agentSend: {
     type: 'agentSend',
     icon: '📨',
-    label: 'Send to Agent',
-    description: 'Prompt a specific agent session',
+    label: 'Send to Agent(s)',
+    description: 'Prompt one lane or fan out to every lane',
     color: 'agent',
     defaultParams: { profileId: '', text: '', pressEnter: true },
     params: [
-      { key: 'profileId', label: 'Account', type: 'profile', allowCurrent: true },
+      {
+        key: 'profileId',
+        label: 'Account',
+        type: 'profile',
+        allowCurrent: true,
+        allowAllWorkflow: true,
+      },
       { key: 'text', label: 'Text', type: 'text', placeholder: 'Prompt to send...' },
       { key: 'pressEnter', label: 'Enter', type: 'checkbox' }
     ]
@@ -70,6 +78,33 @@ export const BLOCK_TYPES = {
       { key: 'idleMs', label: 'Idle ms', type: 'number', min: 0, max: 3600000 },
       { key: 'pattern', label: 'Output contains', type: 'text', placeholder: 'Optional, case-insensitive text...' },
       { key: 'timeoutMs', label: 'Timeout ms', type: 'number', min: 1, max: 86400000 }
+    ]
+  },
+  agentJoin: {
+    type: 'agentJoin',
+    icon: '◇',
+    label: 'Join Agents',
+    description: 'Continue after every prompted lane is ready',
+    color: 'wait',
+    defaultParams: {
+      idleMs: 2000,
+      pattern: '',
+      timeoutMs: 120000,
+      onIncomplete: 'stop',
+    },
+    params: [
+      { key: 'idleMs', label: 'Idle ms', type: 'number', min: 0, max: 3600000 },
+      { key: 'pattern', label: 'Output contains', type: 'text', placeholder: 'Optional shared completion marker...' },
+      { key: 'timeoutMs', label: 'Timeout ms', type: 'number', min: 1, max: 86400000 },
+      {
+        key: 'onIncomplete',
+        label: 'Incomplete',
+        type: 'select',
+        options: [
+          { value: 'stop', label: 'Stop downstream blocks' },
+          { value: 'continue', label: 'Continue with warning' },
+        ],
+      },
     ]
   },
   command: {
@@ -207,8 +242,8 @@ function createDefaultParams(type, def) {
 }
 
 export function createBlock(type) {
+  if (!Object.hasOwn(BLOCK_TYPES, type)) throw new Error(`Unknown block type: ${type}`);
   const def = BLOCK_TYPES[type];
-  if (!def) throw new Error(`Unknown block type: ${type}`);
   return {
     id: generateBlockId(),
     type,
@@ -235,8 +270,8 @@ export function renderPaletteBlock(typeDef) {
 
 // ── Workflow Block Renderer ──────────────────────────────────
 export function renderWorkflowBlock(block, index) {
+  if (!Object.hasOwn(BLOCK_TYPES, block.type)) return null;
   const def = BLOCK_TYPES[block.type];
-  if (!def) return null;
 
   const el = document.createElement('div');
   el.className = 'workflow-block';
@@ -309,11 +344,15 @@ function buildParamField(paramDef, params) {
     // than declared statically here.
     case 'profile': {
       const profiles = getProfileOptions();
-      const known = profiles.some(p => p.id === String(value));
+      const isAllWorkflow = String(value) === WORKFLOW_AGENT_TARGET;
+      const known = isAllWorkflow || profiles.some(p => p.id === String(value));
       const opts = [
         paramDef.allowCurrent
           ? `<option value="" ${!value ? 'selected' : ''}>▸ Current session</option>`
           : `<option value="" ${!value ? 'selected' : ''}>— pick an account —</option>`,
+        ...(paramDef.allowAllWorkflow
+          ? [`<option value="${WORKFLOW_AGENT_TARGET}" ${isAllWorkflow ? 'selected' : ''}>⇉ All workflow agents</option>`]
+          : []),
         // A workflow may name a profile this machine does not have; keep the
         // saved value visible instead of silently rewriting it on load.
         ...(value && !known

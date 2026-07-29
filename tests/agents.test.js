@@ -39,7 +39,6 @@ test('env rejects credential-shaped keys with actionable guidance', () => {
 test('env accepts the state-home variables account switching actually needs', () => {
   const safe = {
     CLAUDE_CONFIG_DIR: 'C:/state/claude-work',
-    CODEX_HOME: 'C:/state/codex-a',
     GROK_HOME: 'C:/state/grok',
     GEMINI_CONFIG_DIR: 'C:/state/gemini',
     NO_COLOR: '1',
@@ -54,6 +53,15 @@ test('env rejects malformed variable names and non-objects', () => {
   assert.throws(() => agents.assertSafeEnv([1, 2]), /must be an object/);
   assert.deepEqual(agents.assertSafeEnv(null), {});
   assert.deepEqual(agents.assertSafeEnv(undefined), {});
+});
+
+test('local env cannot construct Codex account routing', () => {
+  for (const key of ['CODEX_HOME', 'CODEX_SQLITE_HOME', 'codex_home']) {
+    assert.throws(
+      () => agents.assertSafeEnv({ [key]: 'C:/state/codex-a' }),
+      /owned by ai-agent-entrypoint/
+    );
+  }
 });
 
 test('env coerces values to strings', () => {
@@ -79,8 +87,29 @@ test('normalizeProfile rejects bad ids, unknown agents, and missing names', () =
   assert.throws(() => agents.normalizeProfile({ ...CLAUDE_WORK, id: 'has space' }), /Profile id/);
   assert.throws(() => agents.normalizeProfile({ ...CLAUDE_WORK, id: '../escape' }), /Profile id/);
   assert.throws(() => agents.normalizeProfile({ ...CLAUDE_WORK, agent: 'skynet' }), /Unknown agent/);
+  for (const inheritedName of ['constructor', 'toString', '__proto__']) {
+    assert.throws(
+      () => agents.normalizeProfile({ ...CLAUDE_WORK, agent: inheritedName }),
+      /Unknown agent/
+    );
+  }
   assert.throws(() => agents.normalizeProfile({ ...CLAUDE_WORK, displayName: '  ' }), /display name/);
   assert.throws(() => agents.normalizeProfile(null), /must be an object/);
+});
+
+test('local profiles cannot use the routed Codex identity namespace', () => {
+  assert.throws(
+    () => agents.normalizeProfile({ ...CLAUDE_WORK, id: 'codex:a' }),
+    /reserved "codex:" namespace/
+  );
+  assert.throws(
+    () => agents.normalizeProfile({ ...CLAUDE_WORK, id: 'CoDeX:a' }),
+    /reserved "codex:" namespace/
+  );
+  assert.throws(
+    () => agents.normalizeProfile({ ...CLAUDE_WORK, agent: 'codex' }),
+    /Local Codex profiles are not allowed/
+  );
 });
 
 // ── Local profile store ──────────────────────────────────────
@@ -174,6 +203,18 @@ test('resolveEntrypointPath prefers the configured path, then a sibling', () => 
   assert.equal(agents.resolveEntrypointPath({ appRoot: 'C:/nowhere', exists: () => false }), null);
 });
 
+test('an invalid configured entrypoint fails closed instead of using a sibling', () => {
+  const exists = (p) => p.replace(/\\/g, '/').includes('/workspace/ai-agent-entrypoint/bin/');
+  assert.equal(
+    agents.resolveEntrypointPath({
+      configured: 'C:/wrong/ai-agent-entrypoint',
+      appRoot: 'D:/workspace/agents-orchestrator',
+      exists,
+    }),
+    null
+  );
+});
+
 /** A doctor report as ai-agent-entrypoint actually emits it. */
 const DOCTOR_REPORT = {
   Alias: 'a',
@@ -211,12 +252,22 @@ test('sanitizeDoctorReport drops canonical account-home paths', () => {
 test('sanitizeDoctorReport carries the health signal through', () => {
   const bad = agents.sanitizeDoctorReport({
     ...DOCTOR_REPORT, Alias: 'c', Status: 'error',
-    AuthenticationStatePresent: false, Errors: ['home is missing'],
+    AuthenticationStatePresent: false,
+    Errors: ['Home C:/private/vault/codex-c is missing'],
+    Warnings: ['ManifestPath=C:/private/vault/accounts.json'],
   });
   assert.equal(bad.status, 'error');
   assert.equal(bad.authenticated, false);
-  assert.deepEqual(bad.errors, ['home is missing']);
+  assert.equal(bad.errors.length, 1);
+  assert.equal(bad.warnings.length, 1);
+  assert.ok(!JSON.stringify(bad).includes('private'));
+  assert.ok(!JSON.stringify(bad).includes('AppData'));
+  assert.equal(agents.sanitizeDoctorReport({
+    ...DOCTOR_REPORT,
+    Status: 'C:/private/status',
+  }).status, 'unknown');
   assert.equal(agents.sanitizeDoctorReport({ Alias: '' }), null);
+  assert.equal(agents.sanitizeDoctorReport({ Alias: '../escape' }), null);
   assert.equal(agents.sanitizeDoctorReport(null), null);
 });
 
@@ -241,10 +292,15 @@ test('discovery surfaces a failed doctor run as an error, not a crash', async ()
   fs.mkdirSync(path.join(dir, 'bin'), { recursive: true });
   fs.writeFileSync(agents.entrypointScript(dir), '# fake');
 
-  const run = (_file, _args, _opts, cb) => cb(new Error('AAE_MANIFEST_INVALID'), '', 'manifest is invalid');
+  const run = (_file, _args, _opts, cb) => cb(
+    new Error('AAE_MANIFEST_INVALID'),
+    '',
+    'manifest C:/private/vault/accounts.json is invalid'
+  );
   const r = await agents.discoverRoutedProfiles({ entrypointPath: dir, run });
   assert.deepEqual(r.profiles, []);
-  assert.match(r.error, /manifest is invalid/);
+  assert.match(r.error, /trusted terminal/);
+  assert.ok(!r.error.includes('AppData'));
 });
 
 test('discovery parses a successful doctor run', async () => {
@@ -292,6 +348,19 @@ test('a profile with no env overrides is honestly labelled native, not L2', () =
   assert.equal(spec.assurance, agents.ASSURANCE.NATIVE);
 });
 
+test('cosmetic or wrong-agent env flags do not claim L2 account selection', () => {
+  const flagsOnly = agents.buildLaunchSpec(
+    { id: 'flags', agent: 'claude', displayName: 'Flags', env: { NO_COLOR: '1' } },
+    { baseEnv: {} }
+  );
+  const wrongHome = agents.buildLaunchSpec(
+    { id: 'wrong-home', agent: 'claude', displayName: 'Wrong home', env: { GROK_HOME: 'C:/state/grok' } },
+    { baseEnv: {} }
+  );
+  assert.equal(flagsOnly.assurance, agents.ASSURANCE.NATIVE);
+  assert.equal(wrongHome.assurance, agents.ASSURANCE.NATIVE);
+});
+
 test('a profile cwd wins over the workflow default', () => {
   const spec = agents.buildLaunchSpec({ ...CLAUDE_WORK, cwd: 'C:/repo' }, { baseEnv: {}, defaultCwd: 'C:/work' });
   assert.equal(spec.cwd, 'C:/repo');
@@ -322,7 +391,7 @@ test('a routed profile fails closed rather than falling back to the native login
   );
   assert.throws(
     () => agents.buildLaunchSpec(ROUTED, { baseEnv: {}, entrypointPath: 'C:/gone', exists: () => false }),
-    /no agent-entrypoint\.ps1/
+    /routed account source is unavailable/
   );
   assert.throws(
     () => agents.buildLaunchSpec({ ...ROUTED, alias: '' }, { baseEnv: {}, entrypointPath: 'C:/ep', exists: () => true }),

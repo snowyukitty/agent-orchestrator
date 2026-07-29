@@ -10,13 +10,21 @@ import {
 
 import { ExecutionEngine, analyzeLoops } from './engine.js';
 import { TEMPLATES } from './templates.js';
-import { computeJobTarget, isDue, formatCountdown, DEFAULT_GRACE_MS } from './schedule.js';
+import {
+  computeJobTarget,
+  isDue,
+  formatCountdown,
+  mergeScheduledWorkflowSources,
+  DEFAULT_GRACE_MS,
+} from './schedule.js';
 import { runSelfTest } from './selftest.js';
 import { SessionManager, TARGET_ACTIVE } from './sessions.js';
 import { AgentsUI } from './agents-ui.js';
+import { createRunSnapshot, loadWorkflowDocument } from './workflow-document.js';
 
 class App {
   constructor() {
+    this._isSelfTest = new URLSearchParams(location.search).get('selftest') === '1';
     this._defaultDirectory = '.';
     /** @type {{ id: string, name: string, defaultDirectory: string, blocks: Array }} */
     this.workflow = this._normalizeWorkflow({
@@ -30,11 +38,11 @@ class App {
     this.sortable = null;
     this._dirty = false;                // unsaved-changes flag
     this._savedWorkflowsRaw = [];       // last-fetched saved workflows (for the picker)
+    this._workflowSourceFile = null;     // basename when the editor owns a stored workflow
 
-    // Headless regression run: `electron . --self-test` loads the page with
-    // ?selftest=1, exercises the engine's loop control flow with no real PTYs,
-    // and reports pass/fail to the main process which sets the exit code.
-    if (new URLSearchParams(location.search).get('selftest') === '1') {
+    // Renderer regressions are pure module tests. Do not initialize timers,
+    // discovery, settings, or a real PTY in this mode.
+    if (this._isSelfTest) {
       this._runSelfTest();
       return;
     }
@@ -88,6 +96,7 @@ class App {
       defaultDirectory: dir,
       blocks,
     });
+    this._workflowSourceFile = null;
 
     const nameInput = document.getElementById('workflow-name');
     if (nameInput) nameInput.value = this.workflow.name;
@@ -238,7 +247,16 @@ class App {
     if (!raw) return false;
     if (!this._confirmDiscardIfDirty()) return false;
 
-    this.workflow = this._normalizeWorkflow(raw);
+    let next;
+    try {
+      next = this._normalizeWorkflow(raw);
+    } catch (error) {
+      this._termLog(`❌ Could not open "${raw.name || file}": ${error.message}`, 'stderr');
+      this._flashStatus('Workflow needs a newer or compatible app version');
+      return false;
+    }
+    this.workflow = next;
+    this._workflowSourceFile = file;
     document.getElementById('workflow-name').value = this.workflow.name;
     this.renderBlocks();
     this._onWorkflowChanged();
@@ -274,6 +292,7 @@ class App {
     this.workflow = this._normalizeWorkflow({
       id: `wf-${Date.now()}`, name: 'New Workflow', defaultDirectory: dir, blocks: [],
     });
+    this._workflowSourceFile = null;
     document.getElementById('workflow-name').value = this.workflow.name;
     this.renderBlocks();
     this._onWorkflowChanged();
@@ -408,67 +427,16 @@ class App {
   }
 
   _normalizeWorkflow(data = {}) {
-    const source = data && typeof data === 'object' ? data : {};
-    const blocks = Array.isArray(source.blocks)
-      ? source.blocks.map(block => this._normalizeBlock(block)).filter(Boolean)
-      : [];
-
-    return {
-      id: this._safeId(source.id, `wf-${Date.now()}`),
-      name: typeof source.name === 'string' && source.name.trim()
-        ? source.name
-        : 'Untitled Workflow',
-      defaultDirectory: typeof source.defaultDirectory === 'string'
-        ? source.defaultDirectory
-        : this._defaultDirectory,
-      blocks,
-    };
-  }
-
-  _normalizeBlock(block) {
-    if (!block || typeof block !== 'object' || !BLOCK_TYPES[block.type]) {
-      return null;
-    }
-
-    const def = BLOCK_TYPES[block.type];
-    const params = { ...def.defaultParams };
-    const rawParams = block.params && typeof block.params === 'object' ? block.params : {};
-
-    for (const paramDef of def.params) {
-      if (!(paramDef.key in rawParams)) continue;
-      params[paramDef.key] = this._normalizeParamValue(paramDef, rawParams[paramDef.key], params[paramDef.key]);
-    }
-
-    return {
-      id: this._safeId(block.id, generateBlockId()),
-      type: block.type,
-      params,
-    };
-  }
-
-  _normalizeParamValue(paramDef, value, fallback) {
-    switch (paramDef.type) {
-      case 'number': {
-        const n = Number(value);
-        if (!Number.isFinite(n)) return fallback;
-        const min = Number.isFinite(Number(paramDef.min)) ? Number(paramDef.min) : -Infinity;
-        const max = Number.isFinite(Number(paramDef.max)) ? Number(paramDef.max) : Infinity;
-        return Math.min(max, Math.max(min, n));
+    const { document, diagnostics } = loadWorkflowDocument(data, {
+      defaultDirectory: this._defaultDirectory,
+    });
+    if (diagnostics.length && this.engine) {
+      const repaired = diagnostics.filter(item => item.code.endsWith('-id-repaired')).length;
+      if (repaired) {
+        this._termLog?.(`⚠️ Repaired ${repaired} invalid or duplicate workflow id(s) while loading`, 'system');
       }
-      case 'checkbox':
-        return Boolean(value);
-      case 'select':
-        return paramDef.options.some(option => String(option.value) === String(value))
-          ? String(value)
-          : fallback;
-      default:
-        return value == null ? '' : String(value);
     }
-  }
-
-  _safeId(value, fallback) {
-    if (typeof value !== 'string' || !value.trim()) return fallback;
-    return /^[a-zA-Z0-9_-]+$/.test(value) ? value : fallback;
+    return document;
   }
 
   _cssEscape(value) {
@@ -539,7 +507,7 @@ class App {
       const type = e.dataTransfer.getData('application/x-block-type');
       const index = this._dropIndexFromY(list, e.clientY);
       this._removeDropMarker();
-      if (type && BLOCK_TYPES[type]) {
+      if (type && Object.hasOwn(BLOCK_TYPES, type)) {
         // Drop position determines where the block lands (not always the end).
         this.addBlock(type, index);
       }
@@ -649,6 +617,7 @@ class App {
   _initEngine() {
     const engine = this.engine;
     this._runSessionIds = new Set();
+    this._visualizedRunId = null;
 
     engine.onLog = (msg, type) => this._termLog(msg, type);
 
@@ -659,16 +628,19 @@ class App {
       this.sessions.adopt(meta);
     };
 
-    engine.onBlockStart = (index) => {
-      this._forEachBlock((el, i) => {
-        el.classList.remove('executing', 'done', 'error');
-        if (i < index) el.classList.add('done');
-        if (i === index) el.classList.add('executing');
-      });
+    engine.onBlockStart = (index, blockId) => {
+      if (!this._visualizedRunId || this.workflow?.id !== this._visualizedRunId) return;
+      this._forEachBlock(el => el.classList.remove('executing'));
+      const el = blockId ? this._blockElById(blockId) : this._blockElAt(index);
+      if (el) {
+        el.classList.remove('done', 'error');
+        el.classList.add('executing');
+      }
     };
 
-    engine.onBlockEnd = (index, ok) => {
-      const el = this._blockElAt(index);
+    engine.onBlockEnd = (index, ok, blockId) => {
+      if (!this._visualizedRunId || this.workflow?.id !== this._visualizedRunId) return;
+      const el = blockId ? this._blockElById(blockId) : this._blockElAt(index);
       if (el) {
         el.classList.remove('executing');
         el.classList.add(ok ? 'done' : 'error');
@@ -676,6 +648,8 @@ class App {
     };
 
     engine.onComplete = (success) => {
+      const completedRunId = engine.runId;
+      const completedVisualId = this._visualizedRunId;
       // Restore toolbar
       document.getElementById('btn-run').classList.remove('hidden');
       document.getElementById('btn-stop').classList.add('hidden');
@@ -692,10 +666,16 @@ class App {
 
       // Reset visual states after a delay
       setTimeout(() => {
-        this._forEachBlock((el) => {
-          el.classList.remove('done', 'error', 'executing');
-        });
-        this._clearLoopBadges();
+        // A newer run may have started during this four-second result window.
+        // Its status and block decorations belong to it, not this old timer.
+        if (engine.isRunning || engine.runId !== completedRunId) return;
+        if (completedVisualId && this.workflow?.id === completedVisualId) {
+          this._forEachBlock((el) => {
+            el.classList.remove('done', 'error', 'executing');
+          });
+          this._clearRunBadges();
+        }
+        if (this._visualizedRunId === completedVisualId) this._visualizedRunId = null;
         badge.textContent = 'Idle';
         badge.className = 'workflow-status';
         dot.className = 'status-indicator';
@@ -707,8 +687,9 @@ class App {
       document.getElementById('status-text').textContent = status;
     };
 
-    engine.onLoopIteration = (loopIndex, iter, total, done) => {
-      const el = this._blockElAt(loopIndex);
+    engine.onLoopIteration = (loopIndex, iter, total, done, blockId) => {
+      if (!this._visualizedRunId || this.workflow?.id !== this._visualizedRunId) return;
+      const el = blockId ? this._blockElById(blockId) : this._blockElAt(loopIndex);
       if (!el) return;
       const header = el.querySelector('.block-header');
       if (!header) return;
@@ -724,11 +705,28 @@ class App {
         document.getElementById('status-text').textContent = `🔄 Loop ${iter}/${total}`;
       }
     };
+
+    engine.onAgentJoinProgress = ({ blockId, index, ready, total }) => {
+      if (!this._visualizedRunId || this.workflow?.id !== this._visualizedRunId) return;
+      const el = blockId ? this._blockElById(blockId) : this._blockElAt(index);
+      const header = el?.querySelector('.block-header');
+      if (!header) return;
+      let badge = header.querySelector('.agent-join-progress');
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'agent-join-progress';
+        header.appendChild(badge);
+      }
+      badge.textContent = `${ready}/${total} ready`;
+      badge.classList.toggle('done', total > 0 && ready >= total);
+    };
   }
 
-  /** Remove any loop-iteration badges left on Loop blocks after a run. */
-  _clearLoopBadges() {
-    document.querySelectorAll('.workflow-block .loop-iter').forEach(b => b.remove());
+  /** Remove transient loop/join badges left on blocks after a run. */
+  _clearRunBadges() {
+    document
+      .querySelectorAll('.workflow-block .loop-iter, .workflow-block .agent-join-progress')
+      .forEach(badge => badge.remove());
   }
 
   // ── Block CRUD ─────────────────────────────────────────────
@@ -941,8 +939,9 @@ class App {
 
   // ── Workflow Execution ─────────────────────────────────────
 
-  async runWorkflow(note = null) {
-    if (!this.workflow || this.workflow.blocks.length === 0) {
+  async runWorkflow(note = null, { workflow = null, visualize = true } = {}) {
+    const sourceWorkflow = workflow || this.workflow;
+    if (!sourceWorkflow || sourceWorkflow.blocks.length === 0) {
       this._flashStatus('No blocks to run');
       return;
     }
@@ -958,11 +957,15 @@ class App {
     this._closePreviousRunSessions();
 
     document.getElementById('output-log').innerHTML = '';
-    this._clearLoopBadges();
+    this._clearRunBadges();
     if (note) this._appendLog(note, 'system');
 
-    // Sync params from DOM → data
-    this._syncParams();
+    // Only the editor-owned document has live DOM params. Scheduled workflows
+    // arrive as already-normalized documents and must never replace or clear
+    // an unrelated dirty editor.
+    if (!workflow) this._syncParams();
+    const runPlan = createRunSnapshot(sourceWorkflow);
+    this._visualizedRunId = visualize ? runPlan.id : null;
 
     // Toggle buttons
     document.getElementById('btn-run').classList.add('hidden');
@@ -978,7 +981,7 @@ class App {
 
     // Go!
     try {
-      await this.engine.execute(this.workflow.blocks, this.workflow.defaultDirectory);
+      await this.engine.execute(runPlan.blocks, runPlan.defaultDirectory);
     } catch (err) {
       this._termLog(`❌ Run failed: ${err.message}`, 'stderr');
       document.getElementById('btn-run').classList.remove('hidden');
@@ -1033,9 +1036,20 @@ class App {
     this._onWorkflowChanged();
 
     try {
-      const path = await window.api.saveWorkflow({ workflow: this.workflow });
+      const path = await window.api.saveWorkflow({
+        workflow: this.workflow,
+        file: this._workflowSourceFile,
+      });
+      this._workflowSourceFile ||= String(path).split(/[\\/]/).pop() || null;
       this._termLog(`💾 Saved → ${path}`, 'system');
       this._setDirty(false);
+      // Promote exactly what was persisted into the schedule cache now. This
+      // avoids a short window where a just-saved due job could execute the
+      // previous disk snapshot while the periodic refresh is still pending.
+      const persisted = this._normalizeWorkflow(this.workflow);
+      this._diskJobs = this._diskJobs.filter(wf => wf.id !== persisted.id);
+      if (this._scheduleOf(persisted)) this._diskJobs.push(persisted);
+      this._rebuildJobs();
       this._flashStatus('Saved');
     } catch (err) {
       this._termLog(`❌ Save failed: ${err.message}`, 'stderr');
@@ -1052,6 +1066,9 @@ class App {
       if (!data) return;
 
       this.workflow = this._normalizeWorkflow(data);
+      // Importing from an arbitrary path creates a new managed copy on Save;
+      // it must not claim a same-named file in the app's workflow store.
+      this._workflowSourceFile = null;
       document.getElementById('workflow-name').value = this.workflow.name || 'Loaded';
       this.renderBlocks();
       this._onWorkflowChanged();
@@ -1339,9 +1356,28 @@ class App {
     this._refreshingSchedules = (async () => {
       try {
         const all = await window.api.loadWorkflow({});
-        this._diskJobs = (Array.isArray(all) ? all : [])
-          .map(wf => this._normalizeWorkflow(wf))
-          .filter(wf => this._scheduleOf(wf));
+        this._diskJobs = [];
+        const scheduledIds = new Set();
+        for (const raw of (Array.isArray(all) ? all : [])) {
+          try {
+            const wf = this._normalizeWorkflow(raw);
+            if (!this._scheduleOf(wf)) continue;
+            if (scheduledIds.has(wf.id)) {
+              this._termLog(
+                `⚠️ Scheduled workflow "${raw?.name || raw?.file || 'unknown'}" was skipped: duplicate workflow id "${wf.id}"`,
+                'stderr'
+              );
+              continue;
+            }
+            scheduledIds.add(wf.id);
+            this._diskJobs.push(wf);
+          } catch (error) {
+            this._termLog(
+              `⚠️ Scheduled workflow "${raw?.name || raw?.file || 'unknown'}" was skipped: ${error.message}`,
+              'stderr'
+            );
+          }
+        }
       } catch (e) {
         this._diskJobs = [];
       } finally {
@@ -1356,12 +1392,10 @@ class App {
 
   /** Build the merged job list (disk ∪ current workflow) and render it. */
   _rebuildJobs() {
-    const map = new Map();
-    for (const wf of this._diskJobs) map.set(wf.id, wf);
-    if (this.workflow) map.set(this.workflow.id, this.workflow); // current overrides its saved copy
-
     const jobs = [];
-    for (const wf of map.values()) {
+    // A persisted workflow is the schedule authority for its id. Dirty editor
+    // changes remain visible in the editor but affect only a later save/run.
+    for (const wf of mergeScheduledWorkflowSources(this._diskJobs, this.workflow)) {
       const sb = this._scheduleOf(wf);
       if (!sb) continue;
       jobs.push({
@@ -1393,7 +1427,10 @@ class App {
     if (this.workflow) {
       const job = this._scheduledJobs.find(j => j.id === this.workflow.id);
       const sb = this._scheduleOf(this.workflow);
-      if (job && sb) { job.datetime = sb.params.datetime; job.mode = sb.params.mode || 'once'; }
+      if (job?.workflow === this.workflow && sb) {
+        job.datetime = sb.params.datetime;
+        job.mode = sb.params.mode || 'once';
+      }
     }
 
     // Periodically re-sync the job list from disk (picks up newly saved workflows).
@@ -1422,15 +1459,19 @@ class App {
   }
 
   _runScheduledJob(job) {
-    // Load the scheduled workflow into the editor, then run it.
-    const wf = this._normalizeWorkflow(JSON.parse(JSON.stringify(job.workflow)));
-    this.workflow = wf;
-    const nameInput = document.getElementById('workflow-name');
-    if (nameInput) nameInput.value = wf.name || 'Scheduled';
-    this.renderBlocks();
-    this._setDirty(false);
-    document.getElementById('schedule-modal')?.classList.add('hidden');
-    this.runWorkflow(`⏰ Scheduled run: "${wf.name}" @ ${new Date().toLocaleString()}`);
+    // Execute an immutable copy without replacing the document currently open
+    // in the editor. In particular, a background schedule must not erase
+    // unrelated unsaved work or mark it clean.
+    try {
+      const wf = this._normalizeWorkflow(job.workflow);
+      document.getElementById('schedule-modal')?.classList.add('hidden');
+      this.runWorkflow(
+        `⏰ Scheduled run: "${wf.name}" @ ${new Date().toLocaleString()}`,
+        { workflow: wf, visualize: false }
+      );
+    } catch (error) {
+      this._termLog(`❌ Scheduled workflow could not start: ${error.message}`, 'stderr');
+    }
   }
 
   _markScheduleBlockTargetHandled(block) {
@@ -1634,6 +1675,11 @@ class App {
 
   _blockElAt(index) {
     return document.querySelectorAll('.workflow-block')[index] || null;
+  }
+
+  _blockElById(id) {
+    if (!id) return null;
+    return document.querySelector(`[data-block-id="${this._cssEscape(id)}"]`);
   }
 
   _flashStatus(text, duration = 2000) {

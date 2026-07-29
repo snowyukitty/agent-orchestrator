@@ -49,3 +49,22 @@ export function formatCountdown(ms) {
   const p = n => String(n).padStart(2, '0');
   return d > 0 ? `${d}d ${p(h)}:${p(m)}:${p(sec)}` : `${p(h)}:${p(m)}:${p(sec)}`;
 }
+
+/**
+ * Merge persisted schedules with the editor draft.
+ *
+ * Persisted data wins an id collision: an unsaved edit must never change what
+ * an already-saved schedule will execute. A genuinely unsaved workflow still
+ * participates while the app remains open.
+ */
+export function mergeScheduledWorkflowSources(diskWorkflows, currentWorkflow) {
+  const map = new Map();
+  for (const workflow of (Array.isArray(diskWorkflows) ? diskWorkflows : [])) {
+    if (!workflow?.id || map.has(workflow.id)) continue;
+    map.set(workflow.id, workflow);
+  }
+  if (currentWorkflow?.id && !map.has(currentWorkflow.id)) {
+    map.set(currentWorkflow.id, currentWorkflow);
+  }
+  return [...map.values()];
+}

@@ -67,15 +67,28 @@ class SessionRegistry {
    * @param {function} [deps.killTree]   (pid) => void, force-kill a process tree
    * @param {function} [deps.log]        (message) => void
    */
-  constructor({ pty, onOutput, onExit, onStatus, killTree, log } = {}) {
+  constructor({
+    pty,
+    onOutput,
+    onExit,
+    onStatus,
+    killTree,
+    log,
+    terminationTimeoutMs = TERMINATION_TIMEOUT_MS,
+  } = {}) {
     this._pty = pty;
     this._onOutput = onOutput || (() => {});
     this._onExit = onExit || (() => {});
     this._onStatus = onStatus || (() => {});
     this._killTree = killTree || (() => {});
     this._log = log || (() => {});
+    this._terminationTimeoutMs = terminationTimeoutMs;
     /** @type {Map<string, object>} id → session record */
     this._sessions = new Map();
+    /** IDs removed while their old PTY is still delivering an exit event. */
+    this._retiringIds = new Set();
+    this._admissionClosed = false;
+    this._admissionReason = 'session admission is closed';
     // node-pty's Windows ConPTY addon removes process batons from native exit
     // threads without a lock. Serializing requested exits avoids racing those
     // threads when several tabs are closed or the app quits at once.
@@ -92,16 +105,20 @@ class SessionRegistry {
    * @returns {{ id: string, pid: number }}
    */
   create(spec, { id, cols, rows } = {}) {
+    if (this._admissionClosed) {
+      throw new Error(`Cannot create a session: ${this._admissionReason}`);
+    }
     if (!spec || typeof spec.file !== 'string' || !spec.file) {
       throw new Error('Launch spec is missing an executable');
     }
 
     const sessionId = id || nextSessionId();
 
-    // Never silently overwrite a live entry — that used to orphan the old PTY.
-    if (this._sessions.has(sessionId)) {
-      this._settleAllWaiters(this._sessions.get(sessionId), 'replaced');
-      this.kill(sessionId, 'replaced');
+    // A duplicate cannot be made safe by killing and immediately replacing the
+    // old entry: its eventual exit event would carry the same id and could mark
+    // the new PTY as exited (an ABA race). Wait for explicit removal instead.
+    if (this._sessions.has(sessionId) || this._retiringIds.has(sessionId)) {
+      throw new Error(`Session id "${sessionId}" is already in use`);
     }
 
     const proc = this._pty.spawn(spec.file, spec.args || [], {
@@ -145,6 +162,7 @@ class SessionRegistry {
     });
 
     proc.onExit(({ exitCode }) => {
+      if (session.status === 'exited') return;
       // Update the captured record, not a map lookup: remove() may already
       // have dropped the entry, and the pending kill escalation reads this
       // status to decide whether the tree still needs force-killing.
@@ -152,6 +170,7 @@ class SessionRegistry {
       session.status = 'exited';
       session.exitCode = exitCode;
       session.proc = null;
+      this._retiringIds.delete(sessionId);
       session.resolveExit();
       this._settleAllWaiters(session, 'exit');
       if (this._sessions.has(sessionId)) this._onStatus(this.describe(sessionId));
@@ -165,6 +184,12 @@ class SessionRegistry {
 
   has(id) {
     return this._sessions.has(id);
+  }
+
+  /** Permanently stop this registry from accepting new PTYs. */
+  closeAdmission(reason = 'session admission is closed') {
+    this._admissionClosed = true;
+    this._admissionReason = String(reason || 'session admission is closed');
   }
 
   /** True when the session exists and its PTY is still alive. */
@@ -370,11 +395,18 @@ class SessionRegistry {
   }
 
   /** Wait until every queued ConPTY termination has delivered its exit event. */
-  whenTerminationsComplete() {
-    return this._terminationQueue;
+  async whenTerminationsComplete() {
+    // A task can enqueue another termination while we are awaiting the current
+    // tail. Observe until the tail is stable rather than returning a stale
+    // snapshot of the queue.
+    let observed;
+    do {
+      observed = this._terminationQueue;
+      await observed;
+    } while (observed !== this._terminationQueue);
   }
 
-  _waitForExit(s, timeoutMs = TERMINATION_TIMEOUT_MS) {
+  _waitForExit(s, timeoutMs = this._terminationTimeoutMs) {
     if (!s || s.status === 'exited' || !s.proc) return Promise.resolve(true);
     return new Promise((resolve) => {
       const timer = setTimeout(() => resolve(false), timeoutMs);
@@ -433,14 +465,21 @@ class SessionRegistry {
    * before initiating the next exit. This is the safe path for multi-session
    * shutdown and bulk-close operations on Windows.
    */
-  killAllSequential(reason = 'shutdown') {
+  killAllSequential(reason = 'shutdown', { failOnTimeout = false } = {}) {
     return this._enqueueTermination(async () => {
       const live = [...this._sessions.values()].filter(s => s.status === 'running');
       for (const s of live) {
         if (s.status !== 'running') continue;
         this.kill(s.id, reason);
         if (!await this._waitForExit(s)) {
-          this._log(`[Sessions] timed out waiting for ${s.id} to exit before terminating the next session`);
+          const message = `Timed out waiting for session ${s.id} to exit`;
+          if (s.killTimer) {
+            clearTimeout(s.killTimer);
+            s.killTimer = null;
+          }
+          this._killTree(s.pid);
+          this._log(`[Sessions] ${message.toLowerCase()} before terminating the next session`);
+          if (failOnTimeout) throw new Error(message);
         }
       }
       return live.length;
@@ -470,7 +509,11 @@ class SessionRegistry {
     const s = this._sessions.get(id);
     if (!s) return false;
     this._settleAllWaiters(s, 'removed');
-    if (s.status === 'running') this.kill(id, 'closed');
+    if (s.status === 'running') {
+      // Reserve the id until this exact PTY has delivered its exit event.
+      this._retiringIds.add(id);
+      this.kill(id, 'closed');
+    }
     this._sessions.delete(id);
     return true;
   }
@@ -524,6 +567,10 @@ class SessionRegistry {
 
   get hasPendingTermination() {
     return this._pendingTerminations > 0;
+  }
+
+  get admissionClosed() {
+    return this._admissionClosed;
   }
 }
 

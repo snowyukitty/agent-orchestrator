@@ -112,12 +112,35 @@ test('create rejects a spec with no executable', () => {
   assert.throws(() => reg.create(null), /missing an executable/);
 });
 
-test('reusing an id kills the previous PTY instead of orphaning it', () => {
+test('reusing a live id fails closed without disturbing the previous PTY', () => {
   const { reg, pty } = makeRegistry();
   reg.create(SPEC, { id: 'sess-fixed' });
-  reg.create(SPEC, { id: 'sess-fixed' });
-  assert.equal(pty.spawned[0].killed, 'SIGTERM');
+  assert.throws(
+    () => reg.create(SPEC, { id: 'sess-fixed' }),
+    /already in use/
+  );
+  assert.equal(pty.spawned[0].killed, null);
+  assert.equal(pty.spawned.length, 1);
   assert.equal(reg.size, 1);
+});
+
+test('a removed live id stays reserved until its old PTY exits', () => {
+  const { reg, pty } = makeRegistry();
+  reg.create(SPEC, { id: 'sess-fixed' });
+  reg.remove('sess-fixed');
+  assert.throws(() => reg.create(SPEC, { id: 'sess-fixed' }), /already in use/);
+
+  pty.spawned[0].exit(0);
+  assert.doesNotThrow(() => reg.create(SPEC, { id: 'sess-fixed' }));
+  assert.equal(pty.spawned.length, 2);
+});
+
+test('closing admission rejects every later create without spawning', () => {
+  const { reg, pty } = makeRegistry();
+  reg.closeAdmission('test shutdown');
+  assert.equal(reg.admissionClosed, true);
+  assert.throws(() => reg.create(SPEC), /test shutdown/);
+  assert.equal(pty.spawned.length, 0);
 });
 
 test('write translates LF to CR and only reaches live sessions', () => {
@@ -327,6 +350,17 @@ test('killAllSequential waits for each exit before killing the next PTY', async 
   assert.equal(pty.spawned[1].killed, 'SIGTERM');
   pty.spawned[1].exit(0);
   assert.equal(await stopping, 2);
+});
+
+test('strict sequential shutdown rejects a PTY that never reports exit', async () => {
+  const { reg, events } = makeRegistry({ terminationTimeoutMs: 5 });
+  reg.create(SPEC, { id: 'stubborn' });
+
+  await assert.rejects(
+    reg.killAllSequential('shutdown', { failOnTimeout: true }),
+    /Timed out waiting for session stubborn/
+  );
+  assert.deepEqual(events.killedTrees, [1000]);
 });
 
 test('removeAndWait serializes rapid tab closes', async () => {

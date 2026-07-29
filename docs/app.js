@@ -5,6 +5,7 @@
   const markerInput = document.getElementById('marker-input');
   const idleInput = document.getElementById('idle-input');
   const timeoutInput = document.getElementById('timeout-input');
+  const failurePolicySelect = document.getElementById('failure-policy-select');
   const recipeTitle = document.getElementById('recipe-title');
   const recipeLanes = document.getElementById('recipe-lanes');
   const recipeSummary = document.getElementById('recipe-summary');
@@ -32,11 +33,11 @@
       ],
     },
     compare: {
-      title: 'Two proposals + synthesizer',
+      title: 'Three independent proposals',
       roles: [
         { name: 'Proposal A', prompt: 'Develop one solution direction' },
         { name: 'Proposal B', prompt: 'Develop an independent direction' },
-        { name: 'Synthesizer', prompt: 'Compare evidence and synthesize' },
+        { name: 'Proposal C', prompt: 'Develop a third solution direction' },
       ],
     },
   };
@@ -67,34 +68,76 @@
   function renderRecipe() {
     const topology = topologies[topologySelect.value] || topologies.pair;
     const marker = cleanMarker();
-    const idleMs = clampNumber(idleInput, 3000, 100, 600000);
-    const timeoutMs = clampNumber(timeoutInput, 90000, 100, 3600000);
+    const idleMs = clampNumber(idleInput, 2000, 0, 3600000);
+    const timeoutMs = clampNumber(timeoutInput, 120000, 1, 86400000);
+    const continueOnFailure = failurePolicySelect.value === 'continue';
 
     recipeTitle.textContent = topology.title;
     recipeLanes.replaceChildren();
 
-    topology.roles.forEach((role, index) => {
-      const lane = makeElement('div', 'recipe-lane');
-      const roleLabel = makeElement('div', 'recipe-role');
-      roleLabel.append(
-        makeElement('span', 'role-index', String(index + 1).padStart(2, '0')),
-        makeElement('span', '', role.name),
-      );
-      lane.append(
-        roleLabel,
-        makeElement('span', 'recipe-block', 'Agent Session'),
-        makeElement('span', 'recipe-block', 'Send to Agent'),
-        makeElement('span', 'recipe-block block-wait', `Wait · ${marker}`),
-      );
-      recipeLanes.append(lane);
-    });
+    const stages = [
+      {
+        label: '01 · OPEN EVERY SESSION',
+        blocks: topology.roles.map((role) => ({
+          title: 'Agent Session',
+          detail: role.name,
+        })),
+      },
+      {
+        label: '02 · SEND EVERY PROMPT',
+        blocks: topology.roles.map((role) => ({
+          title: 'Send to Agent',
+          detail: role.name,
+        })),
+      },
+    ];
 
+    for (const stage of stages) {
+      const stageElement = makeElement('div', 'recipe-stage');
+      stageElement.append(makeElement('div', 'recipe-stage-label', stage.label));
+      const blockRow = makeElement('div', 'recipe-stage-blocks');
+      for (const block of stage.blocks) {
+        const blockElement = makeElement('div', 'recipe-block');
+        blockElement.append(
+          makeElement('strong', '', block.title),
+          makeElement('small', '', block.detail),
+        );
+        blockRow.append(blockElement);
+      }
+      stageElement.append(blockRow);
+      recipeLanes.append(stageElement);
+    }
+
+    const joinStage = makeElement('div', 'recipe-stage recipe-stage-join');
+    joinStage.append(makeElement('div', 'recipe-stage-label', '03 · JOIN ONCE'));
+    const joinBlock = makeElement('div', 'recipe-join-block');
+    const joinIdentity = makeElement('div', 'recipe-join-identity');
+    joinIdentity.append(
+      makeElement('span', 'recipe-join-mark', '◇'),
+      makeElement('strong', '', 'Join Agents'),
+      makeElement('small', '', `marker “${marker}” or ${idleMs} ms new-output idle`),
+    );
+    joinBlock.append(
+      joinIdentity,
+      makeElement('span', 'recipe-ready', `0 / ${topology.roles.length} ready`),
+    );
+    joinStage.append(joinBlock);
+    recipeLanes.append(joinStage);
+
+    let stepNumber = 1;
     const lines = [
       `${topology.title}`,
-      ...topology.roles.map((role, index) => (
-        `${index + 1}. ${role.name}: Agent Session → Send “${role.prompt}” → Wait for “${marker}”`
+      'Open every session:',
+      ...topology.roles.map((role) => `${stepNumber++}. Agent Session → ${role.name}`),
+      'Send every prompt before joining:',
+      ...topology.roles.map((role) => (
+        `${stepNumber++}. Send to Agent → ${role.name}: “${role.prompt}”`
       )),
-      `Join policy: pattern "${marker}" (literal, case-insensitive) OR ${idleMs} ms idle; ${timeoutMs} ms timeout backstop.`,
+      `${stepNumber}. Join Agents → all ${topology.roles.length} workflow-owned sessions prompted in this stage`,
+      `   Ready: each session matches "${marker}" (literal, case-insensitive) OR reaches ${idleMs} ms new-output idle.`,
+      continueOnFailure
+        ? `   Failure: continue with a warning after ${timeoutMs} ms timeout or premature session exit.`
+        : `   Failure: stop downstream execution after ${timeoutMs} ms timeout or premature session exit; leave remaining sessions open.`,
       'Profile IDs: choose locally in Agent Accounts; do not bake machine-specific IDs into a shared template.',
     ];
     recipeSummary.textContent = lines.join('\n');
@@ -201,8 +244,8 @@
 
     simulationLog.replaceChildren();
     simulationClock.textContent = 't + 0 ms';
-    simulationResult.textContent = 'Checkpoint captured';
-    appendSimulationLine('01', 'checkpoint → output sequence 1842', 'log-dim');
+    simulationResult.textContent = '0 / 3 ready';
+    appendSimulationLine('01', 'stage scope → 3 prompted workflow sessions', 'log-dim');
 
     void waitConsole.offsetWidth;
     waitConsole.classList.add('is-running');
@@ -210,24 +253,26 @@
 
     scheduleSimulation(320 * pace, () => {
       simulationClock.textContent = 't + 320 ms';
-      appendSimulationLine('02', 'Enter submitted to review session', 'log-dim');
-      simulationResult.textContent = 'Observing new output';
+      appendSimulationLine('02', `Builder marker “${marker}” found from its prompt checkpoint`, 'log-marker');
+      simulationResult.textContent = '1 / 3 ready';
     });
 
     scheduleSimulation(680 * pace, () => {
       simulationClock.textContent = 't + 680 ms';
-      appendSimulationLine('03', 'Reviewing changed files…', 'log-output');
+      appendSimulationLine('03', 'Reviewer reaches new-output idle', 'log-output');
+      simulationResult.textContent = '2 / 3 ready';
     });
 
     scheduleSimulation(1050 * pace, () => {
       simulationClock.textContent = 't + 1050 ms';
-      appendSimulationLine('04', `Agent: ${marker}`, 'log-marker');
+      appendSimulationLine('04', `Verifier marker “${marker}” found`, 'log-marker');
+      simulationResult.textContent = '3 / 3 ready';
     });
 
     scheduleSimulation(1420 * pace, () => {
       simulationClock.textContent = 't + 1420 ms';
-      appendSimulationLine('05', 'matched from sequence 1842 → continue', 'log-match');
-      simulationResult.textContent = 'Output text matched';
+      appendSimulationLine('05', 'shared barrier complete → continue', 'log-match');
+      simulationResult.textContent = 'Team stage ready';
       simulationResult.classList.add('is-match');
     });
 
@@ -259,6 +304,7 @@
   markerInput.addEventListener('input', renderRecipe);
   idleInput.addEventListener('change', renderRecipe);
   timeoutInput.addEventListener('change', renderRecipe);
+  failurePolicySelect.addEventListener('change', renderRecipe);
   runSimulationButton.addEventListener('click', runSimulation);
 
   setupAssuranceTabs();

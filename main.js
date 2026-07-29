@@ -13,6 +13,11 @@ const agentProfiles = require('./src/main/agents');
 const { writeJsonAtomic, readJsonStrict, readJsonDir, ensureDir } = require('./src/main/store');
 const { loadSettings, saveSettings } = require('./src/main/settings');
 const { prepareUserData } = require('./src/main/user-data');
+const { RoutedDiscoveryCache } = require('./src/main/routed-cache');
+const { ShutdownCoordinator } = require('./src/main/shutdown');
+const {
+  assertTrustedIpcSender, getUsableWebContents, installNavigationGuards,
+} = require('./src/main/trust');
 const {
   asPlainObject, asId, asText, asCols, asRows,
 } = require('./src/main/validate');
@@ -31,6 +36,8 @@ app.setPath('userData', userDataState.path);
 const sessionDataPath = path.join(userDataState.path, 'session');
 fs.mkdirSync(sessionDataPath, { recursive: true });
 app.setPath('sessionData', sessionDataPath);
+
+const RENDERER_ENTRY_FILE = path.join(__dirname, 'src', 'index.html');
 
 // ── Timestamped Logging ──────────────────────────────────────
 // Prefix every main-process console line with a local HH:MM:SS.mmm
@@ -67,8 +74,6 @@ let schedulerHeartbeatTimer = null;
 let powerResumeHandler = null;
 let powerUnlockHandler = null;
 let cleanupComplete = false;
-let gracefulQuitStarted = false;
-let gracefulQuitReady = false;
 let keepAwakeId = null;
 let sleepTimer = null;
 let sleepTarget = null; // epoch ms when hibernate fires (null = none armed)
@@ -92,7 +97,7 @@ function isDirectory(dir) {
 function resolveWorkingDir(cwd) {
   if (isDirectory(cwd)) return cwd;
   const fallback = app.getPath('home');
-  if (cwd) console.warn(`[Main] cwd not found: "${cwd}" — falling back to "${fallback}"`);
+  if (cwd) console.warn('[Main] Requested working directory was unavailable; using the default directory');
   return fallback;
 }
 
@@ -116,6 +121,20 @@ function sendToRenderer(channel, payload) {
     }
     return false;
   }
+}
+
+/** Register an IPC route that only the app's own top-level renderer may call. */
+function handleTrusted(channel, handler) {
+  ipcMain.handle(channel, (event, ...args) => {
+    const expectedWebContents = getUsableWebContents(mainWindow);
+    // A renderer can finish an in-flight preload call after BrowserWindow
+    // teardown has started. Do not invoke the privileged handler once the
+    // trusted renderer is gone; a live but unexpected sender is still rejected
+    // by assertTrustedIpcSender below.
+    if (!expectedWebContents) return undefined;
+    assertTrustedIpcSender(event, RENDERER_ENTRY_FILE, expectedWebContents);
+    return handler(event, ...args);
+  });
 }
 
 // ── PTY Sessions ─────────────────────────────────────────────
@@ -231,11 +250,16 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       backgroundThrottling: false, // keep timers full-speed when hidden/locked
+      ...(isSelfTest ? { additionalArguments: ['--orchestrator-self-test'] } : {}),
     }
   });
 
-  mainWindow.loadFile('src/index.html', isSelfTest ? { query: { selftest: '1' } } : undefined);
+  installNavigationGuards(mainWindow.webContents, RENDERER_ENTRY_FILE, (message) => {
+    console.warn(message);
+  });
+  mainWindow.loadFile(RENDERER_ENTRY_FILE, isSelfTest ? { query: { selftest: '1' } } : undefined);
 
   // Show window only after content is fully rendered
   mainWindow.once('ready-to-show', () => {
@@ -465,33 +489,15 @@ function cleanupForQuit() {
   }
 }
 
+const shutdownCoordinator = new ShutdownCoordinator({
+  getRegistry: () => sessions,
+  cleanup: cleanupNonProcessState,
+  requestQuit: () => app.quit(),
+  onError: (err) => console.error(`[Sessions] sequential shutdown failed: ${err.message}`),
+});
+
 function handleBeforeQuit(event) {
-  if (gracefulQuitReady) {
-    cleanupNonProcessState();
-    return;
-  }
-
-  const liveCount = sessions
-    ? sessions.list().filter(session => session.status === 'running').length
-    : 0;
-  if (liveCount <= 1 && !sessions?.hasPendingTermination) {
-    cleanupForQuit();
-    return;
-  }
-
-  // node-pty's ConPTY addon can assert when several native exit callbacks
-  // remove their batons concurrently. Hold the Electron quit long enough to
-  // terminate each PTY and receive its JS exit callback in sequence.
-  event.preventDefault();
-  if (gracefulQuitStarted) return;
-  gracefulQuitStarted = true;
-  cleanupNonProcessState();
-  sessions.killAllSequential('shutdown')
-    .catch(err => console.error(`[Sessions] sequential shutdown failed: ${err.message}`))
-    .finally(() => {
-      gracefulQuitReady = true;
-      app.quit();
-    });
+  shutdownCoordinator.handleBeforeQuit(event);
 }
 
 app.on('window-all-closed', () => {
@@ -510,13 +516,13 @@ app.on('activate', () => {
 // Legacy channel: spawns a plain PowerShell session running one command.
 // Kept so workflows saved before the session/agent model still run; it is
 // now just a session with no profile and no account selection (L0-native).
-ipcMain.handle('execute-command', async (_event, payload) => {
+handleTrusted('execute-command', async (_event, payload) => {
   let id = null;
   try {
     const p = asPlainObject(payload);
     id = asId(p.id, 'session id');
     const command = asText(p.command ?? '', { what: 'command', max: 32_000 });
-    console.log(`[IPC] execute-command: "${command}" in "${p.cwd}"`);
+    console.log(`[IPC] execute-command: id=${id}, commandChars=${command.length}`);
 
     await sessions.whenTerminationsComplete();
     const { id: sessionId, pid } = sessions.create({
@@ -537,7 +543,7 @@ ipcMain.handle('execute-command', async (_event, payload) => {
 });
 
 // ── IPC: Send Input to Process ───────────────────────────────
-ipcMain.handle('send-input', async (_event, payload) => {
+handleTrusted('send-input', async (_event, payload) => {
   try {
     const p = asPlainObject(payload);
     return sessions.write(asId(p.id, 'session id'), asText(p.text));
@@ -548,7 +554,7 @@ ipcMain.handle('send-input', async (_event, payload) => {
 });
 
 // ── IPC: Resize Process ──────────────────────────────────────
-ipcMain.handle('resize-process', async (_event, payload) => {
+handleTrusted('resize-process', async (_event, payload) => {
   try {
     const p = asPlainObject(payload);
     return sessions.resize(asId(p.id, 'session id'), p.cols, p.rows);
@@ -559,7 +565,7 @@ ipcMain.handle('resize-process', async (_event, payload) => {
 });
 
 // ── IPC: Kill Process ────────────────────────────────────────
-ipcMain.handle('kill-process', async (_event, payload) => {
+handleTrusted('kill-process', async (_event, payload) => {
   try {
     const p = asPlainObject(payload);
     return await sessions.removeAndWait(asId(p.id, 'session id'));
@@ -570,11 +576,11 @@ ipcMain.handle('kill-process', async (_event, payload) => {
 });
 
 // ── IPC: Session Introspection ───────────────────────────────
-ipcMain.handle('list-sessions', async () => (sessions ? sessions.list() : []));
+handleTrusted('list-sessions', async () => (sessions ? sessions.list() : []));
 
 // Output-aware workflow waiting. The checkpoint is an opaque sequence number;
 // PTY text remains in the main-process registry and never crosses this bridge.
-ipcMain.handle('session:checkpoint', async (_event, payload) => {
+handleTrusted('session:checkpoint', async (_event, payload) => {
   const p = asPlainObject(payload, 'session:checkpoint payload');
   const id = asId(p.id, 'session id');
   if (!sessions) throw new Error('Session registry is not ready');
@@ -583,7 +589,7 @@ ipcMain.handle('session:checkpoint', async (_event, payload) => {
   return checkpoint;
 });
 
-ipcMain.handle('session:wait', async (_event, payload) => {
+handleTrusted('session:wait', async (_event, payload) => {
   const p = asPlainObject(payload, 'session:wait payload');
   const id = asId(p.id, 'session id');
   const waitId = asId(p.waitId, 'wait id');
@@ -598,7 +604,7 @@ ipcMain.handle('session:wait', async (_event, payload) => {
   });
 });
 
-ipcMain.handle('session:cancel-wait', async (_event, payload) => {
+handleTrusted('session:cancel-wait', async (_event, payload) => {
   const p = asPlainObject(payload, 'session:cancel-wait payload');
   const id = asId(p.id, 'session id');
   const waitId = asId(p.waitId, 'wait id');
@@ -609,8 +615,8 @@ ipcMain.handle('session:cancel-wait', async (_event, payload) => {
 // Local (L2 env-only) profiles live here; routed (L1) Codex accounts are
 // discovered from ai-agent-entrypoint, which owns them. See src/main/agents.js.
 
-let routedCache = { profiles: [], error: null, at: 0 };
 const ROUTED_CACHE_MS = 60_000;
+const routedCache = new RoutedDiscoveryCache({ ttlMs: ROUTED_CACHE_MS });
 
 function agentProfileFile() {
   return path.join(app.getPath('userData'), 'agents.json');
@@ -623,14 +629,17 @@ function entrypointPath() {
 }
 
 async function getRoutedProfiles({ force = false } = {}) {
-  if (!force && routedCache.at && Date.now() - routedCache.at < ROUTED_CACHE_MS) {
-    return routedCache;
-  }
-  const result = await agentProfiles.discoverRoutedProfiles({ entrypointPath: entrypointPath() });
-  routedCache = { ...result, at: Date.now() };
-  if (result.error) console.warn(`[Agents] routed discovery: ${result.error}`);
-  else console.log(`[Agents] discovered ${result.profiles.length} routed Codex account(s)`);
-  return routedCache;
+  const source = entrypointPath();
+  const result = await routedCache.get(source, {
+    force,
+    discover: async (currentSource) => {
+      const discovered = await agentProfiles.discoverRoutedProfiles({ entrypointPath: currentSource });
+      if (discovered.error) console.warn(`[Agents] routed discovery: ${discovered.error}`);
+      else console.log(`[Agents] discovered ${discovered.profiles.length} routed Codex account(s)`);
+      return discovered;
+    },
+  });
+  return { ...result, source };
 }
 
 function getLocalProfiles() {
@@ -642,12 +651,16 @@ function getLocalProfiles() {
 /** Find a profile by id across both sources. */
 async function findProfile(id) {
   const local = getLocalProfiles().find(p => p.id === id);
-  if (local) return local;
-  const { profiles } = await getRoutedProfiles();
-  return profiles.find(p => p.id === id) || null;
+  if (local) return { profile: local, entrypointSource: null };
+  const { profiles, source } = await getRoutedProfiles();
+  if (source !== entrypointPath()) {
+    throw new Error('The routed account source changed during discovery. Refresh the account list and try again.');
+  }
+  const profile = profiles.find(p => p.id === id) || null;
+  return profile ? { profile, entrypointSource: source } : null;
 }
 
-ipcMain.handle('agents:list', async (_event, payload) => {
+handleTrusted('agents:list', async (_event, payload) => {
   const { force = false } = payload && typeof payload === 'object' ? payload : {};
   const routed = await getRoutedProfiles({ force });
   return {
@@ -655,13 +668,15 @@ ipcMain.handle('agents:list', async (_event, payload) => {
     routed: routed.profiles.map(agentProfiles.describeProfile),
     routedError: routed.error,
     entrypointFound: !!entrypointPath(),
-    agentKinds: Object.entries(agentProfiles.AGENT_KINDS).map(([key, def]) => ({
-      key, label: def.label, icon: def.icon, command: def.command, homeEnv: def.homeEnv,
-    })),
+    agentKinds: Object.entries(agentProfiles.AGENT_KINDS)
+      .filter(([key]) => key !== 'codex')
+      .map(([key, def]) => ({
+        key, label: def.label, icon: def.icon, command: def.command, homeEnv: def.homeEnv,
+      })),
   };
 });
 
-ipcMain.handle('agents:save', async (_event, payload) => {
+handleTrusted('agents:save', async (_event, payload) => {
   const { profile } = asPlainObject(payload, 'agents:save payload');
   // Throws with a user-facing message on a credential-shaped env key.
   const saved = agentProfiles.saveLocalProfile(agentProfileFile(), profile);
@@ -669,7 +684,7 @@ ipcMain.handle('agents:save', async (_event, payload) => {
   return agentProfiles.describeProfile(saved);
 });
 
-ipcMain.handle('agents:delete', async (_event, payload) => {
+handleTrusted('agents:delete', async (_event, payload) => {
   const { id } = asPlainObject(payload, 'agents:delete payload');
   const removed = agentProfiles.deleteLocalProfile(agentProfileFile(), String(id ?? ''));
   if (removed) console.log(`[Agents] deleted local profile "${id}"`);
@@ -677,15 +692,16 @@ ipcMain.handle('agents:delete', async (_event, payload) => {
 });
 
 // ── IPC: Start a Session from a Profile ──────────────────────
-ipcMain.handle('session:create', async (_event, payload) => {
+handleTrusted('session:create', async (_event, payload) => {
   try {
     const p = asPlainObject(payload, 'session:create payload');
-    const profile = await findProfile(String(p.profileId ?? ''));
-    if (!profile) throw new Error(`No agent profile named "${p.profileId}"`);
+    const found = await findProfile(String(p.profileId ?? ''));
+    if (!found) throw new Error(`No agent profile named "${p.profileId}"`);
+    const { profile, entrypointSource } = found;
 
     const spec = agentProfiles.buildLaunchSpec(profile, {
       baseEnv: process.env,
-      entrypointPath: entrypointPath(),
+      entrypointPath: profile.kind === 'routed' ? entrypointSource : null,
       defaultCwd: resolveWorkingDir(p.cwd),
     });
     spec.cwd = resolveWorkingDir(spec.cwd);
@@ -704,7 +720,7 @@ ipcMain.handle('session:create', async (_event, payload) => {
 // The renderer requests this ON while any future scheduled run is pending,
 // so the machine won't sleep through a scheduled time. The display is still
 // allowed to turn off ('prevent-app-suspension'), only system sleep is held.
-ipcMain.handle('set-keep-awake', async (_event, { on }) => {
+handleTrusted('set-keep-awake', async (_event, { on }) => {
   if (on) {
     if (keepAwakeId === null || !powerSaveBlocker.isStarted(keepAwakeId)) {
       keepAwakeId = powerSaveBlocker.start('prevent-app-suspension');
@@ -743,7 +759,7 @@ function runHibernate() {
   }
 }
 
-ipcMain.handle('arm-sleep', async (_event, { delayMs }) => {
+handleTrusted('arm-sleep', async (_event, { delayMs }) => {
   cancelSleepTimer();
   const ms = Math.max(0, Number(delayMs) || 0);
   sleepTarget = Date.now() + ms;
@@ -758,35 +774,38 @@ ipcMain.handle('arm-sleep', async (_event, { delayMs }) => {
   return { target: sleepTarget };
 });
 
-ipcMain.handle('cancel-sleep', async () => {
+handleTrusted('cancel-sleep', async () => {
   const wasArmed = cancelSleepTimer();
   if (wasArmed) console.log('[Hibernate] Cancelled by user');
   broadcastSleepState();
   return wasArmed;
 });
 
-ipcMain.handle('get-sleep-state', async () => ({ target: sleepTarget }));
+handleTrusted('get-sleep-state', async () => ({ target: sleepTarget }));
 
 // ── IPC: Kill All Processes ──────────────────────────────────
 // Used at the start of a run to clear the default shell and any
 // leftover processes from previous runs, preventing PTY leaks.
-ipcMain.handle('kill-all-processes', async () => {
+handleTrusted('kill-all-processes', async () => {
   const count = sessions ? await sessions.killAllSequential('renderer request') : 0;
   if (count) console.log(`[IPC] kill-all-processes: terminated ${count} process(es)`);
   return count;
 });
 
 // ── IPC: App Defaults ────────────────────────────────────────
-ipcMain.handle('get-default-directory', async () => app.getPath('home'));
-ipcMain.handle('get-app-version', async () => app.getVersion());
+handleTrusted('get-default-directory', async () => app.getPath('home'));
+handleTrusted('get-app-version', async () => app.getVersion());
 
 // ── IPC: Settings ────────────────────────────────────────────
 // Preferences and machine-local paths only. Never credentials.
-ipcMain.handle('get-settings', async () => loadSettings(settingsFile()));
+handleTrusted('get-settings', async () => loadSettings(settingsFile()));
 
-ipcMain.handle('update-settings', async (_event, payload) => {
+handleTrusted('update-settings', async (_event, payload) => {
   const patch = asPlainObject(payload, 'settings patch');
-  return saveSettings(settingsFile(), patch);
+  const before = loadSettings(settingsFile());
+  const saved = saveSettings(settingsFile(), patch);
+  if (saved.entrypointPath !== before.entrypointPath) routedCache.invalidate();
+  return saved;
 });
 
 // ── IPC: Self-Test Result ────────────────────────────────────
@@ -799,12 +818,14 @@ function finishSelfTest(passed) {
   app.exit(passed ? 0 : 1);
 }
 
-ipcMain.handle('self-test-result', async (_event, { passed, details } = {}) => {
-  if (passed) console.log(`[Main] Self-test PASSED — ${details || ''}`);
-  else console.error(`[Main] Self-test FAILED — ${details || ''}`);
-  finishSelfTest(!!passed);
-  return true;
-});
+if (isSelfTest) {
+  handleTrusted('self-test-result', async (_event, { passed, details } = {}) => {
+    if (passed) console.log(`[Main] Self-test PASSED — ${details || ''}`);
+    else console.error(`[Main] Self-test FAILED — ${details || ''}`);
+    finishSelfTest(!!passed);
+    return true;
+  });
+}
 
 // ── IPC: Save Workflow ───────────────────────────────────────
 function workflowStoreDir() {
@@ -820,21 +841,30 @@ function safeWorkflowFileName(workflow) {
 }
 
 function readWorkflowFile(filePath) {
-  return { file: path.basename(filePath), ...readJsonStrict(filePath) };
+  return { ...readJsonStrict(filePath), file: path.basename(filePath) };
 }
 
-ipcMain.handle('save-workflow', async (_event, payload) => {
-  const { workflow, filePath } = asPlainObject(payload, 'save-workflow payload');
+handleTrusted('save-workflow', async (_event, payload) => {
+  const { workflow, filePath, file } = asPlainObject(payload, 'save-workflow payload');
   if (!workflow || typeof workflow !== 'object') {
     throw new Error('Workflow payload is invalid');
   }
   const dir = ensureDir(workflowStoreDir());
-  const target = filePath || path.join(dir, safeWorkflowFileName(workflow));
+  let target = filePath;
+  if (!target && file) {
+    const requested = String(file);
+    const base = path.basename(requested);
+    if (base !== requested || !base.endsWith('.json')) {
+      throw new Error('Stored workflow file must be a JSON basename');
+    }
+    target = path.join(dir, base);
+  }
+  target ||= path.join(dir, safeWorkflowFileName(workflow));
   return writeJsonAtomic(target, workflow);
 });
 
 // ── IPC: Load Workflow ───────────────────────────────────────
-ipcMain.handle('load-workflow', async (_event, payload) => {
+handleTrusted('load-workflow', async (_event, payload) => {
   const { filePath } = asPlainObject(payload, 'load-workflow payload');
   if (filePath) {
     return readWorkflowFile(filePath);
@@ -842,11 +872,11 @@ ipcMain.handle('load-workflow', async (_event, payload) => {
   // One malformed file must not break the whole listing.
   return readJsonDir(workflowStoreDir(), (file, err) => {
     console.warn(`[IPC] Skipping unreadable workflow "${file}": ${err.message}`);
-  }).map(({ file, data }) => ({ file, ...data }));
+  }).map(({ file, data }) => ({ ...data, file }));
 });
 
 // ── IPC: Delete Workflow ─────────────────────────────────────
-ipcMain.handle('delete-workflow', async (_event, { file, id } = {}) => {
+handleTrusted('delete-workflow', async (_event, { file, id } = {}) => {
   const dir = workflowStoreDir();
   let target = null;
   if (file) {
@@ -871,7 +901,7 @@ ipcMain.handle('delete-workflow', async (_event, { file, id } = {}) => {
 });
 
 // ── IPC: Directory Picker ────────────────────────────────────
-ipcMain.handle('select-directory', async () => {
+handleTrusted('select-directory', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openDirectory']
   });
@@ -879,7 +909,7 @@ ipcMain.handle('select-directory', async () => {
 });
 
 // ── IPC: File Dialogs ────────────────────────────────────────
-ipcMain.handle('open-file-dialog', async () => {
+handleTrusted('open-file-dialog', async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     filters: [{ name: 'Workflow', extensions: ['json'] }],
     properties: ['openFile']
@@ -887,7 +917,7 @@ ipcMain.handle('open-file-dialog', async () => {
   return result.canceled ? null : result.filePaths[0];
 });
 
-ipcMain.handle('save-file-dialog', async () => {
+handleTrusted('save-file-dialog', async () => {
   const result = await dialog.showSaveDialog(mainWindow, {
     filters: [{ name: 'Workflow', extensions: ['json'] }],
   });

@@ -10,6 +10,8 @@
 // fresh ids so multiple instances never collide.
 // ============================================================
 
+import { WORKFLOW_AGENT_TARGET } from './agent-targets.js';
+
 export const TEMPLATES = [
   {
     id: 'tpl-claude-session',
@@ -58,17 +60,15 @@ export const TEMPLATES = [
   },
   {
     id: 'tpl-multi-account',
-    name: 'Two accounts, one workflow',
-    description: 'Open two agent accounts side by side and prompt each one. Account fields stay blank so the template remains portable across machines.',
+    name: 'Parallel pair + join',
+    description: 'Open two accounts, broadcast one independent prompt before waiting, then join on a shared completion signal. Account fields stay blank so the template remains portable.',
     blocks: [
       { type: 'directory', params: { path: '' } },
       { type: 'agentStart', params: { profileId: '', settleMs: 8000 } },
-      { type: 'agentSend', params: { profileId: '', text: 'ping. reply ok only.', pressEnter: true } },
-      { type: 'agentWait', params: { profileId: '', idleMs: 2000, pattern: '', timeoutMs: 60000 } },
       { type: 'agentStart', params: { profileId: '', settleMs: 8000 } },
-      { type: 'agentSend', params: { profileId: '', text: 'ping. reply ok only.', pressEnter: true } },
-      { type: 'agentWait', params: { profileId: '', idleMs: 2000, pattern: '', timeoutMs: 60000 } },
-      { type: 'log', params: { message: 'Both accounts have been prompted.' } },
+      { type: 'agentSend', params: { profileId: WORKFLOW_AGENT_TARGET, text: 'Work independently on your lane. End your response with TEAM_READY.', pressEnter: true } },
+      { type: 'agentJoin', params: { idleMs: 0, pattern: 'TEAM_READY', timeoutMs: 120000, onIncomplete: 'stop' } },
+      { type: 'log', params: { message: 'Both agent lanes reached the team barrier.' } },
     ],
   },
   {

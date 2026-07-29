@@ -29,11 +29,13 @@ export class SessionManager {
    * @param {function} opts.onLog          (message, type) => void
    * @param {function} [opts.onActiveChange] (sessionId|null) => void
    * @param {object} [opts.api]            window.api (injectable for tests)
+   * @param {function} [opts.typeIntoFn]    human-paced sender (injectable for tests)
    */
-  constructor({ onLog, onActiveChange, api } = {}) {
+  constructor({ onLog, onActiveChange, api, typeIntoFn = typeInto } = {}) {
     this._onLog = onLog || (() => {});
     this._onActiveChange = onActiveChange || (() => {});
     this._api = api || window.api;
+    this._typeInto = typeIntoFn;
     /** @type {Map<string, object>} sessionId → { meta, term, fitAddon, el } */
     this._sessions = new Map();
     this._activeId = null;
@@ -282,21 +284,21 @@ export class SessionManager {
    */
   async sendTo(selector, text, { pressEnter = true } = {}) {
     const ids = this.resolveTargets(selector);
-    const delivered = [];
-    for (const id of ids) {
+    const attempts = await Promise.all(ids.map(async id => {
       try {
-        await typeInto({
+        await this._typeInto({
           sessionId: id,
           text,
           pressEnter,
           send: (sid, chunk) => this._api.sendInput({ id: sid, text: chunk }),
         });
-        delivered.push(this._sessions.get(id)?.meta.label || id);
+        return this._sessions.get(id)?.meta.label || id;
       } catch (err) {
         this._onLog(`❌ Send failed for ${this._sessions.get(id)?.meta.label || id}: ${err.message}`, 'stderr');
+        return null;
       }
-    }
-    return delivered;
+    }));
+    return attempts.filter(Boolean);
   }
 
   // ── Presentation ─────────────────────────────────────────

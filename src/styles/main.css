@@ -270,6 +270,7 @@ html, body {
 .palette-block[data-type="command"]::before  { background: var(--block-command); }
 .palette-block[data-type="wait"]::before     { background: var(--block-wait); }
 .palette-block[data-type="agentWait"]::before { background: var(--block-wait); }
+.palette-block[data-type="agentJoin"]::before { background: var(--block-wait); }
 .palette-block[data-type="input"]::before    { background: var(--block-input); }
 .palette-block[data-type="keypress"]::before { background: var(--block-keypress); }
 .palette-block[data-type="loop"]::before     { background: var(--block-loop); }
@@ -467,6 +468,8 @@ html, body {
 .block-stripe.directory { background: var(--block-directory); }
 .block-stripe.command   { background: var(--block-command); }
 .block-stripe.wait      { background: var(--block-wait); }
+.block-stripe.agentWait { background: var(--block-wait); }
+.block-stripe.agentJoin { background: var(--block-wait); }
 .block-stripe.input     { background: var(--block-input); }
 .block-stripe.keypress  { background: var(--block-keypress); }
 .block-stripe.loop      { background: var(--block-loop); }
@@ -1378,6 +1381,26 @@ html, body {
   font-variant-numeric: tabular-nums;
 }
 .loop-iter.done {
+  background: color-mix(in srgb, var(--accent-green) 22%, transparent);
+  border-color: color-mix(in srgb, var(--accent-green) 55%, transparent);
+  color: var(--accent-green);
+}
+
+/* Live readiness badge shown on a Join Agents fan-in barrier. */
+.agent-join-progress {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--block-wait) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--block-wait) 50%, transparent);
+  color: var(--accent-yellow);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-join-progress.done {
   background: color-mix(in srgb, var(--accent-green) 22%, transparent);
   border-color: color-mix(in srgb, var(--accent-green) 55%, transparent);
   color: var(--accent-green);

@@ -4,7 +4,7 @@
 // ============================================================
 const { contextBridge, ipcRenderer } = require('electron');
 
-contextBridge.exposeInMainWorld('api', {
+const api = {
   // Process management
   executeCommand: (params) => ipcRenderer.invoke('execute-command', params),
   sendInput: (params) => ipcRenderer.invoke('send-input', params),
@@ -42,9 +42,6 @@ contextBridge.exposeInMainWorld('api', {
   saveWorkflow: (params) => ipcRenderer.invoke('save-workflow', params),
   loadWorkflow: (params) => ipcRenderer.invoke('load-workflow', params),
   deleteWorkflow: (params) => ipcRenderer.invoke('delete-workflow', params),
-
-  // Headless self-test result reporting (used by `npm test`)
-  selfTestResult: (result) => ipcRenderer.invoke('self-test-result', result),
 
   // File/Directory dialogs
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
@@ -86,4 +83,12 @@ contextBridge.exposeInMainWorld('api', {
       ipcRenderer.removeAllListeners(channel);
     }
   }
-});
+};
+
+// Production renderers never receive an app-exit capability. main.js adds
+// this marker only to the BrowserWindow created for `npm run test:app`.
+if (process.argv.includes('--orchestrator-self-test')) {
+  api.selfTestResult = (result) => ipcRenderer.invoke('self-test-result', result);
+}
+
+contextBridge.exposeInMainWorld('api', api);

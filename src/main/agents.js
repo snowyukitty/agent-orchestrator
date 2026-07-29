@@ -35,6 +35,10 @@ const SCHEMA_VERSION = 1;
 
 /** Profile ids appear in workflow JSON and DOM attributes; keep them tame. */
 const PROFILE_ID_PATTERN = /^[A-Za-z0-9_:.-]{1,64}$/;
+const ROUTED_PROFILE_PREFIX = 'codex:';
+const ROUTED_ALIAS_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
+const CODEX_ROUTING_ENV = new Set(['CODEX_HOME', 'CODEX_SQLITE_HOME']);
+const ROUTED_STATUS_VALUES = new Set(['ok', 'warning', 'error', 'unavailable', 'unknown']);
 
 /**
  * Environment keys a profile may never set. Credentials belong in the tool's
@@ -83,6 +87,12 @@ function assertSafeEnv(env) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
       throw new Error(`Invalid environment variable name: "${key}"`);
     }
+    if (CODEX_ROUTING_ENV.has(key.toUpperCase())) {
+      throw new Error(
+        `"${key}" is owned by ai-agent-entrypoint. Local profiles cannot select ` +
+        'Codex accounts; choose a discovered routed Codex account instead.'
+      );
+    }
     if (SECRET_KEY_PATTERN.test(key)) {
       throw new Error(
         `"${key}" looks like a credential. This app stores paths and flags only — ` +
@@ -104,9 +114,15 @@ function normalizeProfile(raw) {
   if (!PROFILE_ID_PATTERN.test(id)) {
     throw new Error('Profile id must be 1-64 chars of letters, digits, and _ : . -');
   }
+  if (id.toLowerCase().startsWith(ROUTED_PROFILE_PREFIX)) {
+    throw new Error(`Local profile ids cannot use the reserved "${ROUTED_PROFILE_PREFIX}" namespace`);
+  }
   const agent = String(raw.agent ?? 'shell').trim();
-  if (!AGENT_KINDS[agent]) {
+  if (!Object.hasOwn(AGENT_KINDS, agent)) {
     throw new Error(`Unknown agent "${agent}". Known: ${Object.keys(AGENT_KINDS).join(', ')}`);
+  }
+  if (agent === 'codex') {
+    throw new Error('Local Codex profiles are not allowed; choose a discovered routed Codex account');
   }
   const displayName = String(raw.displayName ?? '').trim();
   if (!displayName) throw new Error('Profile needs a display name');
@@ -126,6 +142,17 @@ function normalizeProfile(raw) {
     env: assertSafeEnv(raw.env),
     cwd,
   };
+}
+
+function assuranceForLocalProfile(profile) {
+  const homeEnv = Object.hasOwn(AGENT_KINDS, profile?.agent)
+    ? AGENT_KINDS[profile.agent].homeEnv
+    : null;
+  if (!homeEnv) return ASSURANCE.NATIVE;
+  const selected = Object.entries(profile.env || {}).find(
+    ([key]) => key.toUpperCase() === homeEnv.toUpperCase()
+  );
+  return selected && String(selected[1]).trim() ? ASSURANCE.ENV : ASSURANCE.NATIVE;
 }
 
 // ── Local profile store ──────────────────────────────────────
@@ -195,8 +222,11 @@ function deleteLocalProfile(filePath, id) {
  * @returns {string|null} the repo root, or null when it cannot be found.
  */
 function resolveEntrypointPath({ configured, appRoot, exists = fs.existsSync } = {}) {
+  const explicit = configured && String(configured).trim();
+  if (explicit) {
+    return exists(entrypointScript(explicit)) ? explicit : null;
+  }
   const candidates = [];
-  if (configured && String(configured).trim()) candidates.push(String(configured).trim());
   if (appRoot) {
     candidates.push(path.resolve(appRoot, '..', 'ai-agent-entrypoint'));
     candidates.push(path.resolve(appRoot, '..', '..', 'ai-agent-entrypoint'));
@@ -221,18 +251,32 @@ function entrypointScript(repoRoot) {
 function sanitizeDoctorReport(report) {
   if (!report || typeof report !== 'object') return null;
   const alias = String(report.Alias ?? '').trim();
-  if (!alias) return null;
+  if (!ROUTED_ALIAS_PATTERN.test(alias)) return null;
+  const hasErrors = Array.isArray(report.Errors) && report.Errors.length > 0;
+  const hasWarnings = Array.isArray(report.Warnings) && report.Warnings.length > 0;
+  const displayName = String(report.DisplayName ?? `Codex ${alias}`)
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .trim()
+    .slice(0, 80) || `Codex ${alias}`;
+  const rawStatus = String(report.Status ?? 'unknown').trim().toLowerCase();
+  const status = ROUTED_STATUS_VALUES.has(rawStatus) ? rawStatus : 'unknown';
   return {
     id: `codex:${alias}`,
     kind: 'routed',
     agent: 'codex',
     alias,
-    displayName: String(report.DisplayName ?? `Codex ${alias}`),
+    displayName,
     assurance: ASSURANCE.ROUTED,
-    status: String(report.Status ?? 'unknown'),
+    status,
     authenticated: report.AuthenticationStatePresent === true,
-    errors: Array.isArray(report.Errors) ? report.Errors.map(String) : [],
-    warnings: Array.isArray(report.Warnings) ? report.Warnings.map(String) : [],
+    // Doctor diagnostics are free-form and may repeat canonical Home or
+    // ManifestPath values. Preserve the health signal, never the raw text.
+    errors: hasErrors
+      ? ['Account routing reported an error. Run codex doctor in a trusted terminal for details.']
+      : [],
+    warnings: hasWarnings
+      ? ['Account routing reported a warning. Run codex doctor in a trusted terminal for details.']
+      : [],
   };
 }
 
@@ -256,7 +300,7 @@ function discoverRoutedProfiles({ entrypointPath, timeoutMs = 20_000, run = exec
     }
     const script = entrypointScript(entrypointPath);
     if (!fs.existsSync(script)) {
-      resolve({ profiles: [], error: `No agent-entrypoint.ps1 under "${entrypointPath}".` });
+      resolve({ profiles: [], error: 'The configured routed account source does not contain agent-entrypoint.ps1.' });
       return;
     }
 
@@ -266,14 +310,16 @@ function discoverRoutedProfiles({ entrypointPath, timeoutMs = 20_000, run = exec
       { timeout: timeoutMs, windowsHide: true, maxBuffer: 4 * 1024 * 1024 },
       (err, stdout, stderr) => {
         if (err && !stdout) {
-          const detail = String(stderr || err.message || '').trim().split('\n')[0];
-          resolve({ profiles: [], error: `Codex account discovery failed: ${detail || 'unknown error'}` });
+          resolve({
+            profiles: [],
+            error: 'Codex account discovery failed. Run codex doctor in a trusted terminal for details.',
+          });
           return;
         }
         try {
           resolve({ profiles: parseDoctorOutput(stdout), error: null });
         } catch (parseErr) {
-          resolve({ profiles: [], error: `Could not read the account list: ${parseErr.message}` });
+          resolve({ profiles: [], error: 'Could not read the routed account list because its JSON was invalid.' });
         }
       }
     );
@@ -310,7 +356,7 @@ function buildLaunchSpec(profile, ctx = {}) {
     }
     const script = entrypointScript(entrypointPath);
     if (!exists(script)) {
-      throw new Error(`Cannot start "${profile.displayName}": no agent-entrypoint.ps1 under "${entrypointPath}".`);
+      throw new Error(`Cannot start "${profile.displayName}": the configured routed account source is unavailable.`);
     }
     if (!profile.alias) {
       throw new Error(`Cannot start "${profile.displayName}": the account alias is missing.`);
@@ -331,7 +377,6 @@ function buildLaunchSpec(profile, ctx = {}) {
 
   const local = normalizeProfile(profile);
   const overrides = local.env;
-  const hasOverrides = Object.keys(overrides).length > 0;
 
   return {
     file: 'powershell.exe',
@@ -341,8 +386,9 @@ function buildLaunchSpec(profile, ctx = {}) {
     profileId: local.id,
     agent: local.agent,
     label: local.displayName,
-    // An env-only profile is L2; one with no overrides selects no account at all.
-    assurance: hasOverrides ? ASSURANCE.ENV : ASSURANCE.NATIVE,
+    // Only the agent's own non-empty state-home variable selects an account.
+    // Cosmetic flags such as NO_COLOR do not raise the assurance level.
+    assurance: assuranceForLocalProfile(local),
   };
 }
 
@@ -350,7 +396,7 @@ function buildLaunchSpec(profile, ctx = {}) {
 function describeProfile(profile) {
   if (!profile) return null;
   const kind = profile.kind === 'routed' ? 'routed' : 'local';
-  const agent = AGENT_KINDS[profile.agent] ? profile.agent : 'shell';
+  const agent = Object.hasOwn(AGENT_KINDS, profile.agent) ? profile.agent : 'shell';
   const base = {
     id: profile.id,
     kind,
@@ -360,7 +406,7 @@ function describeProfile(profile) {
     displayName: profile.displayName,
     assurance: kind === 'routed'
       ? ASSURANCE.ROUTED
-      : (Object.keys(profile.env || {}).length ? ASSURANCE.ENV : ASSURANCE.NATIVE),
+      : assuranceForLocalProfile(profile),
   };
   base.assuranceLabel = ASSURANCE_LABEL[base.assurance];
   if (kind === 'routed') {
@@ -378,12 +424,16 @@ function describeProfile(profile) {
 module.exports = {
   SCHEMA_VERSION,
   PROFILE_ID_PATTERN,
+  ROUTED_PROFILE_PREFIX,
+  ROUTED_ALIAS_PATTERN,
+  CODEX_ROUTING_ENV,
   SECRET_KEY_PATTERN,
   AGENT_KINDS,
   ASSURANCE,
   ASSURANCE_LABEL,
   assertSafeEnv,
   normalizeProfile,
+  assuranceForLocalProfile,
   emptyProfileFile,
   loadLocalProfiles,
   saveLocalProfile,
