@@ -2,7 +2,18 @@
 // Agent Orchestrator — Electron Main Process
 // System Tray Application with Process Automation
 // ============================================================
-const { app, BrowserWindow, Tray, Menu, ipcMain, dialog, nativeImage, powerMonitor, powerSaveBlocker } = require('electron');
+const {
+  app,
+  BrowserWindow,
+  Tray,
+  Menu,
+  ipcMain,
+  dialog,
+  nativeImage,
+  powerMonitor,
+  powerSaveBlocker,
+  safeStorage,
+} = require('electron');
 const path = require('path');
 const { spawn, execFile } = require('child_process');
 const fs = require('fs');
@@ -15,8 +26,17 @@ const { loadSettings, saveSettings } = require('./src/main/settings');
 const { prepareUserData } = require('./src/main/user-data');
 const { RoutedDiscoveryCache } = require('./src/main/routed-cache');
 const { ShutdownCoordinator } = require('./src/main/shutdown');
+const { RunJournal } = require('./src/main/run-journal');
 const {
-  assertTrustedIpcSender, getUsableWebContents, installNavigationGuards,
+  RendererDocumentLifecycle,
+  RendererContainmentCoordinator,
+  isReloadAccelerator,
+} = require('./src/main/renderer-containment');
+const {
+  assertTrustedIpcSender,
+  getUsableWebContents,
+  installNavigationGuards,
+  isTrustedRendererUrl,
 } = require('./src/main/trust');
 const {
   asPlainObject, asId, asText, asCols, asRows,
@@ -78,7 +98,9 @@ let keepAwakeId = null;
 let sleepTimer = null;
 let sleepTarget = null; // epoch ms when hibernate fires (null = none armed)
 let sessions = null;    // SessionRegistry, created once the app is ready
+let runJournal = null;  // RunJournal, created once safeStorage is available
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
+const isDev = process.argv.includes('--dev');
 let selfTestTimer = null;
 
 function isDirectory(dir) {
@@ -133,7 +155,10 @@ function handleTrusted(channel, handler) {
     // by assertTrustedIpcSender below.
     if (!expectedWebContents) return undefined;
     assertTrustedIpcSender(event, RENDERER_ENTRY_FILE, expectedWebContents);
-    return handler(event, ...args);
+    const documentToken = args.pop();
+    const rendererEpoch = rendererContainment.validateDocumentToken(documentToken);
+    if (args.length === 0) return handler(event, undefined, rendererEpoch);
+    return handler(event, ...args, rendererEpoch);
   });
 }
 
@@ -151,7 +176,7 @@ function killProcessTree(pid) {
   if (!pid) return;
   if (process.platform === 'win32') {
     execFile('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true }, (err) => {
-      // A already-dead tree is the common case; only surface real failures.
+      // An already-dead tree is the common case; only surface real failures.
       if (err && !/not found|no running instance/i.test(err.message)) {
         console.warn(`[Sessions] taskkill ${pid} failed: ${err.message}`);
       }
@@ -164,6 +189,10 @@ function killProcessTree(pid) {
 function createSessionRegistry() {
   return new SessionRegistry({
     pty,
+    // On Windows, request whole-tree termination before touching the outer
+    // ConPTY root. Once that pwsh exits, nested routed children can be
+    // reparented and a later taskkill /T can no longer discover them.
+    terminateTree: process.platform === 'win32' ? killProcessTree : null,
     killTree: killProcessTree,
     log: (msg) => console.log(msg),
     onOutput: ({ id, data, stream }) => {
@@ -218,6 +247,104 @@ function settingsFile() {
   return path.join(app.getPath('userData'), 'settings.json');
 }
 
+function runJournalDir() {
+  return path.join(app.getPath('userData'), 'run-journal');
+}
+
+function createRunJournal() {
+  return new RunJournal({
+    dir: runJournalDir(),
+    encryption: {
+      isAvailable: () => safeStorage.isEncryptionAvailable(),
+      encrypt: (plaintext) => (
+        safeStorage.encryptString(plaintext).toString('base64')
+      ),
+      decrypt: (ciphertext) => (
+        safeStorage.decryptString(Buffer.from(ciphertext, 'base64'))
+      ),
+    },
+    onError: (file, error) => {
+      const code = typeof error?.code === 'string' ? error.code : 'invalid-record';
+      console.warn(`[Journal] skipped ${path.basename(file)} (${code})`);
+    },
+  });
+}
+
+/**
+ * Terminate every main-owned PTY after renderer loss. This intentionally
+ * includes manually opened sessions: once their renderer disappears, keeping
+ * them alive would leave invisible processes with no reliable owner or Stop UI.
+ *
+ * killAllSequential() is called before this function returns, so the registry's
+ * termination queue closes the old-renderer spawn race in the same event turn.
+ */
+function containRendererSessions() {
+  const registry = sessions;
+  if (!registry) return Promise.resolve({ terminated: 0, pruned: 0 });
+  const stopping = registry.killAllSequential(
+    'renderer lost',
+    { failOnTimeout: true }
+  );
+  return (async () => {
+    let terminated = 0;
+    let failure = null;
+    try {
+      terminated = await stopping;
+    } catch (error) {
+      failure = error;
+    }
+    try {
+      await registry.whenTerminationsComplete();
+    } catch (error) {
+      failure ||= error;
+    }
+    const pruned = registry.prune();
+    if (failure) throw failure;
+    return { terminated, pruned };
+  })();
+}
+
+async function recoverRendererJournal() {
+  const recovered = await requireRunJournal().recoverInterrupted();
+  return { recovered: recovered.length };
+}
+
+function containmentErrorCode(error) {
+  return typeof error?.code === 'string' ? error.code : 'containment-error';
+}
+
+const rendererContainment = new RendererContainmentCoordinator({
+  containSessions: containRendererSessions,
+  recoverJournal: recoverRendererJournal,
+  onStart: ({ reason }) => {
+    console.warn(
+      `[Containment] ${reason}; terminating all sessions, including manually opened sessions`
+    );
+  },
+  onComplete: ({ sessionResult, recoveryResult }) => {
+    console.warn(
+      `[Containment] complete: terminated ${sessionResult.terminated}, `
+      + `pruned ${sessionResult.pruned}, recovered ${recoveryResult.recovered} run(s)`
+    );
+  },
+  onError: ({ error }) => {
+    // Do not log session identifiers or error text from lower layers.
+    console.error(`[Containment] failed closed (${containmentErrorCode(error)})`);
+  },
+});
+
+function beginRendererContainment(
+  reason,
+  { advanceEpoch = true, newIncident = advanceEpoch } = {}
+) {
+  // Event handlers cannot await. The coordinator retains the failed state, and
+  // every later journal/session admission observes it and fails closed.
+  void rendererContainment.contain(
+    reason,
+    { advanceEpoch, newIncident }
+  ).catch(() => {});
+}
+
 /** Save the window's current geometry so the next launch reopens in place. */
 function persistWindowBounds() {
   if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isMinimized()) return;
@@ -259,6 +386,62 @@ function createWindow() {
   installNavigationGuards(mainWindow.webContents, RENDERER_ENTRY_FILE, (message) => {
     console.warn(message);
   });
+  const rendererLifecycle = new RendererDocumentLifecycle();
+  let committedRendererToken = null;
+  const containmentEnabled = !isSmokeTest && !isSelfTest;
+  const applyRendererLoss = (reason, signal) => {
+    if (app.isQuitting) return;
+    if (signal.block) {
+      committedRendererToken = null;
+      rendererContainment.blockPrivilegedIpc();
+    }
+    if (containmentEnabled && signal.contain) {
+      beginRendererContainment(reason, {
+        advanceEpoch: false,
+        newIncident: signal.newIncident,
+      });
+    }
+  };
+  mainWindow.webContents.on('did-start-navigation', (details) => {
+    if (!details.isMainFrame || details.isSameDocument) return;
+    const trusted = isTrustedRendererUrl(details.url, RENDERER_ENTRY_FILE);
+    applyRendererLoss(
+      'renderer navigation detected',
+      rendererLifecycle.didStartLoading({ trusted })
+    );
+  });
+  mainWindow.webContents.on(
+    'did-frame-navigate',
+    (_event, _url, _code, _status, isMainFrame) => {
+      if (!isMainFrame || !rendererLifecycle.didNavigateCommit()) return;
+      rendererContainment.commitRenderer();
+      committedRendererToken = rendererContainment.getCommittedToken();
+    }
+  );
+  mainWindow.webContents.on('dom-ready', () => {
+    const token = rendererContainment.getCommittedToken();
+    if (
+      app.isQuitting
+      || !token
+      || token !== committedRendererToken
+    ) return;
+    // Preload installed this private listener before dom-ready. The token never
+    // crosses contextBridge into page JavaScript.
+    sendToRenderer('renderer-document-token', token);
+  });
+  if (containmentEnabled) {
+    mainWindow.webContents.on('render-process-gone', () => {
+      applyRendererLoss(
+        'renderer process lost',
+        rendererLifecycle.renderProcessGone()
+      );
+    });
+  }
+  if (!isDev && !isSmokeTest && !isSelfTest) {
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+      if (isReloadAccelerator(input)) event.preventDefault();
+    });
+  }
   mainWindow.loadFile(RENDERER_ENTRY_FILE, isSelfTest ? { query: { selftest: '1' } } : undefined);
 
   // Show window only after content is fully rendered
@@ -382,7 +565,7 @@ if (!gotSingleInstanceLock) {
     showMainWindow();
   });
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     if (userDataState.migrated) {
       console.log(`[Storage] Migrated ${userDataState.copied} app data file(s) to the singular identity`);
       if (userDataState.skipped) {
@@ -393,6 +576,21 @@ if (!gotSingleInstanceLock) {
     }
     console.log('[Main] App ready, creating window and tray...');
     sessions = createSessionRegistry();
+    // Headless verification uses injected renderer fakes and must never recover
+    // or write the user's real journal. A test accidentally calling journal IPC
+    // should fail closed via requireRunJournal() instead.
+    if (!isSmokeTest && !isSelfTest) {
+      runJournal = createRunJournal();
+      try {
+        const interrupted = await runJournal.recoverInterrupted();
+        if (interrupted.length) {
+          console.log(`[Journal] recovered ${interrupted.length} interrupted run(s)`);
+        }
+      } catch (error) {
+        const code = typeof error?.code === 'string' ? error.code : 'recovery-error';
+        console.warn(`[Journal] recovery failed (${code})`);
+      }
+    }
     createWindow();
     createTray();
     startSchedulerHeartbeat();
@@ -516,7 +714,7 @@ app.on('activate', () => {
 // Legacy channel: spawns a plain PowerShell session running one command.
 // Kept so workflows saved before the session/agent model still run; it is
 // now just a session with no profile and no account selection (L0-native).
-handleTrusted('execute-command', async (_event, payload) => {
+handleTrusted('execute-command', async (_event, payload, rendererEpoch) => {
   let id = null;
   try {
     const p = asPlainObject(payload);
@@ -524,16 +722,21 @@ handleTrusted('execute-command', async (_event, payload) => {
     const command = asText(p.command ?? '', { what: 'command', max: 32_000 });
     console.log(`[IPC] execute-command: id=${id}, commandChars=${command.length}`);
 
-    await sessions.whenTerminationsComplete();
-    const { id: sessionId, pid } = sessions.create({
-      file: 'powershell.exe',
-      args: ['-NoExit', '-Command', command],
-      env: process.env,
-      cwd: resolveWorkingDir(p.cwd),
-      agent: 'shell',
-      label: 'Shell',
-      assurance: 'L0-native',
-    }, { id, cols: asCols(p.cols), rows: asRows(p.rows) });
+    const { id: sessionId, pid } = await rendererContainment.admitSession(
+      rendererEpoch,
+      {
+        waitForTerminations: () => sessions.whenTerminationsComplete(),
+        create: () => sessions.create({
+          file: 'powershell.exe',
+          args: ['-NoExit', '-Command', command],
+          env: process.env,
+          cwd: resolveWorkingDir(p.cwd),
+          agent: 'shell',
+          label: 'Shell',
+          assurance: 'L0-native',
+        }, { id, cols: asCols(p.cols), rows: asRows(p.rows) }),
+      }
+    );
 
     return { id: sessionId, pid };
   } catch (err) {
@@ -551,6 +754,18 @@ handleTrusted('send-input', async (_event, payload) => {
     console.warn(`[IPC] send-input rejected: ${err.message}`);
     return false;
   }
+});
+
+// Generated result contracts and handoffs use a separate, main-enforced
+// capability. Never fall back to generic terminal input: that could submit an
+// untrusted result body at a PowerShell prompt after an agent exits.
+handleTrusted('session:send-structured', async (_event, payload) => {
+  const p = asPlainObject(payload, 'session:send-structured payload');
+  if (!sessions) throw new Error('Session registry is not ready');
+  return sessions.writeStructured(
+    asId(p.id, 'session id'),
+    asText(p.text, { what: 'structured input', max: 2048 })
+  );
 });
 
 // ── IPC: Resize Process ──────────────────────────────────────
@@ -594,6 +809,15 @@ handleTrusted('session:wait', async (_event, payload) => {
   const id = asId(p.id, 'session id');
   const waitId = asId(p.waitId, 'wait id');
   const pattern = asText(p.pattern ?? '', { max: 1000, what: 'output pattern' });
+  let capture;
+  if (p.capture !== undefined) {
+    const c = asPlainObject(p.capture, 'result capture');
+    capture = {
+      startMarker: asText(c.startMarker, { max: 200, what: 'result start marker' }),
+      endMarker: asText(c.endMarker, { max: 200, what: 'result end marker' }),
+      maxBytes: c.maxBytes,
+    };
+  }
   if (!sessions) throw new Error('Session registry is not ready');
   return sessions.waitForOutput(id, {
     waitId,
@@ -601,6 +825,7 @@ handleTrusted('session:wait', async (_event, payload) => {
     idleMs: p.idleMs,
     pattern,
     timeoutMs: p.timeoutMs,
+    capture,
   });
 });
 
@@ -692,9 +917,12 @@ handleTrusted('agents:delete', async (_event, payload) => {
 });
 
 // ── IPC: Start a Session from a Profile ──────────────────────
-handleTrusted('session:create', async (_event, payload) => {
+handleTrusted('session:create', async (_event, payload, rendererEpoch) => {
   try {
     const p = asPlainObject(payload, 'session:create payload');
+    if (p.workflowSession !== undefined && typeof p.workflowSession !== 'boolean') {
+      throw new Error('session:create workflowSession must be a boolean');
+    }
     const found = await findProfile(String(p.profileId ?? ''));
     if (!found) throw new Error(`No agent profile named "${p.profileId}"`);
     const { profile, entrypointSource } = found;
@@ -703,11 +931,20 @@ handleTrusted('session:create', async (_event, payload) => {
       baseEnv: process.env,
       entrypointPath: profile.kind === 'routed' ? entrypointSource : null,
       defaultCwd: resolveWorkingDir(p.cwd),
+      workflowSession: p.workflowSession === true,
     });
     spec.cwd = resolveWorkingDir(spec.cwd);
 
-    await sessions.whenTerminationsComplete();
-    const { id, pid } = sessions.create(spec, { cols: asCols(p.cols), rows: asRows(p.rows) });
+    const { id, pid } = await rendererContainment.admitSession(
+      rendererEpoch,
+      {
+        waitForTerminations: () => sessions.whenTerminationsComplete(),
+        create: () => sessions.create(
+          spec,
+          { cols: asCols(p.cols), rows: asRows(p.rows) }
+        ),
+      }
+    );
     return { id, pid, session: sessions.describe(id) };
   } catch (err) {
     // Fail-closed errors (a routed alias that cannot be resolved) land here.
@@ -795,6 +1032,87 @@ handleTrusted('kill-all-processes', async () => {
 // ── IPC: App Defaults ────────────────────────────────────────
 handleTrusted('get-default-directory', async () => app.getPath('home'));
 handleTrusted('get-app-version', async () => app.getVersion());
+
+// ── IPC: Run Journal ─────────────────────────────────────────
+// Metadata is public to the local renderer. Workflow snapshots and explicit
+// result bodies stay encrypted at rest (or memory-only when safeStorage is
+// unavailable); a body is decrypted only by journal:result-get.
+function requireRunJournal() {
+  if (!runJournal) throw new Error('Run Journal is not ready');
+  return runJournal;
+}
+
+handleTrusted('journal:start', (event, payload, rendererEpoch) => {
+  const input = asPlainObject(payload, 'journal:start payload');
+  return rendererContainment.runJournal(
+    rendererEpoch,
+    () => requireRunJournal().startRun(input)
+  );
+});
+
+handleTrusted('journal:block-start', (event, payload, rendererEpoch) => {
+  const input = asPlainObject(payload, 'journal:block-start payload');
+  return rendererContainment.runJournal(
+    rendererEpoch,
+    () => requireRunJournal().startBlock(input)
+  );
+});
+
+handleTrusted('journal:block-finish', (event, payload, rendererEpoch) => {
+  const input = asPlainObject(payload, 'journal:block-finish payload');
+  return rendererContainment.runJournal(
+    rendererEpoch,
+    () => requireRunJournal().finishBlock(input)
+  );
+});
+
+handleTrusted('journal:result-store', (event, payload, rendererEpoch) => {
+  const input = asPlainObject(payload, 'journal:result-store payload');
+  return rendererContainment.runJournal(
+    rendererEpoch,
+    () => requireRunJournal().storeResult(input)
+  );
+});
+
+handleTrusted('journal:finish', (event, payload, rendererEpoch) => {
+  const input = asPlainObject(payload, 'journal:finish payload');
+  return rendererContainment.runJournal(
+    rendererEpoch,
+    () => requireRunJournal().finishRun(input)
+  );
+});
+
+handleTrusted('journal:list', (event, payload = {}, rendererEpoch) => {
+  const input = asPlainObject(payload, 'journal:list payload');
+  return rendererContainment.runJournal(
+    rendererEpoch,
+    () => requireRunJournal().listRuns(input)
+  );
+});
+
+handleTrusted('journal:get', (event, payload, rendererEpoch) => {
+  const input = asPlainObject(payload, 'journal:get payload');
+  return rendererContainment.runJournal(
+    rendererEpoch,
+    () => requireRunJournal().getRun(input)
+  );
+});
+
+handleTrusted('journal:result-get', (event, payload, rendererEpoch) => {
+  const input = asPlainObject(payload, 'journal:result-get payload');
+  return rendererContainment.runJournal(
+    rendererEpoch,
+    () => requireRunJournal().getResult(input)
+  );
+});
+
+handleTrusted('journal:delete', (event, payload, rendererEpoch) => {
+  const input = asPlainObject(payload, 'journal:delete payload');
+  return rendererContainment.runJournal(
+    rendererEpoch,
+    () => requireRunJournal().deleteRun(input)
+  );
+});
 
 // ── IPC: Settings ────────────────────────────────────────────
 // Preferences and machine-local paths only. Never credentials.

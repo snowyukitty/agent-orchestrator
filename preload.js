@@ -4,49 +4,75 @@
 // ============================================================
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Main mints one opaque token for each committed top-level document and sends
+// it at dom-ready. It stays in this isolated preload closure; page JavaScript
+// receives only the fixed API methods below.
+const documentToken = new Promise((resolve) => {
+  ipcRenderer.once('renderer-document-token', (_event, token) => {
+    if (typeof token === 'string' && token.length >= 16) resolve(token);
+  });
+});
+const invokeTrusted = async (channel, ...args) => (
+  ipcRenderer.invoke(channel, ...args, await documentToken)
+);
+
 const api = {
   // Process management
-  executeCommand: (params) => ipcRenderer.invoke('execute-command', params),
-  sendInput: (params) => ipcRenderer.invoke('send-input', params),
-  killProcess: (params) => ipcRenderer.invoke('kill-process', params),
-  killAllProcesses: () => ipcRenderer.invoke('kill-all-processes'),
-  setKeepAwake: (on) => ipcRenderer.invoke('set-keep-awake', { on }),
-  resizeProcess: (params) => ipcRenderer.invoke('resize-process', params),
-  getDefaultDirectory: () => ipcRenderer.invoke('get-default-directory'),
-  getVersion: () => ipcRenderer.invoke('get-app-version'),
-  listSessions: () => ipcRenderer.invoke('list-sessions'),
-  sessionCheckpoint: (params) => ipcRenderer.invoke('session:checkpoint', params),
-  waitForSession: (params) => ipcRenderer.invoke('session:wait', params),
-  cancelSessionWait: (params) => ipcRenderer.invoke('session:cancel-wait', params),
+  executeCommand: (params) => invokeTrusted('execute-command', params),
+  sendInput: (params) => invokeTrusted('send-input', params),
+  sendStructuredInput: (params) => invokeTrusted('session:send-structured', params),
+  killProcess: (params) => invokeTrusted('kill-process', params),
+  killAllProcesses: () => invokeTrusted('kill-all-processes'),
+  setKeepAwake: (on) => invokeTrusted('set-keep-awake', { on }),
+  resizeProcess: (params) => invokeTrusted('resize-process', params),
+  getDefaultDirectory: () => invokeTrusted('get-default-directory'),
+  getVersion: () => invokeTrusted('get-app-version'),
+  listSessions: () => invokeTrusted('list-sessions'),
+  sessionCheckpoint: (params) => invokeTrusted('session:checkpoint', params),
+  waitForSession: (params) => invokeTrusted('session:wait', params),
+  cancelSessionWait: (params) => invokeTrusted('session:cancel-wait', params),
 
   // Agent profiles: local (env-only) profiles plus routed accounts
   // discovered from ai-agent-entrypoint.
-  listAgents: (params) => ipcRenderer.invoke('agents:list', params || {}),
-  saveAgentProfile: (profile) => ipcRenderer.invoke('agents:save', { profile }),
-  deleteAgentProfile: (id) => ipcRenderer.invoke('agents:delete', { id }),
-  createSession: (params) => ipcRenderer.invoke('session:create', params),
+  listAgents: (params) => invokeTrusted('agents:list', params || {}),
+  saveAgentProfile: (profile) => invokeTrusted('agents:save', { profile }),
+  deleteAgentProfile: (id) => invokeTrusted('agents:delete', { id }),
+  createSession: (params) => invokeTrusted('session:create', params),
 
   // Persisted preferences (theme, window/panel geometry, entrypoint path).
-  getSettings: () => ipcRenderer.invoke('get-settings'),
-  updateSettings: (patch) => ipcRenderer.invoke('update-settings', patch),
+  getSettings: () => invokeTrusted('get-settings'),
+  updateSettings: (patch) => invokeTrusted('update-settings', patch),
 
   // Delayed system hibernate
-  armSleep: (params) => ipcRenderer.invoke('arm-sleep', params),
-  cancelSleep: () => ipcRenderer.invoke('cancel-sleep'),
-  getSleepState: () => ipcRenderer.invoke('get-sleep-state'),
+  armSleep: (params) => invokeTrusted('arm-sleep', params),
+  cancelSleep: () => invokeTrusted('cancel-sleep'),
+  getSleepState: () => invokeTrusted('get-sleep-state'),
   onSleepState: (callback) => {
     ipcRenderer.on('sleep-state', (_event, data) => callback(data));
   },
 
   // Workflow persistence
-  saveWorkflow: (params) => ipcRenderer.invoke('save-workflow', params),
-  loadWorkflow: (params) => ipcRenderer.invoke('load-workflow', params),
-  deleteWorkflow: (params) => ipcRenderer.invoke('delete-workflow', params),
+  saveWorkflow: (params) => invokeTrusted('save-workflow', params),
+  loadWorkflow: (params) => invokeTrusted('load-workflow', params),
+  deleteWorkflow: (params) => invokeTrusted('delete-workflow', params),
+
+  // Durable run metadata and explicit, encrypted result artifacts.
+  // List/detail calls omit result bodies; one body is decrypted only when the
+  // renderer explicitly requests that result.
+  startRunJournal: (params) => invokeTrusted('journal:start', params),
+  startRunBlock: (params) => invokeTrusted('journal:block-start', params),
+  finishRunBlock: (params) => invokeTrusted('journal:block-finish', params),
+  storeRunResult: (params) => invokeTrusted('journal:result-store', params),
+  finishRunJournal: (params) => invokeTrusted('journal:finish', params),
+  listRunJournal: (params) => invokeTrusted('journal:list', params || {}),
+  getRunJournal: (params) => invokeTrusted('journal:get', params),
+  getRunResult: (params) => invokeTrusted('journal:result-get', params),
+  deleteRunJournal: (params) => invokeTrusted('journal:delete', params),
 
   // File/Directory dialogs
-  selectDirectory: () => ipcRenderer.invoke('select-directory'),
-  openFileDialog: () => ipcRenderer.invoke('open-file-dialog'),
-  saveFileDialog: () => ipcRenderer.invoke('save-file-dialog'),
+  selectDirectory: () => invokeTrusted('select-directory'),
+  openFileDialog: () => invokeTrusted('open-file-dialog'),
+  saveFileDialog: () => invokeTrusted('save-file-dialog'),
 
   // Event listeners for process output streaming
   onProcessOutput: (callback) => {
@@ -88,7 +114,7 @@ const api = {
 // Production renderers never receive an app-exit capability. main.js adds
 // this marker only to the BrowserWindow created for `npm run test:app`.
 if (process.argv.includes('--orchestrator-self-test')) {
-  api.selfTestResult = (result) => ipcRenderer.invoke('self-test-result', result);
+  api.selfTestResult = (result) => invokeTrusted('self-test-result', result);
 }
 
 contextBridge.exposeInMainWorld('api', api);

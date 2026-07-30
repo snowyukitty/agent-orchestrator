@@ -69,6 +69,33 @@ const ASSURANCE_LABEL = Object.freeze({
   [ASSURANCE.NATIVE]: 'native login, no account selected',
 });
 
+/**
+ * Result contracts are executable terminal input, so a local workflow may
+ * receive them only while PowerShell owns one conservative agent invocation.
+ * This intentionally accepts fewer custom commands than PowerShell can parse:
+ * false negatives disable result handoff, while a false positive could execute
+ * untrusted result text at a shell prompt.
+ */
+function isConservativeAgentInvocation(command, agent) {
+  if (!Object.hasOwn(AGENT_KINDS, agent) || agent === 'shell' || agent === 'codex') {
+    return false;
+  }
+  const text = String(command ?? '').trim();
+  if (!text || /[\u0000-\u001F\u007F]/.test(text)) return false;
+
+  const tokens = text.split(/\s+/);
+  const expected = AGENT_KINDS[agent].command.toLowerCase();
+  const executable = tokens.shift().toLowerCase();
+  if (![expected, `${expected}.exe`, `${expected}.cmd`].includes(executable)) {
+    return false;
+  }
+
+  // Quotes, substitutions, redirections, pipelines, statement separators,
+  // splats, comments, wildcards, and expression syntax are all outside this
+  // deliberately small grammar. Plain flags and path/model values remain okay.
+  return tokens.every(token => /^[A-Za-z0-9._:/\\=+-]+$/.test(token));
+}
+
 // ── Validation ───────────────────────────────────────────────
 
 /**
@@ -337,13 +364,20 @@ function discoverRoutedProfiles({ entrypointPath, timeoutMs = 20_000, run = exec
  * @param {string} [ctx.entrypointPath] required for routed profiles
  * @param {string} [ctx.defaultCwd]   used when the profile sets none
  * @param {function} [ctx.exists]     injected for tests
- * @returns {{file, args, env, cwd, profileId, agent, label, assurance}}
+ * @param {boolean} [ctx.workflowSession] true only for workflow Agent Session blocks
+ * @returns {{file, args, env, cwd, profileId, agent, label, assurance, resultInputCapable}}
  */
 function buildLaunchSpec(profile, ctx = {}) {
   if (!profile || typeof profile !== 'object') {
     throw new Error('No agent profile given');
   }
-  const { baseEnv = {}, entrypointPath = null, defaultCwd = undefined, exists = fs.existsSync } = ctx;
+  const {
+    baseEnv = {},
+    entrypointPath = null,
+    defaultCwd = undefined,
+    exists = fs.existsSync,
+  } = ctx;
+  const workflowSession = ctx.workflowSession === true;
 
   if (profile.kind === 'routed') {
     // Fail closed. Silently starting a native Codex when a managed account was
@@ -372,6 +406,10 @@ function buildLaunchSpec(profile, ctx = {}) {
       agent: 'codex',
       label: profile.displayName,
       assurance: ASSURANCE.ROUTED,
+      // The workflow bootstrap starts Codex and then exits the account shell.
+      // Manual routed tabs remain ordinary account shells and cannot receive
+      // generated result contracts through the privileged input channel.
+      resultInputCapable: workflowSession,
     };
   }
 
@@ -380,7 +418,12 @@ function buildLaunchSpec(profile, ctx = {}) {
 
   return {
     file: 'powershell.exe',
-    args: local.command ? ['-NoExit', '-Command', local.command] : ['-NoExit'],
+    // A workflow wrapper must disappear when its agent exits; otherwise later
+    // result text could land at the PowerShell prompt. Manual tabs retain their
+    // long-lived -NoExit behavior.
+    args: workflowSession
+      ? (local.command ? ['-Command', local.command] : [])
+      : (local.command ? ['-NoExit', '-Command', local.command] : ['-NoExit']),
     env: { ...baseEnv, ...overrides },
     cwd: local.cwd || defaultCwd,
     profileId: local.id,
@@ -389,6 +432,8 @@ function buildLaunchSpec(profile, ctx = {}) {
     // Only the agent's own non-empty state-home variable selects an account.
     // Cosmetic flags such as NO_COLOR do not raise the assurance level.
     assurance: assuranceForLocalProfile(local),
+    resultInputCapable: workflowSession
+      && isConservativeAgentInvocation(local.command, local.agent),
   };
 }
 
@@ -443,6 +488,7 @@ module.exports = {
   sanitizeDoctorReport,
   parseDoctorOutput,
   discoverRoutedProfiles,
+  isConservativeAgentInvocation,
   buildLaunchSpec,
   describeProfile,
 };

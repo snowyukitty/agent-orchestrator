@@ -28,9 +28,58 @@ function readJson(filePath, fallback = null) {
   }
 }
 
-/** Read a JSON file, throwing on missing/malformed content. */
-function readJsonStrict(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+function fileTooLargeError() {
+  const error = new Error('JSON file exceeds the configured read limit');
+  error.code = 'json-file-too-large';
+  return error;
+}
+
+function normalizeMaxFileBytes(options) {
+  if (options === undefined || options === null) return null;
+  if (typeof options !== 'object' || Array.isArray(options)) {
+    throw new TypeError('JSON read options must be an object');
+  }
+  const { maxFileBytes } = options;
+  if (maxFileBytes === undefined || maxFileBytes === null) return null;
+  if (!Number.isSafeInteger(maxFileBytes) || maxFileBytes <= 0) {
+    throw new TypeError('maxFileBytes must be a positive safe integer');
+  }
+  return maxFileBytes;
+}
+
+/**
+ * Read at most `maxFileBytes + 1` bytes from one file. Reading through the
+ * opened descriptor and stopping at the limit keeps a file-growth race from
+ * turning the pre-read size check into an unbounded allocation.
+ */
+function readUtf8Bounded(filePath, maxFileBytes) {
+  const fd = fs.openSync(filePath, 'r');
+  const chunks = [];
+  let total = 0;
+  try {
+    if (fs.fstatSync(fd).size > maxFileBytes) throw fileTooLargeError();
+    while (total <= maxFileBytes) {
+      const remaining = maxFileBytes + 1 - total;
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+      const bytesRead = fs.readSync(fd, chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+      chunks.push(chunk.subarray(0, bytesRead));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (total > maxFileBytes) throw fileTooLargeError();
+  return Buffer.concat(chunks, total).toString('utf8');
+}
+
+/** Read a JSON file, throwing on missing/malformed/oversized content. */
+function readJsonStrict(filePath, options = undefined) {
+  const maxFileBytes = normalizeMaxFileBytes(options);
+  const payload = maxFileBytes === null
+    ? fs.readFileSync(filePath, 'utf-8')
+    : readUtf8Bounded(filePath, maxFileBytes);
+  return JSON.parse(payload);
 }
 
 /**
@@ -59,13 +108,13 @@ function writeJsonAtomic(filePath, data) {
  * Returns `[{ file, data }]`, skipping unreadable entries and reporting them
  * through `onError` so one malformed file never breaks the whole listing.
  */
-function readJsonDir(dir, onError = null) {
+function readJsonDir(dir, onError = null, options = undefined) {
   if (!fs.existsSync(dir)) return [];
   const out = [];
   for (const file of fs.readdirSync(dir).filter(f => f.endsWith('.json'))) {
     const full = path.join(dir, file);
     try {
-      out.push({ file, data: readJsonStrict(full) });
+      out.push({ file, data: readJsonStrict(full, options) });
     } catch (err) {
       if (onError) onError(file, err);
     }

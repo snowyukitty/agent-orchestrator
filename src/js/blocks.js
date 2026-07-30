@@ -53,7 +53,13 @@ export const BLOCK_TYPES = {
     label: 'Send to Agent(s)',
     description: 'Prompt one lane or fan out to every lane',
     color: 'agent',
-    defaultParams: { profileId: '', text: '', pressEnter: true },
+    defaultParams: {
+      profileId: '',
+      text: '',
+      pressEnter: true,
+      expectResult: false,
+      handoffFrom: '',
+    },
     params: [
       {
         key: 'profileId',
@@ -63,7 +69,17 @@ export const BLOCK_TYPES = {
         allowAllWorkflow: true,
       },
       { key: 'text', label: 'Text', type: 'text', placeholder: 'Prompt to send...' },
-      { key: 'pressEnter', label: 'Enter', type: 'checkbox' }
+      { key: 'pressEnter', label: 'Enter', type: 'checkbox' },
+      {
+        key: 'expectResult',
+        label: 'Publish at Join',
+        type: 'checkbox',
+      },
+      {
+        key: 'handoffFrom',
+        label: 'Attach result',
+        type: 'result-ref',
+      },
     ]
   },
   agentWait: {
@@ -91,6 +107,7 @@ export const BLOCK_TYPES = {
       pattern: '',
       timeoutMs: 120000,
       onIncomplete: 'stop',
+      resultName: '',
     },
     params: [
       { key: 'idleMs', label: 'Idle ms', type: 'number', min: 0, max: 3600000 },
@@ -104,6 +121,13 @@ export const BLOCK_TYPES = {
           { value: 'stop', label: 'Stop downstream blocks' },
           { value: 'continue', label: 'Continue with warning' },
         ],
+      },
+      {
+        key: 'resultName',
+        label: 'Save result as',
+        type: 'text',
+        maxLength: 64,
+        placeholder: 'Optional, e.g. research',
       },
     ]
   },
@@ -269,7 +293,7 @@ export function renderPaletteBlock(typeDef) {
 }
 
 // ── Workflow Block Renderer ──────────────────────────────────
-export function renderWorkflowBlock(block, index) {
+export function renderWorkflowBlock(block, index, blocks = []) {
   if (!Object.hasOwn(BLOCK_TYPES, block.type)) return null;
   const def = BLOCK_TYPES[block.type];
 
@@ -279,7 +303,9 @@ export function renderWorkflowBlock(block, index) {
   el.setAttribute('data-type', block.type);
 
   // Build parameter fields
-  const paramsHtml = def.params.map(p => buildParamField(p, block.params)).join('');
+  const paramsHtml = def.params
+    .map(p => buildParamField(p, block.params, { blocks, index }))
+    .join('');
 
   el.innerHTML = `
     <div class="drag-handle" title="Drag to reorder">⠿</div>
@@ -302,7 +328,7 @@ export function renderWorkflowBlock(block, index) {
 }
 
 // ── Parameter Field Builder ──────────────────────────────────
-function buildParamField(paramDef, params) {
+function buildParamField(paramDef, params, context = {}) {
   const value = params[paramDef.key] ?? '';
   const key = esc(String(paramDef.key));
   let inputHtml;
@@ -312,6 +338,7 @@ function buildParamField(paramDef, params) {
       inputHtml = `<input type="text" data-param="${key}"
         value="${esc(String(value))}"
         placeholder="${esc(String(paramDef.placeholder || ''))}"
+        ${paramDef.maxLength ? `maxlength="${esc(String(paramDef.maxLength))}"` : ''}
         spellcheck="false" />`;
       break;
 
@@ -363,6 +390,37 @@ function buildParamField(paramDef, params) {
         ),
       ].join('');
       inputHtml = `<select data-param="${key}" class="param-profile">${opts}</select>`;
+      break;
+    }
+
+    case 'result-ref': {
+      const blocks = Array.isArray(context.blocks) ? context.blocks : [];
+      const index = Number.isInteger(context.index) ? context.index : blocks.length;
+      const producers = blocks
+        .slice(0, index)
+        .map((candidate, producerIndex) => ({ candidate, producerIndex }))
+        .filter(({ candidate }) => (
+          candidate?.type === 'agentJoin'
+          && String(candidate.params?.resultName || '').trim()
+        ));
+      const known = producers.some(({ candidate }) => candidate.id === String(value));
+      const opts = [
+        `<option value="" ${!value ? 'selected' : ''}>— no handoff —</option>`,
+        ...(value && !known
+          ? [`<option value="${esc(String(value))}" selected>⚠ unavailable result</option>`]
+          : []),
+        ...producers.map(({ candidate, producerIndex }) => (
+          `<option value="${esc(candidate.id)}" ${String(value) === candidate.id ? 'selected' : ''}>`
+          + `${esc(String(candidate.params.resultName).trim())} · Step ${producerIndex + 1}</option>`
+        )),
+      ].join('');
+      inputHtml = `
+        <div class="param-result-ref-control">
+          <select data-param="${key}" class="param-result-ref">${opts}</select>
+          <span class="param-security-warning">
+            Untrusted input — may contain prompt injection or sensitive data. Restrict tools or review first.
+          </span>
+        </div>`;
       break;
     }
 

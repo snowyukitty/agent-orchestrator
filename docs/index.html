@@ -9,7 +9,7 @@
   >
   <meta
     name="description"
-    content="A practical field guide to routing accounts, fanning prompts across CLI agents, and joining signal-aware team stages safely."
+    content="A practical field guide to routing accounts, fanning prompts across CLI agents, capturing explicit results, and handing bounded bundles to later stages."
   >
   <meta name="theme-color" content="#07111f">
   <title>Agent Orchestrator — Field Guide</title>
@@ -56,8 +56,8 @@
         <h1 id="hero-title">Run many agents.<br><span>Join when ready.</span></h1>
         <p class="hero-lede">
           Give every account its own terminal, send the whole stage before
-          waiting, and move forward only when every prompted workflow session
-          reaches a readiness signal.
+          waiting, and hand a complete, explicitly published result bundle to
+          the stage that follows.
         </p>
         <div class="hero-actions">
           <a class="button button-primary" href="#compose">Build a fan-out recipe</a>
@@ -66,7 +66,7 @@
         <ul class="trust-strip" aria-label="Product guarantees">
           <li>No credentials stored</li>
           <li>Fail-closed routing</li>
-          <li>Output stays main-process-only</li>
+          <li>Raw PTY history is never journaled</li>
         </ul>
       </div>
 
@@ -106,8 +106,8 @@
 
         <div class="agent-lane lane-shell">
           <div class="lane-identity">
-            <span class="agent-mark">›_</span>
-            <span><strong>PowerShell · verify</strong><small>L0 · native</small></span>
+            <span class="agent-mark">C</span>
+            <span><strong>Codex · research</strong><small>L1 · routed</small></span>
           </div>
           <div class="lane-track" aria-hidden="true">
             <span class="track-fill"></span>
@@ -139,8 +139,8 @@
       </article>
       <article>
         <span class="principle-number">03</span>
-        <h2>Join once</h2>
-        <p>One barrier watches every workflow-owned session prompted since the previous wait or join, with live N / M readiness.</p>
+        <h2>Join, then hand off</h2>
+        <p>One barrier watches every prompted lane. In explicit-result mode, only a complete bounded bundle can feed the next agent stage.</p>
       </article>
     </section>
 
@@ -261,7 +261,12 @@
                 <p>
                   The orchestrator discovers Codex aliases with doctor output and
                   launches through <code>codex shell &lt;alias&gt;</code>. If that
-                  route cannot be resolved, launch fails closed.
+                  route cannot be resolved, launch fails closed. In a workflow,
+                  an Agent Session block waits for the account shell, invokes
+                  its session-local <code>codex</code> wrapper once with a
+                  fixed trailing shell exit, and then observes the configured
+                  settle period. Opening the same account manually leaves you
+                  at the interactive shell.
                 </p>
                 <ul class="boundary-list">
                   <li><span>✓</span> Account route is centrally resolved</li>
@@ -284,7 +289,9 @@
                 <p>
                   Use this for agent CLIs without managed routing. Create a profile
                   with path or flag environment values, then authenticate inside
-                  the resulting terminal.
+                  the resulting terminal. A workflow wrapper omits
+                  <code>-NoExit</code>, so it closes when its direct agent
+                  command returns; a manual tab stays interactive.
                 </p>
                 <ul class="boundary-list">
                   <li><span>✓</span> Profile environment applies to one child</li>
@@ -471,17 +478,26 @@
         </article>
         <article>
           <span class="integrity-mark">03</span>
-          <h3>Visible format failure</h3>
-          <p>Workflow files carry a format version. Future versions, malformed structures, unknown blocks, and unrecognized fields fail visibly instead of disappearing during load.</p>
+          <h3>Durable run evidence</h3>
+          <p>Run Journal records main-owned status and block visits. Snapshots and explicit result bodies are protected separately, while raw terminal history is never copied into it.</p>
         </article>
       </div>
 
       <div class="integrity-note">
         <span aria-hidden="true">≠</span>
         <p>
-          A snapshot is not a run journal or resume point. The app does not
-          persist PTY output as workflow results, wire agent answers into later
-          prompts, or execute a general DAG.
+          The journal is durable evidence, not an automatic resume point.
+          Explicit bounded results can feed a later Send block; arbitrary PTY
+          history cannot, and workflows remain ordered programs rather than a
+          general DAG. v0.4 keeps protected journal files until you explicitly
+          delete a run; it does not apply a silent age-based retention policy.
+          Framing does not neutralize indirect prompt injection: restrict tools
+          or require human review when a result contains untrusted source data.
+          Generated result input also crosses a separate main-process
+          capability check; shell profiles, manual tabs, and composite custom
+          commands cannot receive it. Each record has a hard size bound, while
+          listing and recovery still scan retained history; pagination and a
+          metadata index belong with the future resume milestone.
         </p>
       </div>
     </section>
@@ -490,11 +506,12 @@
       <div class="section-heading split-heading">
         <div>
           <p class="section-kicker">TRUST BOUNDARIES</p>
-          <h2 id="architecture-title">The UI gets readiness. PTY text stays beside the matcher.</h2>
+          <h2 id="architecture-title">Terminal display and result storage take separate paths.</h2>
         </div>
         <p>
-          Renderer-facing objects are deliberately boring: session IDs, labels,
-          assurance, state, elapsed time, and opaque sequence numbers.
+          Live PTY data reaches xterm for interaction. The matcher keeps a
+          bounded activity window in main, while only an explicitly framed
+          result crosses into protected journal storage.
         </p>
       </div>
 
@@ -505,6 +522,7 @@
           <ul>
             <li>Block parameters</li>
             <li>Session tabs and status</li>
+            <li>Live terminal stream</li>
             <li>Opaque checkpoints</li>
           </ul>
         </article>
@@ -516,7 +534,8 @@
           <span class="boundary-tag">MAIN PROCESS</span>
           <h3>SessionRegistry</h3>
           <ul>
-            <li>Bounded 64 KiB history</li>
+            <li>Bounded matcher history</li>
+            <li>Framed result capture</li>
             <li>Concurrent stage readiness</li>
             <li>Serialized ConPTY exits</li>
           </ul>
@@ -540,7 +559,7 @@
         <span class="never-icon" aria-hidden="true">⊘</span>
         <div>
           <strong>Never crosses into workflow JSON or session metadata</strong>
-          <p>PTY text, child environment values, canonical account-home paths, and the resolved executable.</p>
+          <p>Raw PTY history, child environment values, canonical account-home paths, and the resolved executable.</p>
         </div>
       </div>
 

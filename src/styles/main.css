@@ -619,6 +619,23 @@ html, body {
   background-position: right 8px center;
 }
 
+.param-result-ref-control {
+  flex: 1;
+  min-width: 0;
+}
+
+.param-result-ref-control select {
+  width: 100%;
+}
+
+.param-security-warning {
+  display: block;
+  margin-top: 3px;
+  color: var(--accent-yellow);
+  font-size: 9px;
+  line-height: 1.25;
+}
+
 /* Directory input with browse button */
 .param-dir-row {
   display: flex;
@@ -1510,6 +1527,200 @@ html, body {
   display: flex;
   gap: var(--sp-2);
   flex-shrink: 0;
+}
+
+/* ── Run Journal ──────────────────────────────────────────────
+   Metadata stays immediately inspectable; explicit result bodies are fetched
+   and decrypted only when the user opens one. */
+.run-journal-modal {
+  width: min(980px, 94vw);
+  max-width: 980px;
+}
+
+.run-journal-layout {
+  display: grid;
+  grid-template-columns: minmax(230px, 0.8fr) minmax(380px, 1.6fr);
+  gap: var(--sp-3);
+  min-height: 420px;
+  padding: var(--sp-3);
+  overflow: hidden;
+}
+
+.run-journal-list,
+.run-journal-detail {
+  min-width: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-primary) 72%, transparent);
+}
+
+.run-journal-list { padding: var(--sp-2); }
+.run-journal-detail { padding: var(--sp-4); }
+
+.run-row {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  margin-bottom: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-left: 3px solid var(--accent-cyan);
+  border-radius: var(--radius-sm);
+  background: var(--surface-glass);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.run-row:hover,
+.run-row.selected {
+  border-color: var(--accent-cyan);
+  background: var(--surface-glass-hover);
+}
+
+.run-row-main {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.run-row-main strong {
+  overflow: hidden;
+  font-size: var(--font-size-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-row-main small,
+.run-detail-head p,
+.run-visit-main small,
+.run-result-summary small {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.run-status {
+  flex-shrink: 0;
+  padding: 2px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.run-status.status-running { color: var(--accent-cyan); }
+.run-status.status-completed { color: var(--accent-green); }
+.run-status.status-failed,
+.run-status.status-interrupted { color: var(--accent-red); }
+.run-status.status-cancelled,
+.run-status.status-stopped { color: var(--accent-yellow); }
+
+.run-detail-head,
+.run-result-summary,
+.run-visit {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+}
+
+.run-detail-head h3 {
+  color: var(--text-primary);
+  font-size: var(--font-size-lg);
+}
+
+.run-detail-head p { margin-top: 4px; }
+
+.run-detail-section { margin-top: var(--sp-5); }
+.run-detail-section h4 {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: var(--sp-2);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.run-visit {
+  padding: var(--sp-2) 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.run-visit-index {
+  width: 22px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.run-visit-main {
+  min-width: 0;
+  display: grid;
+  flex: 1;
+}
+
+.run-visit-main strong,
+.run-result-summary strong {
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+}
+
+.run-result {
+  padding: var(--sp-3);
+  margin-bottom: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-glass);
+}
+
+.run-result-summary > span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.run-result-body {
+  max-height: 280px;
+  margin-top: var(--sp-3);
+  padding: var(--sp-3);
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+}
+
+.run-detail-empty {
+  padding: var(--sp-3) 0;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.run-detail-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--sp-5);
+}
+
+@media (max-width: 760px) {
+  .run-journal-layout {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+  .run-journal-list { max-height: 180px; }
+  .run-journal-detail { overflow: visible; }
 }
 
 /* Unsaved-changes indicator next to the workflow name. */

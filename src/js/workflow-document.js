@@ -6,7 +6,8 @@
 
 import { BLOCK_TYPES, generateBlockId } from './blocks.js';
 
-export const WORKFLOW_FORMAT_VERSION = 1;
+export const WORKFLOW_FORMAT_VERSION = 2;
+export const MAX_WORKFLOW_NAME_CHARS = 128;
 const WORKFLOW_FIELDS = new Set([
   'formatVersion',
   'id',
@@ -55,11 +56,32 @@ export function loadWorkflowDocument(data = {}, { defaultDirectory = '.' } = {})
   if (!Array.isArray(source.blocks)) {
     throw new WorkflowFormatError('Workflow blocks must be an array', 'invalid-blocks');
   }
+  if (
+    typeof source.name === 'string'
+    && source.name.trim().length > MAX_WORKFLOW_NAME_CHARS
+  ) {
+    throw new WorkflowFormatError(
+      `Workflow name is limited to ${MAX_WORKFLOW_NAME_CHARS} characters`,
+      'size-limit'
+    );
+  }
   if (source.file !== undefined && (typeof source.file !== 'string' || !source.file.trim())) {
     throw new WorkflowFormatError('Workflow source file metadata must be a non-empty string', 'invalid-source');
   }
 
   const diagnostics = [];
+  const duplicateSourceIds = duplicateBlockIds(source.blocks);
+  for (const block of source.blocks) {
+    const ref = block?.type === 'agentSend'
+      ? String(block.params?.handoffFrom || '').trim()
+      : '';
+    if (ref && duplicateSourceIds.has(ref)) {
+      throw new WorkflowFormatError(
+        `Result handoff reference "${ref}" is ambiguous because more than one block uses that id.`,
+        'ambiguous-result-reference'
+      );
+    }
+  }
   const usedIds = new Set();
   const blocks = source.blocks.map((block, index) => (
     normalizeBlock(block, index, usedIds, diagnostics)
@@ -71,13 +93,14 @@ export function loadWorkflowDocument(data = {}, { defaultDirectory = '.' } = {})
   const id = normalizeUniqueId(source.id, fallbackWorkflowId, new Set(), diagnostics, {
     kind: 'workflow',
   });
+  diagnostics.push(...analyzeResultReferences(blocks));
 
   return {
     document: {
       formatVersion: WORKFLOW_FORMAT_VERSION,
       id,
       name: typeof source.name === 'string' && source.name.trim()
-        ? source.name
+        ? source.name.trim()
         : 'Untitled Workflow',
       defaultDirectory: typeof source.defaultDirectory === 'string'
         ? source.defaultDirectory
@@ -181,13 +204,76 @@ function normalizeParamValue(paramDef, value, fallback) {
         ? String(value)
         : fallback;
     default:
-      return value == null ? '' : String(value);
+      return (value == null ? '' : String(value))
+        .slice(0, Number.isInteger(paramDef.maxLength) ? paramDef.maxLength : undefined);
   }
+}
+
+/**
+ * Validate same-run result references without mutating the workflow.
+ * A handoff may only point backward to a Join Agents block that explicitly
+ * names a captured result. Result values never flow into shell/path blocks.
+ */
+export function analyzeResultReferences(blocks) {
+  const list = Array.isArray(blocks) ? blocks : [];
+  const byId = new Map(list.map((block, index) => [block?.id, { block, index }]));
+  const diagnostics = [];
+
+  list.forEach((block, index) => {
+    if (block?.type !== 'agentSend') return;
+    const ref = String(block.params?.handoffFrom || '').trim();
+    if (!ref) return;
+    const producer = byId.get(ref);
+    let message = '';
+    if (!producer) {
+      message = 'The attached result producer no longer exists.';
+    } else if (producer.index >= index) {
+      message = 'A result handoff must come from an earlier Join Agents block.';
+    } else if (
+      producer.block?.type !== 'agentJoin'
+      || !String(producer.block.params?.resultName || '').trim()
+    ) {
+      message = 'The selected block does not publish a named agent result.';
+    }
+    if (message) {
+      diagnostics.push({
+        code: 'invalid-result-reference',
+        severity: 'error',
+        index,
+        blockId: block.id || null,
+        reference: ref,
+        message,
+      });
+    }
+  });
+  return diagnostics;
+}
+
+export function assertValidResultReferences(blocks) {
+  const errors = analyzeResultReferences(blocks);
+  if (errors.length) {
+    throw new WorkflowFormatError(
+      `Invalid result handoff at step ${errors[0].index + 1}: ${errors[0].message}`,
+      'invalid-result-reference'
+    );
+  }
+}
+
+function duplicateBlockIds(blocks) {
+  const seen = new Set();
+  const duplicates = new Set();
+  for (const block of Array.isArray(blocks) ? blocks : []) {
+    const id = typeof block?.id === 'string' ? block.id : '';
+    if (!id) continue;
+    if (seen.has(id)) duplicates.add(id);
+    seen.add(id);
+  }
+  return duplicates;
 }
 
 function normalizeUniqueId(value, fallback, usedIds, diagnostics, context) {
   const supplied = value !== undefined && value !== null && value !== '';
-  let id = typeof value === 'string' && /^[a-zA-Z0-9_-]+$/.test(value)
+  let id = typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value)
     ? value
     : fallback;
   const original = id;

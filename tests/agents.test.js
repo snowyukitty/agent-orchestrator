@@ -332,6 +332,60 @@ test('a local profile launches PowerShell with its env overlaid', () => {
   assert.equal(spec.cwd, 'C:/work');
   assert.equal(spec.assurance, agents.ASSURANCE.ENV);
   assert.equal(spec.agent, 'claude');
+  assert.equal(spec.resultInputCapable, false, 'manual sessions cannot receive generated results');
+});
+
+test('a local workflow session exits with its direct agent and is result-input capable', () => {
+  const spec = agents.buildLaunchSpec({
+    ...CLAUDE_WORK,
+    command: 'claude --model claude-sonnet-4-5 --add-dir C:/work',
+  }, {
+    baseEnv: {},
+    workflowSession: true,
+  });
+  assert.deepEqual(spec.args, [
+    '-Command',
+    'claude --model claude-sonnet-4-5 --add-dir C:/work',
+  ]);
+  assert.ok(!spec.args.includes('-NoExit'));
+  assert.equal(spec.resultInputCapable, true);
+});
+
+test('custom shell syntax cannot gain structured result input capability', () => {
+  const unsafe = [
+    'claude; powershell',
+    'claude | Out-File result.txt',
+    'claude && grok',
+    'claude $(Get-Content prompt.txt)',
+    'claude `whoami`',
+    'claude > result.txt',
+    'powershell -Command claude',
+    'claude --model "spaced value"',
+  ];
+  for (const command of unsafe) {
+    const spec = agents.buildLaunchSpec({ ...CLAUDE_WORK, command }, {
+      baseEnv: {},
+      workflowSession: true,
+    });
+    assert.equal(spec.resultInputCapable, false, command);
+    assert.ok(!spec.args.includes('-NoExit'), command);
+  }
+  assert.equal(agents.isConservativeAgentInvocation('claude --model sonnet', 'claude'), true);
+  assert.equal(agents.isConservativeAgentInvocation('grok --model grok-4', 'claude'), false);
+});
+
+test('a workflow shell profile is never result-input capable', () => {
+  const spec = agents.buildLaunchSpec({
+    id: 'plain-shell',
+    agent: 'shell',
+    displayName: 'Plain shell',
+    command: '',
+  }, {
+    baseEnv: {},
+    workflowSession: true,
+  });
+  assert.deepEqual(spec.args, []);
+  assert.equal(spec.resultInputCapable, false);
 });
 
 test('two accounts of one agent produce different child environments', () => {
@@ -378,10 +432,22 @@ test('a routed profile launches through agent-entrypoint codex shell', () => {
   assert.deepEqual(spec.args.slice(-3), ['codex', 'shell', 'a']);
   assert.ok(spec.args.includes('-NoProfile'));
   assert.equal(spec.assurance, agents.ASSURANCE.ROUTED);
+  assert.equal(spec.resultInputCapable, false, 'manual routed tabs remain account shells');
   // We must not construct the account environment ourselves; the entrypoint owns it.
   assert.equal(spec.env.CODEX_HOME, undefined);
   assert.equal(spec.env.CODEX_SQLITE_HOME, undefined);
   assert.deepEqual(spec.env, { PATH: '/bin' });
+});
+
+test('a routed Codex workflow session is result-input capable', () => {
+  const spec = agents.buildLaunchSpec(ROUTED, {
+    baseEnv: {},
+    entrypointPath: 'C:/AI_Projects/ai-agent-entrypoint',
+    exists: () => true,
+    workflowSession: true,
+  });
+  assert.equal(spec.resultInputCapable, true);
+  assert.deepEqual(spec.args.slice(-3), ['codex', 'shell', 'a']);
 });
 
 test('a routed profile fails closed rather than falling back to the native login', () => {

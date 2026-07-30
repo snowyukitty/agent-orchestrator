@@ -1,10 +1,11 @@
 # Static field guide
 
 `docs/index.html` is the zero-build, zero-backend product guide for Agent
-Orchestrator. The guide covers assurance-aware account launch, true
-fan-out-before-join team stages, immutable run snapshots, non-destructive
-scheduled execution, and versioned workflow loading. It is intentionally plain
-HTML, CSS, and JavaScript:
+Orchestrator. The v0.4 guide covers assurance-aware account launch, true
+fan-out-before-join team stages, explicit result handoff, the durable Run
+Journal, immutable run snapshots, non-destructive scheduled execution, and
+versioned workflow loading. It is intentionally plain HTML, CSS, and
+JavaScript:
 
 - no package install or build step;
 - no API calls, analytics, forms, cookies, or remote runtime assets;
@@ -14,9 +15,21 @@ HTML, CSS, and JavaScript:
 - interactive examples are planning aids only and never read application data.
 
 The recipe composer always places every role-specific send before one shared
-`Join Agents` barrier. Its readiness simulation demonstrates status signals,
-not captured agent results: the guide does not claim output persistence,
-cross-agent result wiring, a run journal, resume, or general DAG execution.
+`Join Agents` barrier. Its simulation demonstrates stage readiness. Result
+handoff is a separate explicit mode: only bounded, framed results are kept,
+while raw terminal history remains ephemeral. The journal records evidence for
+a future resume design, but the guide does not claim automatic resume or
+general DAG execution. Framing preserves boundaries; it does not neutralize
+indirect prompt injection. Results derived from untrusted sources still require
+restricted downstream tools or human review before a sensitive stage. For
+routed Codex accounts, an Agent Session workflow block waits for the
+account-shell readiness signal and invokes the session-local `codex` wrapper
+with a fixed trailing shell exit; opening the same account manually still
+leaves you at its interactive shell. Generated result contracts and handoffs
+use a separate main-process input capability: shell profiles, manual tabs, and
+composite custom commands cannot receive them. Retained journal records are
+individually size-bounded, but listing and recovery still scan the retained
+history; a paginated metadata index is deferred to the resume milestone.
 
 Open `docs/index.html` in a browser to review it. Run `npm run check` to validate
 its local references, anchor targets, security boundary, and JavaScript syntax.

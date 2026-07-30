@@ -58,6 +58,33 @@ test('readJsonDir returns empty for a directory that does not exist', () => {
   assert.deepEqual(store.readJsonDir(path.join(tmpDir(), 'nope')), []);
 });
 
+test('strict JSON reads stop at a byte limit and report oversized directory entries', () => {
+  const dir = tmpDir();
+  const oversized = path.join(dir, 'oversized.json');
+  fs.writeFileSync(oversized, JSON.stringify({ body: 'x'.repeat(64) }));
+  const errors = [];
+
+  assert.throws(
+    () => store.readJsonStrict(oversized, { maxFileBytes: 16 }),
+    error => (
+      error.code === 'json-file-too-large'
+      && !error.message.includes(dir)
+      && !error.message.includes('oversized.json')
+    )
+  );
+  assert.deepEqual(
+    store.readJsonDir(dir, (file, error) => errors.push([file, error.code]), {
+      maxFileBytes: 16,
+    }),
+    []
+  );
+  assert.deepEqual(errors, [['oversized.json', 'json-file-too-large']]);
+  assert.throws(
+    () => store.readJsonStrict(oversized, { maxFileBytes: 0 }),
+    TypeError
+  );
+});
+
 test('settings normalize to defaults for junk input', () => {
   for (const junk of [null, undefined, 'str', 42, []]) {
     assert.deepEqual(settings.normalizeSettings(junk), settings.DEFAULTS);

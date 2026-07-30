@@ -22,6 +22,8 @@ export function workflowAgentSessions(sessions, spawnedIds) {
     && owned.has(session.id)
     && typeof session.profileId === 'string'
     && session.profileId
+    && typeof session.agent === 'string'
+    && session.agent !== 'shell'
     && session.status !== 'exited'
   ));
 }

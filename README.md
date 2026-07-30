@@ -50,6 +50,13 @@ pairing is stated rather than implied:
   paths is stripped before it reaches the UI, the log, or an exported workflow.
 - **Routed launches fail closed.** If an alias cannot be resolved, the session
   refuses to start rather than quietly falling back to the native login.
+- **Workflow and manual launches intentionally differ after routing.** The
+  Agents panel leaves an L1 session at its account shell for interactive use.
+  An `Agent Session` workflow block waits for that shell's readiness signal,
+  invokes its session-local `codex` wrapper with a fixed trailing shell exit,
+  then continues only after the configured settle period. Local workflow
+  sessions likewise omit PowerShell's `-NoExit`, so their wrapper closes when
+  the direct agent command returns; manual tabs retain their interactive shell.
 
 Sessions appear as tabs above the terminal; all of them keep running and
 buffering while hidden. The quick-send bar targets the current session, every
@@ -59,11 +66,53 @@ broadcast.
 
 ### Release Notes
 
-#### v0.4.0 (singular identity migration)
+#### v0.4.0 (Durable Run Journal + Result Handoff + Singular Identity)
 - **One canonical name everywhere**: repository, npm package, checkout, AppData, documentation, and build artifact now use `agent-orchestrator` / **Agent Orchestrator**.
 - **Safe user-data migration**: the first singular build validates and copies app-owned JSON (`settings.json`, local agent profiles, workflows, and any run journal) from the historical plural AppData directory through a staging directory, then atomically promotes it.
 - **Rollback remains possible**: the historical AppData directory is retained as a read-only backup. Chromium caches are not migrated, and pre-existing data on both sides is never silently merged.
 - **Test storage isolation**: smoke and Electron self-tests use a temporary user-data directory and cannot modify production settings or workflows.
+- **Run Journal**: every run starts from an immutable workflow snapshot and
+  records an ordered block-visit timeline with terminal states. Runs left
+  active by an app restart become `interrupted`, providing durable evidence
+  for a future resume design without claiming automatic resume today.
+- **Explicit agent results**: `Send to Agent` can ask each targeted lane to
+  publish one framed result. A named `Join Agents` block captures only those
+  bounded payloads; ordinary PTY history is never copied into the journal.
+- **Bounded downstream handoff**: a later `Send to Agent` block can attach a
+  complete result bundle from an earlier named Join in the same run. Missing,
+  partial, or truncated lanes stop the handoff by default, and results never
+  interpolate into command, path, or environment fields. The opt-in control
+  visibly warns that untrusted prose may still contain prompt injection.
+- **Protected local storage**: workflow snapshots and explicit result bodies
+  use Electron's OS-backed `safeStorage` when available. If it is unavailable,
+  the current run remains usable in memory and is clearly non-durable; there is
+  no plaintext fallback. Every record is hard-bounded, and an active record
+  must reserve enough capacity for terminal recovery before it reaches disk.
+- **Run inspection**: the new **📖 Runs** view lists run metadata, block visits,
+  and explicit result summaries. A result body is decrypted only when selected.
+- **Workflow-ready routed Codex**: an L1 `Agent Session` block waits for the
+  routed account shell, invokes its session-local `codex` wrapper once with a
+  fixed trailing `exit`, and fails clearly if readiness never arrives.
+  Sessions opened by hand still stop at the account shell.
+- **Bounded structured prompts**: generated result contracts and handoffs use
+  bracketed-paste chunks with delimiter rejection and a post-paste output
+  checkpoint. Every generated chunk and Enter crosses a separate main-process
+  capability check. Shell profiles and composite custom commands cannot receive
+  structured result input; ordinary workflow input and Quick Send remain
+  human-paced.
+- **Verified routed lifecycle**: an opt-in `npm run verify:routed --
+  --confirm-live` check opens two real routed Codex accounts, verifies both
+  `codex doctor` identity invariants, stops them, and asserts that no routed
+  child processes remain. Its first run exposed and fixed a Windows tree-kill
+  race by requesting `/T /F` before the outer ConPTY root can exit.
+- **Renderer-loss containment**: production reload shortcuts are blocked. If
+  the renderer nevertheless reloads or crashes, main drains every PTY,
+  including now-invisible manual sessions, marks active journal runs
+  `interrupted`, and admits no new session or journal mutation until cleanup
+  succeeds.
+- **Workflow format v2**: result references use stable block IDs and are
+  validated as backward-only references to named Join blocks. The shipped
+  **Parallel research → synthesis** template demonstrates the complete flow.
 
 #### v0.3.0 (Signal-aware Team Stages)
 - **New `◇ Join Agents` block**: one shared barrier waits concurrently for every
@@ -165,6 +214,16 @@ broadcast.
 - **Quick Send**: A prompt bar under the terminal fires an ad-hoc command at the current session, every session of one agent, or all of them. Broadcast targets are typed concurrently using the same human-paced typing as the workflow engine.
 - **Visual Workflow Builder**: Users can construct automation workflows by combining blocks (Schedule, Directory, Agent Session, Send to Agent, Wait for Agent, Join Agents, Command, Wait, Send Input, Keypress, Loop / End Loop, Log, Hibernate PC).
 - **Signal-Aware Team Stages**: `Send to Agent` can prompt one session or all workflow-owned agent sessions. A single `Join Agents` barrier then tracks every workflow-owned session prompted since the previous wait/join and reports live `N / M ready` progress. Timeout and premature exit stop downstream blocks by default without closing the remaining sessions; an explicit continue policy keeps the warning-and-continue behavior when that is intentional.
+- **Explicit Result Handoff**: A Send block can issue a unique bounded result
+  contract to every targeted lane. A named Join captures complete framed
+  payloads in stable lane order; a later Send may attach that bundle as clearly
+  labelled untrusted reference data. Partial, empty, or truncated bundles do
+  not reach a downstream agent by default.
+- **Durable Run Journal**: **📖 Runs** shows immutable workflow identity,
+  trigger, ordered block visits, terminal status, and explicit result metadata.
+  Snapshots and result bodies are protected with Electron `safeStorage`; bodies
+  are fetched and decrypted only on request. No-encryption environments fall
+  back to bounded memory, never plaintext files.
 - **Loops**: A **Loop** block repeats every block up to its matching **End Loop** a configurable number of times. Nested loops are supported and the loop body is indented (with a continuous nesting rail) so the structure is readable at a glance. A live iteration badge (`2/3`) tracks progress during a run, unbalanced loop markers are flagged inline (dashed outline + tooltip) and summarized in a banner, and the engine still runs safely by skipping broken markers.
 - **Drag-to-Position Editing**: Blocks dragged from the palette land exactly where they are dropped (with a live insertion-line preview); they can still be reordered afterward by their drag handles.
 - **Templates**: A **🧩 Templates** picker provides pre-built workflows (including a Loop example) as one-click starting points.
@@ -176,9 +235,9 @@ broadcast.
   - **Terminal**: A tabbed stack of fully interactive `xterm.js` terminals, one per live session.
 - **Theme Switcher**: Users can toggle between three terminal themes (PowerShell Blue, Hacker Dark, and Light Mode). The choice is remembered across restarts, along with window geometry and panel sizes.
 - **Interactive Terminal**: Terminals stay fully interactive. Keystrokes are forwarded via IPC to the PTY behind the visible tab.
-- **Process Cleanup**: Starting a run closes only the sessions the *previous* run opened — sessions you started by hand are left alone. Aborting kills every PTY the run spawned, and each kill escalates from SIGTERM to a whole-tree `taskkill` after a grace window, so a routed shell with an agent child leaves nothing behind.
+- **Process Cleanup**: Starting a run closes only the sessions the *previous* run opened — sessions you started by hand are left alone. Aborting kills every PTY the run spawned. On Windows it requests a whole-tree `taskkill /T /F` while the outer ConPTY root still exists, with the existing escalation path retained as fallback, so routed children cannot escape by reparenting.
 - **Single-Instance Guard**: Electron's single-instance lock prevents duplicate tray apps, duplicate scheduler ticks, and conflicting hibernate timers. Launching a second instance focuses the existing window instead.
-- **Input Simulation**: Simulates human typing speeds for text input blocks to avoid characters being swallowed by async CLI UI redrawing loops.
+- **Input Simulation**: Ordinary workflow input and Quick Send use human-paced typing so async CLI redraw loops do not swallow characters. Generated result contracts and handoffs use bounded bracketed-paste chunks so large structured prompts do not take minutes to submit.
 - **Scheduled Countdown Board**: A **⏱ Schedules** panel lists every scheduled workflow (saved on disk + the one being edited), each with a **live countdown** to its next run. The bottom toolbar always shows "next in HH:MM:SS". Due `once` jobs auto-run at their time; `cron` mode repeats daily. A due saved workflow executes independently of the current editor state.
 - **Schedule Defaults**: Default and newly added Schedule blocks use the current local system time as their trigger time, with a one-click control to reset back to now. Loaded workflows preserve their saved schedule values.
 - **Delayed Hibernate (power saving)**: A **💤 Hibernate PC** block arms a delayed system hibernate (`shutdown /h`) after a configurable delay — e.g. ping an agent, then hibernate to save power once it's done. The timer lives in the main process so it fires reliably even when the window is minimized to the tray or the screen is locked. While armed, a top banner shows a **live countdown** with a **✕ Cancel hibernate** button to force-abort it. Arming is non-blocking, so it can sit at the end of a workflow.
@@ -187,11 +246,25 @@ broadcast.
 
 ### Architecture Notes
 - **Account routing is delegated, not reimplemented.** `ai-agent-entrypoint` owns the Codex account manifest and child-environment construction; this app discovers its aliases and launches through it. Bringing another CLI under managed routing is a decision for that repository. `AGENTS.md` records the boundary and the rules the code enforces.
-- **Sessions are first class.** `src/main/sessions.js` holds a registry of PTYs, each tagged with its profile and assurance level. It also owns output activity checkpoints and bounded matching buffers used by `Wait for Agent` and team readiness joins. Its `describe()` deliberately omits env, cwd, the resolved executable, and all PTY text, because a routed session's environment and output can contain machine-local paths.
+- **The routed shell remains the launch boundary.** Main still launches
+  `codex shell <alias>` and never constructs account homes. Only the workflow
+  engine waits for the fixed account-shell readiness signal and enters the
+  session-local `codex` wrapper with a trailing `exit`; opening the same profile
+  from the Agents panel remains an interactive account shell.
+- **Structured result input is a main-owned capability.** Main grants it only
+  to routed Codex workflow sessions and local workflow sessions whose profile
+  is one conservative direct invocation of its declared agent. Shell profiles,
+  manual tabs, and PowerShell commands containing control syntax fail closed.
+- **Sessions are first class.** `src/main/sessions.js` holds a registry of PTYs, each tagged with its profile, assurance level, and structured-result capability. It also owns output activity checkpoints and bounded matching buffers used by `Wait for Agent` and team readiness joins. Its `describe()` deliberately omits env, cwd, the resolved executable, and all PTY text, because a routed session's environment and output can contain machine-local paths.
 - **Runs are isolated from editor mutation.** The engine receives an immutable
   workflow snapshot and tracks which workflow-owned sessions were prompted in
   the current team stage. Manual edits and scheduled workflow loading affect
   neither the active snapshot nor each other's editor state.
+- **Journal metadata and bodies have different exposure.** Main-owned run,
+  visit, result, revision, and event IDs are persisted atomically and may be
+  listed in the renderer. Snapshot/result plaintext is never placed in those
+  public objects: it is independently encrypted, or held only in a bounded
+  in-memory store when OS protection is unavailable.
 - **Workflow loading is schema-aware.** The pure workflow-document module
   validates the format version and every block type before normalizing known
   parameters. Unsupported future data is reported instead of being normalized
@@ -204,19 +277,34 @@ broadcast.
   internally requested quit may proceed.
 - The BrowserWindow is a narrow local capability boundary: sandboxed preload,
   denied unexpected navigation and child views, and top-level renderer identity
-  checks on every privileged IPC route.
+  checks on every privileged IPC route. A cross-document load immediately
+  invalidates the old renderer's session/journal authority; the replacement
+  document is admitted only after navigation commits and containment has
+  drained hidden PTYs and recovered active journal records.
 - `mcps/` is treated as a local tool descriptor cache. It is not part of the app source and is ignored by Git and packaged builds.
 - Pure, side-effect-free logic is factored into dependency-free modules so it can be unit-tested deterministically: loop structure (`matchingLoopEnd` / `analyzeLoops` in `engine.js`) and scheduling time math (`schedule.js`). The headless `npm test` (`electron . --self-test`) exercises these with no real PTYs and exits non-zero on regression.
 
 ### Known Issues & Unfinished Work
-- **Readiness is not result capture**: `Wait for Agent` and `Join Agents` observe
-  bounded, in-memory PTY activity for idle or literal markers. The app does not
-  turn an agent's answer into a downstream block value, persist terminal
-  output, or merge one agent's response into another agent's prompt.
-- **Runs are snapshots, not resumable journals**: Editing cannot alter the
-  active run, but there is no persisted run journal, crash resume, or
-  general-purpose DAG execution. Workflows remain ordered block programs with
-  structured Loop / End Loop pairs.
+- **Results are explicit, not transcript capture**: ordinary `Wait for Agent`
+  and readiness-only `Join Agents` still observe bounded activity without
+  creating a result. Only the opt-in framed payload is journaled or handed off;
+  raw PTY history remains outside workflow values and the journal.
+- **Handoff framing is not prompt-injection isolation**: prior-stage result
+  bodies are labelled untrusted and delimiter-escaped, but they still enter the
+  downstream agent's user prompt. Treat web, issue, and other third-party
+  content as hostile; restrict downstream tools or require human review before
+  a sensitive stage. v0.4 does not enforce an agent-native data channel.
+- **Journal evidence is not automatic resume**: interrupted runs and their
+  completed visits are durable enough to inform a future resume design, but
+  v0.4 does not restart them. Workflows remain ordered block programs with
+  structured Loop / End Loop pairs, not a general-purpose DAG.
+- **Journal retention is explicit**: encrypted journal files are not
+  age-pruned automatically in v0.4. Delete individual runs from **📖 Runs**
+  when they are no longer useful; a configurable retention policy belongs in
+  a later release so history is never removed by an implicit default. Listing
+  and crash recovery currently scan the retained records (each record is
+  hard-bounded), so very large histories have linear scan cost; a paginated
+  metadata index belongs with the resume milestone.
 - **CLI-specific prompt controls**: Highly interactive CLIs can consume the first Enter, so typed submission still uses a deliberate double-tap. When a workflow needs proof of a semantic response, configure `Wait for Agent` or `Join Agents` with **Output contains**; idle-only completion observes silence, not success.
 - **Terminal Layout Shifts**: Xterm dimensions may occasionally desync with the internal PTY dimensions if the window is resized very rapidly while a process is initializing.
 
@@ -237,6 +325,9 @@ npm run smoke
 
 # Run both suites: main-process unit tests + the headless renderer self-test
 npm test
+
+# Opt-in live gate: two real routed accounts, doctor identity, Stop/orphans
+npm run verify:routed -- --confirm-live
 
 # Either half on its own
 npm run test:unit   # node --test over src/main/

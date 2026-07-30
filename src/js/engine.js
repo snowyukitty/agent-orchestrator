@@ -9,6 +9,15 @@ import {
   pendingWorkflowAgentSessions,
   workflowAgentSessions,
 } from './agent-targets.js';
+import {
+  MAX_RESULT_BYTES_PER_LANE,
+  composeAgentPrompt,
+  createResultContract,
+  normalizeResultBundle,
+} from './result-handoff.js';
+
+const ROUTED_CODEX_READY_PATTERN = 'account shell ready';
+const ROUTED_CODEX_READY_TIMEOUT_MS = 20_000;
 
 export class ExecutionEngine {
   constructor({ api = null, getSessions = null, getGeometry = null, typeIntoFn = typeInto } = {}) {
@@ -22,14 +31,21 @@ export class ExecutionEngine {
     this.currentProcessId = null;   // the PTY currently targeted by input/keypress
     this._procSeq = 0;
     this._waitSeq = 0;
+    this._journalOpSeq = 0;
+    this._resultContractSeq = 0;
     this._spawnedIds = new Set();   // every PTY this run spawned (for abort cleanup)
     this._outputCheckpoints = new Map(); // session id → main-process output sequence
     this._pendingAgentIds = new Set(); // prompted agent lanes not yet individually waited/joined
     this._pendingAgentLanes = new Map(); // id → identity captured before a lane can exit/disappear
     this._activeWaits = new Map(); // wait id → { id, waitId }, supports group barriers
+    this._resultsByProducer = new Map(); // Join block id → explicit result bundle
+    this._journalEnabled = false;
+    this.currentVisitId = null;
+    this.lastOutcome = null;
     this.currentBlockIndex = -1;
     this.cwd = null;
     this._abortLogged = false;
+    this._finalizing = false;
 
     // Callbacks — set these from the outside
     this.onLog = null;            // (message, type) => void
@@ -50,39 +66,101 @@ export class ExecutionEngine {
     this.running = true;
     this.aborted = false;
     this.cwd = defaultCwd || '.';
-    this.runId = `run-${Date.now()}`;
+    this.runId = opts.runId || `run-${Date.now()}`;
     this.currentProcessId = null;
     this._procSeq = 0;
     this._waitSeq = 0;
+    this._journalOpSeq = 0;
+    this._resultContractSeq = 0;
     this._spawnedIds = new Set();
     this._outputCheckpoints = new Map();
     this._pendingAgentIds = new Set();
     this._pendingAgentLanes = new Map();
     this._activeWaits = new Map();
+    this._resultsByProducer = new Map();
     this._abortLogged = false;
+    this._finalizing = false;
     this._dryRun = !!opts.dryRun;   // record-only mode for tests (no PTY, no waits)
+    this._journalEnabled = !!opts.journal && !this._dryRun;
+    this.currentVisitId = null;
+    this.lastOutcome = null;
     this._trace = [];               // [{ index, type, iter? }] executed-block log
 
-    this._setStatus('running');
-    this._log('▶ Workflow execution started', 'system');
-    this._log(`  Working directory: ${this.cwd}`, 'system');
-
-    let success = true;
+    let success = false;
+    let thrown;
+    let hasThrown = false;
+    const preserveFirstError = error => {
+      if (hasThrown) return;
+      thrown = error;
+      hasThrown = true;
+    };
 
     try {
+      this._setStatus('running');
+      this._log('▶ Workflow execution started', 'system');
+      this._log(`  Working directory: ${this.cwd}`, 'system');
       success = await this._drive(blocks);
+    } catch (error) {
+      preserveFirstError(error);
+      success = false;
     } finally {
-      this._activeWaits.clear();
-      this.running = false;
-      this.currentBlockIndex = -1;
-      this._setStatus(success ? 'completed' : 'error');
-      this._log(
-        `\n${success ? '✅ Workflow completed successfully' : '❌ Workflow failed'}`,
-        'system'
-      );
-      if (this.onComplete) this.onComplete(success);
+      const completedRunId = this.runId;
+      const completedAborted = this.aborted;
+      this._finalizing = true;
+      try {
+        const status = completedAborted ? 'stopped' : (success ? 'completed' : 'failed');
+        if (this._journalEnabled) {
+          try {
+            await this._finishJournalRun(status, completedRunId);
+          } catch (error) {
+            success = false;
+            preserveFirstError(error);
+            try {
+              this._log(`❌ Run Journal finalization failed: ${error.message}`, 'stderr');
+            } catch (notificationError) {
+              preserveFirstError(notificationError);
+            }
+          }
+        }
+        const finalStatus = completedAborted ? 'stopped' : (success ? 'completed' : 'failed');
+        const outcome = Object.freeze({
+          runId: completedRunId,
+          status: finalStatus,
+          success,
+        });
+        this.lastOutcome = outcome;
+        // UI notifications are independent observers of the immutable
+        // terminal outcome. One broken observer must not prevent the owner
+        // callback or leak `running = true`, and must not replace an earlier
+        // execution/journal error.
+        try {
+          this._setStatus(success ? 'completed' : (completedAborted ? 'stopped' : 'error'));
+        } catch (error) {
+          preserveFirstError(error);
+        }
+        try {
+          this._log(
+            `\n${success ? '✅ Workflow completed successfully' : (completedAborted ? '⛔ Workflow stopped' : '❌ Workflow failed')}`,
+            'system'
+          );
+        } catch (error) {
+          preserveFirstError(error);
+        }
+        try {
+          if (this.onComplete) this.onComplete(success, outcome);
+        } catch (error) {
+          preserveFirstError(error);
+        }
+      } finally {
+        this._activeWaits.clear();
+        this.currentBlockIndex = -1;
+        this.currentVisitId = null;
+        this.running = false;
+        this._finalizing = false;
+      }
     }
 
+    if (hasThrown) throw thrown;
     return this._trace;
   }
 
@@ -110,6 +188,14 @@ export class ExecutionEngine {
       if (this.onBlockStart) this.onBlockStart(i, block.id || null);
 
       if (block.type === 'loop') {
+        if (!this._dryRun) {
+          const markerCompleted = await this._journalMarkerBlock(block, i, loopStack);
+          if (!markerCompleted) {
+            if (this.onBlockEnd) this.onBlockEnd(i, false, block.id || null);
+            this._logAbortOnce();
+            return false;
+          }
+        }
         const end = matchingLoopEnd(blocks, i);
         const count = Math.max(0, Math.floor(Number(block.params?.count) || 0));
         if (end === -1) {
@@ -135,6 +221,14 @@ export class ExecutionEngine {
       }
 
       if (block.type === 'loopEnd') {
+        if (!this._dryRun) {
+          const markerCompleted = await this._journalMarkerBlock(block, i, loopStack);
+          if (!markerCompleted) {
+            if (this.onBlockEnd) this.onBlockEnd(i, false, block.id || null);
+            this._logAbortOnce();
+            return false;
+          }
+        }
         const frame = loopStack[loopStack.length - 1];
         if (!frame) {
           this._log('🔁 “End Loop” without a matching Loop — ignoring', 'system');
@@ -159,22 +253,52 @@ export class ExecutionEngine {
       }
 
       this._log(`\n─── Step ${i + 1}: ${block.type.toUpperCase()} ───`, 'system');
+      let visit = null;
       try {
+        if (!this._dryRun) {
+          visit = await this._startJournalBlock(block, i, loopStack);
+          this.currentVisitId = visit?.visitId || null;
+          // Stop can arrive while the journal bridge is creating the visit.
+          // Never let that delayed bookkeeping open the executor afterwards.
+          if (this.aborted) {
+            if (visit) await this._finishJournalBlock(visit, 'stopped');
+            if (this.onBlockEnd) this.onBlockEnd(i, false, block.id || null);
+            this._logAbortOnce();
+            return false;
+          }
+        }
         if (this._dryRun) {
           this._trace.push({ index: i, type: block.type });
         } else {
           await this._executeBlock(block);
         }
         if (this.aborted) {
+          if (visit) await this._finishJournalBlock(visit, 'stopped');
           if (this.onBlockEnd) this.onBlockEnd(i, false, block.id || null);
           this._logAbortOnce();
           return false;
         }
+        if (visit) await this._finishJournalBlock(visit, 'completed');
         if (this.onBlockEnd) this.onBlockEnd(i, true, block.id || null);
       } catch (err) {
+        if (this.aborted) {
+          if (visit) await this._finishJournalBlock(visit, 'stopped');
+          if (this.onBlockEnd) this.onBlockEnd(i, false, block.id || null);
+          this._logAbortOnce();
+          return false;
+        }
+        if (visit) {
+          try {
+            await this._finishJournalBlock(visit, 'failed', 'block-error');
+          } catch (journalError) {
+            throw new Error(`Run Journal failed after a block error: ${journalError.message}`);
+          }
+        }
         this._log(`❌ Error: ${err.message}`, 'stderr');
         if (this.onBlockEnd) this.onBlockEnd(i, false, block.id || null);
         return false;
+      } finally {
+        this.currentVisitId = null;
       }
       i++;
     }
@@ -183,6 +307,10 @@ export class ExecutionEngine {
   }
 
   abort() {
+    if (this._finalizing) {
+      this._log('🛑 Run is already finalizing; Stop did not alter its terminal outcome.', 'system');
+      return false;
+    }
     this.aborted = true;
     for (const wait of this._activeWaits.values()) {
       Promise.resolve(this._apiClient().cancelSessionWait?.(wait)).catch(() => {});
@@ -192,6 +320,7 @@ export class ExecutionEngine {
       Promise.resolve(this._apiClient().killProcess?.({ id })).catch(() => {});
     }
     this._log('🛑 Abort requested...', 'system');
+    return true;
   }
 
   get isRunning() {
@@ -248,6 +377,12 @@ export class ExecutionEngine {
         rows,
       });
 
+      if (this.aborted) {
+        // abort() may have killed this id before the async IPC actually
+        // created it. Re-kill the returned session and never hand it to the UI.
+        await this._discardUnadoptedSpawn(result?.id || procId, [procId]);
+        return;
+      }
       if (result.error) {
         throw new Error(`Failed to start process: ${result.error}`);
       }
@@ -282,20 +417,72 @@ export class ExecutionEngine {
         cwd: block.params.cwd || this.cwd,
         cols,
         rows,
+        workflowSession: true,
       });
 
+      if (this.aborted) {
+        // The Stop sweep ran while createSession was unresolved, so this id
+        // was not known yet. Dispose it before it can be adopted as a lane.
+        await this._discardUnadoptedSpawn(result?.id);
+        return;
+      }
       // A routed profile that cannot be resolved fails closed; surface that
       // rather than continuing against whatever session happened to be active.
       if (!result || result.error) {
         throw new Error(result?.error || `Could not start agent "${profileId}"`);
       }
 
-      const meta = result.session || { id: result.id, label: profileId, agent: 'shell', assurance: 'L0-native', status: 'running' };
+      const meta = result.session || {
+        id: result.id,
+        label: profileId,
+        agent: 'shell',
+        assurance: 'L0-native',
+        resultInputCapable: false,
+        status: 'running',
+      };
       this.currentProcessId = result.id;
       this._spawnedIds.add(result.id);
       this._log(`🤖 Agent session: ${meta.label} [${meta.assurance}]`, 'system');
+      // The account shell can emit terminal queries (for example DSR) while
+      // it boots. Adopt immediately so xterm can answer them and display the
+      // bootstrap transcript before we wait for its explicit ready marker.
       this._notifySessionSpawned(meta);
       this._outputCheckpoints.set(result.id, 0);
+
+      if (meta.agent === 'codex' && meta.assurance === 'L1-routed') {
+        const waitId = `${this.runId}-w${++this._waitSeq}`;
+        this._log(
+          `🤖 Waiting for routed Codex account shell (timeout ${ROUTED_CODEX_READY_TIMEOUT_MS} ms)…`,
+          'system'
+        );
+        const ready = await this._waitForSessionSignal({
+          sessionId: result.id,
+          waitId,
+          afterSeq: 0,
+          idleMs: 0,
+          pattern: ROUTED_CODEX_READY_PATTERN,
+          timeoutMs: ROUTED_CODEX_READY_TIMEOUT_MS,
+        });
+        if (this.aborted) return;
+        if (ready?.reason !== 'match') {
+          throw new Error(
+            `Routed Codex account shell did not report "${ROUTED_CODEX_READY_PATTERN}" `
+            + `within ${ROUTED_CODEX_READY_TIMEOUT_MS} ms (${ready?.reason || 'unknown'})`
+          );
+        }
+
+        const launched = await this._apiClient().sendInput?.({
+          id: result.id,
+          text: 'codex; exit\r',
+        });
+        if (this.aborted) return;
+        if (!launched) {
+          throw new Error('Routed Codex account shell refused the fixed Codex workflow launch command');
+        }
+
+        await this._sleep(Number(block.params.settleMs) || 1500);
+        return;
+      }
 
       await this._sleep(Number(block.params.settleMs) || 1500);
     },
@@ -305,6 +492,12 @@ export class ExecutionEngine {
       const target = block.params.profileId;
       const text = block.params.text || '';
       const pressEnter = block.params.pressEnter !== false;
+      const expectResult = block.params.expectResult === true;
+      const handoffFrom = String(block.params.handoffFrom || '').trim();
+      const structured = expectResult || !!handoffFrom;
+      const handoffBundle = handoffFrom
+        ? this._resultsByProducer.get(handoffFrom)
+        : null;
       const sessionIds = target === WORKFLOW_AGENT_TARGET
         ? this._workflowAgentSessions().map(session => session.id)
         : [target ? this._sessionForProfile(target) : this.currentProcessId].filter(Boolean);
@@ -314,6 +507,9 @@ export class ExecutionEngine {
           .map(session => [session.id, session])
       );
 
+      if (handoffFrom && !handoffBundle) {
+        throw new Error('The selected result is unavailable in this run');
+      }
       if (sessionIds.length === 0) {
         throw new Error(target
           ? (target === WORKFLOW_AGENT_TARGET
@@ -321,25 +517,79 @@ export class ExecutionEngine {
             : `No live session for agent profile "${target}" — add an Agent Session block first`)
           : 'No active session to receive input');
       }
+      if (structured && sessionIds.some(id => !agentLanes.has(id))) {
+        throw new Error(
+          'Result publishing and handoff require a result-input-capable workflow Agent Session target'
+        );
+      }
+      const incapableLanes = structured
+        ? [...agentLanes.values()].filter(session => session.resultInputCapable !== true)
+        : [];
+      if (incapableLanes.length) {
+        throw new Error(
+          `Structured result input is unavailable for ${incapableLanes.map(
+            session => session.label || session.id
+          ).join(', ')}. Use a routed Codex workflow session or a local profile with one direct agent command.`
+        );
+      }
+      if (expectResult && !pressEnter) {
+        throw new Error('Publishing a result requires Enter so the result contract is submitted');
+      }
+      const api = this._apiClient();
+      if (structured && typeof api.sendStructuredInput !== 'function') {
+        throw new Error('Structured result input is unavailable in this build');
+      }
 
       const label = target === WORKFLOW_AGENT_TARGET
         ? `${sessionIds.length} workflow agents`
         : (target || 'current session');
-      this._log(`📨 → ${label}: "${text}"${pressEnter ? ' ⏎' : ''}`, 'input-echo');
+      const annotations = [
+        handoffFrom ? 'attached result' : '',
+        expectResult ? 'publishes at Join' : '',
+      ].filter(Boolean);
+      this._log(
+        `📨 → ${label}: "${text}"${pressEnter ? ' ⏎' : ''}`
+        + (annotations.length ? ` [${annotations.join(' · ')}]` : ''),
+        'input-echo'
+      );
 
       // Type into independent PTYs concurrently. Promise.allSettled ensures a
       // failure in one lane cannot leave other typing tasks running after this
       // block has already reported an error.
-      const sends = await Promise.allSettled(sessionIds.map(async sessionId => {
+      const sends = await Promise.allSettled(sessionIds.map(async (sessionId, laneIndex) => {
+        const session = agentLanes.get(sessionId);
+        const resultContract = expectResult
+          ? createResultContract({
+            token: this._nextResultContractToken(block, laneIndex),
+            label: session?.label || `Lane ${laneIndex + 1}`,
+          })
+          : null;
+        const prompt = composeAgentPrompt(text, {
+          handoffBundle,
+          resultContract,
+        });
+        let afterSeq = null;
         const result = await this._typeInto({
           sessionId,
-          text,
+          text: prompt,
           pressEnter,
+          structured,
+          ...(structured ? {
+            // Every byte of a generated contract/handoff — paste delimiters,
+            // body chunks, and both Enters — crosses the main-owned capability
+            // check. There is deliberately no generic send-input fallback.
+            send: (id, chunk) => api.sendStructuredInput({ id, text: chunk }),
+          } : {}),
           isAborted: () => this.aborted,
-          onTyped: () => this._rememberOutputCheckpoint(sessionId),
+          onTyped: async () => {
+            afterSeq = await this._rememberOutputCheckpoint(sessionId);
+          },
         });
         if (!result?.aborted && agentLanes.has(sessionId)) {
-          this._rememberPendingAgentLane(agentLanes.get(sessionId));
+          this._rememberPendingAgentLane(session, {
+            afterSeq,
+            resultContract,
+          });
         }
         return result;
       }));
@@ -431,23 +681,37 @@ export class ExecutionEngine {
       const pattern = String(block.params.pattern || '');
       const timeoutMs = Number(block.params.timeoutMs ?? 120000);
       const onIncomplete = block.params.onIncomplete === 'continue' ? 'continue' : 'stop';
+      const resultName = String(block.params.resultName || '').trim();
+      const capturesResult = resultName.length > 0;
       const sessions = this._pendingWorkflowAgentSessions();
 
-      if (!idleMs && !pattern) {
+      if (!capturesResult && !idleMs && !pattern) {
         throw new Error('Join Agents needs an idle duration or output text');
       }
       if (sessions.length === 0) {
         throw new Error('Join Agents has no pending lanes — send a prompt to workflow agents first');
+      }
+      if (capturesResult) {
+        const missingContracts = sessions.filter(session => (
+          !session.resultContract || !Number.isInteger(session.resultAfterSeq)
+        ));
+        if (missingContracts.length) {
+          throw new Error(
+            'A named Join can only collect lanes whose Send block enabled “Publish at Join”'
+          );
+        }
       }
 
       const total = sessions.length;
       let ready = 0;
       let settledCount = 0;
       const readyReasons = new Set(['match', 'idle']);
-      const criteria = [
-        idleMs ? `${idleMs} ms idle` : '',
-        pattern ? `output contains "${shortText(pattern)}"` : '',
-      ].filter(Boolean).join(' or ');
+      const criteria = capturesResult
+        ? `explicit result "${resultName}"`
+        : [
+          idleMs ? `${idleMs} ms idle` : '',
+          pattern ? `output contains "${shortText(pattern)}"` : '',
+        ].filter(Boolean).join(' or ');
       this._log(`◇ Joining ${total} agent lane(s): ${criteria} (timeout ${timeoutMs} ms)…`, 'system');
       this._setStatus(`◇ Join 0/${total}`);
       this._notifyAgentJoin(block, {
@@ -464,7 +728,9 @@ export class ExecutionEngine {
           if (session.status === 'removed') {
             result = { reason: 'removed' };
           } else {
-            let afterSeq = this._outputCheckpoints.get(session.id);
+            let afterSeq = capturesResult
+              ? session.resultAfterSeq
+              : this._outputCheckpoints.get(session.id);
             if (!Number.isInteger(afterSeq)) {
               afterSeq = await this._rememberOutputCheckpoint(session.id);
             }
@@ -476,6 +742,11 @@ export class ExecutionEngine {
               idleMs,
               pattern,
               timeoutMs,
+              capture: capturesResult ? {
+                startMarker: session.resultContract.startMarker,
+                endMarker: session.resultContract.endMarker,
+                maxBytes: MAX_RESULT_BYTES_PER_LANE,
+              } : undefined,
             });
           }
           if (Number.isInteger(result?.outputSeq)) {
@@ -484,16 +755,26 @@ export class ExecutionEngine {
           this._pendingAgentIds.delete(session.id);
           this._pendingAgentLanes.delete(session.id);
           settledCount++;
-          if (readyReasons.has(result?.reason)) ready++;
+          const laneReady = capturesResult
+            ? (
+              result?.reason === 'match'
+              && result?.capture?.complete === true
+              && String(result.capture.text || '').trim() !== ''
+            )
+            : readyReasons.has(result?.reason);
+          const reason = capturesResult && result?.reason === 'match' && !laneReady
+            ? 'result-partial'
+            : (result?.reason || 'unknown');
+          if (laneReady) ready++;
           this._setStatus(`◇ Join ${ready}/${total} ready`);
           this._notifyAgentJoin(block, {
             ready,
             settled: settledCount,
             total,
             session: { id: session.id, label: session.label },
-            reason: result?.reason || 'unknown',
+            reason,
           });
-          return { session, result };
+          return { session, result, ready: laneReady, reason };
         } catch (error) {
           await this._cancelActiveWaits();
           throw error;
@@ -512,31 +793,62 @@ export class ExecutionEngine {
       }
 
       const outcomes = settled.map(result => result.value);
-      const incomplete = outcomes.filter(({ result }) => !readyReasons.has(result?.reason));
-      const policyControlledReasons = new Set(['timeout', 'exit']);
-      for (const { session, result } of outcomes) {
-        const ready = readyReasons.has(result?.reason);
+      if (capturesResult) {
+        const producerBlockId = block.id || `index-${this.currentBlockIndex}`;
+        let bundle = normalizeResultBundle({
+          producerBlockId,
+          name: resultName,
+          status: outcomes.every(outcome => outcome.ready) ? 'complete' : 'partial',
+          lanes: outcomes.map(({ session, result, ready: laneReady }) => ({
+            laneId: session.id,
+            ...(session.profileId ? { profileId: session.profileId } : {}),
+            ...(session.agent ? { agent: session.agent } : {}),
+            ...(session.assurance ? { assurance: session.assurance } : {}),
+            label: session.label || session.id,
+            text: result?.capture?.text || '',
+            complete: !!laneReady,
+            truncated: !!(
+              result?.capture?.truncatedBefore
+              || result?.capture?.truncatedAfter
+            ),
+          })),
+        }, { allowIncomplete: true });
+        const stored = await this._storeRunResult(bundle);
+        if (stored?.id) {
+          bundle = normalizeResultBundle({
+            ...bundle,
+            resultId: stored.id,
+          }, { allowIncomplete: true });
+        }
+        this._resultsByProducer.set(producerBlockId, bundle);
+      }
+
+      const incomplete = outcomes.filter(outcome => !outcome.ready);
+      const policyControlledReasons = new Set(['timeout', 'exit', 'result-partial']);
+      for (const { session, reason, ready: laneReady } of outcomes) {
         this._log(
-          `${ready ? '◆' : '⚠️'} ${session.label}: ${joinReasonLabel(result?.reason, idleMs, timeoutMs)}`,
-          ready ? 'system' : 'stderr'
+          `${laneReady ? '◆' : '⚠️'} ${session.label}: ${joinReasonLabel(reason, idleMs, timeoutMs)}`,
+          laneReady ? 'system' : 'stderr'
         );
       }
 
-      const invalid = incomplete.filter(({ result }) => !policyControlledReasons.has(result?.reason));
+      const invalid = incomplete.filter(({ reason }) => !policyControlledReasons.has(reason));
       if (invalid.length) {
         const detail = invalid
-          .map(({ session, result }) => `${session.label} (${result?.reason || 'unknown'})`)
+          .map(({ session, reason }) => `${session.label} (${reason || 'unknown'})`)
           .join(', ');
         throw new Error(`Join could not observe every lane: ${detail}`);
       }
       if (incomplete.length && onIncomplete === 'stop') {
         const detail = incomplete
-          .map(({ session, result }) => `${session.label} (${result?.reason || 'unknown'})`)
+          .map(({ session, reason }) => `${session.label} (${reason || 'unknown'})`)
           .join(', ');
         throw new Error(`Join incomplete — downstream blocks were stopped: ${detail}`);
       }
       if (incomplete.length) {
         this._log(`⚠️ Join incomplete for ${incomplete.length}/${total} lane(s); continuing by block policy`, 'system');
+      } else if (capturesResult) {
+        this._log(`◆ Result "${resultName}" published from all ${total} lane(s)`, 'system');
       } else {
         this._log(`◆ Join complete — all ${total} agent lane(s) are ready`, 'system');
       }
@@ -702,6 +1014,89 @@ export class ExecutionEngine {
     return { cols: term?.cols ?? 80, rows: term?.rows ?? 24 };
   }
 
+  _journalOpId(kind, runId = this.runId) {
+    const safeKind = String(kind || 'event').replace(/[^A-Za-z0-9_.-]/g, '-');
+    return `${runId}-${safeKind}-${++this._journalOpSeq}`;
+  }
+
+  async _startJournalBlock(block, index, loopStack) {
+    if (!this._journalEnabled) return null;
+    const start = this._apiClient().startRunBlock;
+    if (!start) throw new Error('Run Journal block tracking is unavailable');
+    const visit = await start({
+      runId: this.runId,
+      opId: this._journalOpId('block-start'),
+      block: {
+        id: block.id || `index-${index}`,
+        index,
+        type: block.type,
+        iterationPath: (Array.isArray(loopStack) ? loopStack : []).map(frame => ({
+          loopBlockId: frame.blockId || `index-${frame.start}`,
+          iteration: frame.iter,
+          total: frame.total,
+        })),
+      },
+    });
+    if (!visit?.visitId) throw new Error('Run Journal did not return a block visit id');
+    return visit;
+  }
+
+  async _finishJournalBlock(visit, status, reasonCode = null) {
+    if (!this._journalEnabled || !visit?.visitId) return null;
+    const finish = this._apiClient().finishRunBlock;
+    if (!finish) throw new Error('Run Journal block tracking is unavailable');
+    return finish({
+      runId: this.runId,
+      visitId: visit.visitId,
+      opId: this._journalOpId('block-finish'),
+      status: status === 'stopped' ? 'cancelled' : status,
+      reasonCode,
+    });
+  }
+
+  async _journalMarkerBlock(block, index, loopStack) {
+    const visit = await this._startJournalBlock(block, index, loopStack);
+    if (this.aborted) {
+      if (visit) await this._finishJournalBlock(visit, 'stopped');
+      return false;
+    }
+    if (visit) await this._finishJournalBlock(visit, 'completed');
+    return !this.aborted;
+  }
+
+  async _finishJournalRun(status, runId = this.runId) {
+    const finish = this._apiClient().finishRunJournal;
+    if (!finish) throw new Error('Run Journal finalization is unavailable');
+    return finish({
+      runId,
+      opId: this._journalOpId('run-finish', runId),
+      status: status === 'stopped' ? 'cancelled' : status,
+    });
+  }
+
+  async _storeRunResult(bundle) {
+    if (!this._journalEnabled) return null;
+    const storeResult = this._apiClient().storeRunResult;
+    if (!storeResult) throw new Error('Run Journal result storage is unavailable');
+    const lanes = bundle.lanes.map(lane => ({
+      laneId: lane.laneId,
+      ...(lane.profileId ? { profileId: lane.profileId } : {}),
+      ...(lane.agent ? { agent: lane.agent } : {}),
+      ...(lane.assurance ? { assurance: lane.assurance } : {}),
+      label: lane.label,
+    }));
+    return storeResult({
+      runId: this.runId,
+      producerBlockId: bundle.producerBlockId,
+      visitId: this.currentVisitId,
+      name: bundle.name,
+      status: bundle.status,
+      lanes,
+      body: JSON.stringify(bundle),
+      opId: this._journalOpId('result-store'),
+    });
+  }
+
   async _rememberOutputCheckpoint(sessionId) {
     const api = this._apiClient();
     if (!api.sessionCheckpoint) {
@@ -715,7 +1110,15 @@ export class ExecutionEngine {
     return checkpoint.outputSeq;
   }
 
-  async _waitForSessionSignal({ sessionId, waitId, afterSeq, idleMs, pattern, timeoutMs }) {
+  async _waitForSessionSignal({
+    sessionId,
+    waitId,
+    afterSeq,
+    idleMs,
+    pattern,
+    timeoutMs,
+    capture,
+  }) {
     const api = this._apiClient();
     if (!api.waitForSession) {
       throw new Error('Output-aware waiting is unavailable in this build');
@@ -730,6 +1133,7 @@ export class ExecutionEngine {
         idleMs,
         pattern,
         timeoutMs,
+        ...(capture ? { capture } : {}),
       });
     } finally {
       this._activeWaits.delete(waitId);
@@ -759,6 +1163,23 @@ export class ExecutionEngine {
     return workflowAgentSessions(this._sessionList(), this._spawnedIds);
   }
 
+  async _discardUnadoptedSpawn(id, aliases = []) {
+    if (id) {
+      try {
+        await this._apiClient().killProcess?.({ id });
+      } catch (_error) {
+        // Stop remains best-effort, matching abort()'s existing cleanup path.
+      }
+    }
+    for (const candidate of new Set([id, ...aliases].filter(Boolean))) {
+      this._spawnedIds.delete(candidate);
+      this._outputCheckpoints.delete(candidate);
+      this._pendingAgentIds.delete(candidate);
+      this._pendingAgentLanes.delete(candidate);
+      if (this.currentProcessId === candidate) this.currentProcessId = null;
+    }
+  }
+
   _pendingWorkflowAgentSessions() {
     return pendingWorkflowAgentSessions(
       this._sessionList(),
@@ -768,7 +1189,7 @@ export class ExecutionEngine {
     );
   }
 
-  _rememberPendingAgentLane(session) {
+  _rememberPendingAgentLane(session, { afterSeq = null, resultContract = null } = {}) {
     if (!session?.id) return;
     this._pendingAgentIds.add(session.id);
     this._pendingAgentLanes.set(session.id, {
@@ -776,7 +1197,22 @@ export class ExecutionEngine {
       label: session.label || session.id,
       profileId: session.profileId,
       agent: session.agent,
+      assurance: session.assurance,
+      ...(resultContract ? {
+        resultAfterSeq: afterSeq,
+        resultContract,
+      } : {}),
     });
+  }
+
+  _nextResultContractToken(block, laneIndex) {
+    const sequence = ++this._resultContractSeq;
+    const run = markerTokenPart(this.runId || 'run', 40);
+    const producer = markerTokenPart(
+      block?.id || `step-${this.currentBlockIndex}`,
+      40
+    );
+    return `r${sequence}:l${laneIndex + 1}:${run}:${producer}`;
   }
 
   _sessionLabel(sessionId) {
@@ -844,10 +1280,19 @@ function shortText(text, max = 80) {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
+function markerTokenPart(value, maxLength) {
+  const normalized = String(value)
+    .replace(/[^A-Za-z0-9._:-]+/g, '-')
+    .replace(/^[^A-Za-z0-9]+/, '')
+    .slice(0, maxLength);
+  return normalized || 'item';
+}
+
 function joinReasonLabel(reason, idleMs, timeoutMs) {
   switch (reason) {
     case 'match': return 'completion marker matched';
     case 'idle': return `output idle for ${idleMs} ms`;
+    case 'result-partial': return 'explicit result was missing, empty, or truncated';
     case 'timeout': return `timed out after ${timeoutMs} ms`;
     case 'exit': return 'session exited before a completion signal';
     case 'cancelled': return 'wait cancelled';

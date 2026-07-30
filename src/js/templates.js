@@ -6,8 +6,9 @@
 //   • directory blocks with path === ''   → filled with the default directory
 //   • schedule blocks with datetime === '' → filled with the current local time
 //     (and marked "handled" so loading a template never auto-fires a run)
-// Block ids are omitted here; the app normalizes each template, which assigns
-// fresh ids so multiple instances never collide.
+// Most block ids are omitted; the app assigns them while normalizing. A
+// template may use stable, template-local ids when later blocks need to
+// reference an earlier result producer.
 // ============================================================
 
 import { WORKFLOW_AGENT_TARGET } from './agent-targets.js';
@@ -60,15 +61,44 @@ export const TEMPLATES = [
   },
   {
     id: 'tpl-multi-account',
-    name: 'Parallel pair + join',
-    description: 'Open two accounts, broadcast one independent prompt before waiting, then join on a shared completion signal. Account fields stay blank so the template remains portable.',
+    name: 'Parallel research → synthesis',
+    description: 'Open two accounts, collect one explicit result from each, then attach the complete bundle to a synthesis prompt. Account fields stay blank so the template remains portable.',
     blocks: [
       { type: 'directory', params: { path: '' } },
       { type: 'agentStart', params: { profileId: '', settleMs: 8000 } },
       { type: 'agentStart', params: { profileId: '', settleMs: 8000 } },
-      { type: 'agentSend', params: { profileId: WORKFLOW_AGENT_TARGET, text: 'Work independently on your lane. End your response with TEAM_READY.', pressEnter: true } },
-      { type: 'agentJoin', params: { idleMs: 0, pattern: 'TEAM_READY', timeoutMs: 120000, onIncomplete: 'stop' } },
-      { type: 'log', params: { message: 'Both agent lanes reached the team barrier.' } },
+      {
+        type: 'agentSend',
+        params: {
+          profileId: WORKFLOW_AGENT_TARGET,
+          text: 'Research this task independently. Return concise evidence, risks, and a recommendation.',
+          pressEnter: true,
+          expectResult: true,
+          handoffFrom: '',
+        },
+      },
+      {
+        id: 'parallel-research-results',
+        type: 'agentJoin',
+        params: {
+          idleMs: 0,
+          pattern: '',
+          timeoutMs: 120000,
+          onIncomplete: 'stop',
+          resultName: 'research',
+        },
+      },
+      {
+        type: 'agentSend',
+        params: {
+          profileId: '',
+          text: 'Synthesize the attached research into one decision-ready answer. Reconcile disagreements and name remaining uncertainty.',
+          pressEnter: true,
+          expectResult: false,
+          handoffFrom: 'parallel-research-results',
+        },
+      },
+      { type: 'agentWait', params: { profileId: '', idleMs: 2000, pattern: '', timeoutMs: 120000 } },
     ],
   },
   {

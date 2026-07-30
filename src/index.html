@@ -48,7 +48,8 @@
       <div class="panel-header">
         <div class="workflow-info">
           <input type="text" class="workflow-name" id="workflow-name"
-                 value="New Workflow" placeholder="Workflow Name" spellcheck="false">
+                 value="New Workflow" placeholder="Workflow Name" maxlength="128"
+                 spellcheck="false">
           <span class="dirty-dot hidden" id="dirty-dot" title="Unsaved changes">●</span>
           <span class="workflow-status" id="workflow-status">Idle</span>
         </div>
@@ -141,6 +142,9 @@
       <button class="btn btn-secondary" id="btn-export">
         <span>📤</span> Export
       </button>
+      <button class="btn btn-secondary" id="btn-runs" title="Inspect durable run history">
+        <span>📖</span> Runs
+      </button>
       <button class="btn btn-secondary" id="btn-agents" title="Agent accounts and sessions">
         <span>🤖</span> Agents <span class="sched-badge" id="agents-badge">0</span>
       </button>
@@ -193,6 +197,30 @@
           <button class="btn btn-secondary btn-sm" id="btn-import-workflow" title="Open a .json from disk">📥 Import file…</button>
           <button class="btn btn-primary btn-sm" id="btn-new-workflow" title="Start a blank workflow">＋ New</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Run Journal Modal ═══ -->
+  <div class="modal-overlay hidden" id="runs-modal">
+    <div class="modal-card modal-wide run-journal-modal">
+      <div class="modal-header">
+        <h2>📖 Run Journal</h2>
+        <button class="btn btn-icon btn-sm" id="btn-close-runs" title="Close">✕</button>
+      </div>
+      <div class="modal-body run-journal-layout">
+        <div class="run-journal-list" id="runs-list">
+          <div class="sched-empty">Loading run history…</div>
+        </div>
+        <div class="run-journal-detail" id="run-detail">
+          <div class="sched-empty">Choose a run to inspect its timeline and explicit results.</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <span class="modal-hint">
+          Raw terminal history is not journaled. Only explicit bounded results are stored locally.
+        </span>
+        <button class="btn btn-secondary btn-sm" id="btn-refresh-runs">🔄 Refresh</button>
       </div>
     </div>
   </div>

@@ -20,7 +20,12 @@ import {
 import { runSelfTest } from './selftest.js';
 import { SessionManager, TARGET_ACTIVE } from './sessions.js';
 import { AgentsUI } from './agents-ui.js';
-import { createRunSnapshot, loadWorkflowDocument } from './workflow-document.js';
+import {
+  assertValidResultReferences,
+  createRunSnapshot,
+  loadWorkflowDocument,
+} from './workflow-document.js';
+import { RunJournalViewState } from './run-journal-view-state.js';
 
 class App {
   constructor() {
@@ -39,6 +44,9 @@ class App {
     this._dirty = false;                // unsaved-changes flag
     this._savedWorkflowsRaw = [];       // last-fetched saved workflows (for the picker)
     this._workflowSourceFile = null;     // basename when the editor owns a stored workflow
+    this._runStartPending = false;       // closes the journal-start TOCTOU window
+    this._runJournalItems = [];
+    this._runJournalView = new RunJournalViewState();
 
     // Renderer regressions are pure module tests. Do not initialize timers,
     // discovery, settings, or a real PTY in this mode.
@@ -87,7 +95,10 @@ class App {
       const params = { ...b.params };
       if (b.type === 'directory' && !params.path) params.path = dir;
       if (b.type === 'schedule' && !params.datetime) params.datetime = now;
-      return { type: b.type, params };
+      // Template-local ids make internal references (such as a result
+      // handoff from a named Join block) stable. Each template becomes a new
+      // workflow document, so those ids remain scoped to that document.
+      return { ...(b.id ? { id: b.id } : {}), type: b.type, params };
     });
 
     this.workflow = this._normalizeWorkflow({
@@ -179,6 +190,224 @@ class App {
       const row = e.target.closest('[data-file]');
       if (row && this._openSavedWorkflow(row.dataset.file)) close();
     });
+  }
+
+  // ── Run Journal ────────────────────────────────────────────
+
+  _initRunJournal() {
+    const modal = document.getElementById('runs-modal');
+    const close = () => modal?.classList.add('hidden');
+    const open = async () => {
+      modal?.classList.remove('hidden');
+      await this._refreshRunJournal();
+    };
+
+    document.getElementById('btn-runs')?.addEventListener('click', open);
+    document.getElementById('btn-close-runs')?.addEventListener('click', close);
+    document.getElementById('btn-refresh-runs')?.addEventListener('click', () => {
+      this._refreshRunJournal();
+    });
+    modal?.addEventListener('click', (event) => {
+      if (event.target === modal) close();
+    });
+
+    document.getElementById('runs-list')?.addEventListener('click', (event) => {
+      const row = event.target.closest('[data-run-id]');
+      if (row) this._openRunJournalEntry(row.dataset.runId);
+    });
+
+    document.getElementById('run-detail')?.addEventListener('click', async (event) => {
+      const resultButton = event.target.closest('[data-result-id]');
+      if (resultButton) {
+        await this._revealRunResult(resultButton.dataset.runId, resultButton.dataset.resultId);
+        return;
+      }
+      const deleteButton = event.target.closest('[data-delete-run]');
+      if (!deleteButton) return;
+      const runId = deleteButton.dataset.deleteRun;
+      if (!confirm('Delete this run journal entry and its explicit results?')) return;
+      // No earlier list/detail response may repopulate a run after the user
+      // has committed to deleting the exact id carried by this button.
+      this._runJournalView.invalidateAll();
+      try {
+        await window.api.deleteRunJournal({
+          runId,
+          opId: this._operationId('journal-delete'),
+        });
+        this._runJournalView.clearSelectionIf(runId);
+        await this._refreshRunJournal();
+      } catch (error) {
+        this._termLog(`❌ Could not delete run: ${error.message}`, 'stderr');
+      }
+    });
+  }
+
+  async _refreshRunJournal() {
+    const list = document.getElementById('runs-list');
+    const detail = document.getElementById('run-detail');
+    if (!list) return;
+    const request = this._runJournalView.beginListRequest();
+    // A refresh establishes a new list snapshot. Detail responses belonging
+    // to the prior snapshot must not mutate the pane after this point.
+    list.innerHTML = '<div class="sched-empty">Loading run history…</div>';
+
+    try {
+      const response = await window.api.listRunJournal({ limit: 100 });
+      if (!this._runJournalView.isCurrentListRequest(request)) return;
+      const runs = Array.isArray(response) ? response : (response?.runs || []);
+      this._runJournalItems = runs;
+      if (runs.length === 0) {
+        this._runJournalView.clearSelection();
+        list.innerHTML = '<div class="sched-empty">No recorded runs yet.</div>';
+        if (detail) {
+          detail.innerHTML = '<div class="sched-empty">A run appears here as soon as its immutable snapshot is accepted.</div>';
+        }
+        return;
+      }
+
+      list.innerHTML = runs.map(run => {
+        const selected = run.id === this._runJournalView.selectedRunId ? ' selected' : '';
+        const name = run.workflow?.name || 'Untitled workflow';
+        const when = this._formatJournalTime(run.startedAt);
+        const durability = run.snapshot?.storage === 'memory'
+          ? ' · memory only'
+          : '';
+        return `
+          <button class="run-row${selected}" type="button" data-run-id="${this._esc(run.id)}">
+            <span class="run-row-main">
+              <strong>${this._esc(name)}</strong>
+              <small>${this._esc(when)}${this._esc(durability)}</small>
+            </span>
+            <span class="run-status status-${this._esc(run.status)}">${this._esc(run.status)}</span>
+          </button>`;
+      }).join('');
+
+      const selectedStillExists = runs.some(
+        run => run.id === this._runJournalView.selectedRunId
+      );
+      await this._openRunJournalEntry(
+        selectedStillExists ? this._runJournalView.selectedRunId : runs[0].id
+      );
+    } catch (error) {
+      if (!this._runJournalView.isCurrentListRequest(request)) return;
+      list.innerHTML = `<div class="sched-empty">Run Journal unavailable.<br>${this._esc(error.message)}</div>`;
+      if (detail) detail.innerHTML = '<div class="sched-empty">No run detail is available.</div>';
+    }
+  }
+
+  async _openRunJournalEntry(runId) {
+    if (!runId) return;
+    const detail = document.getElementById('run-detail');
+    if (!detail) return;
+    const request = this._runJournalView.beginDetailRequest(runId);
+    detail.innerHTML = '<div class="sched-empty">Loading run detail…</div>';
+    document.querySelectorAll('#runs-list .run-row').forEach(row => {
+      row.classList.toggle('selected', row.dataset.runId === runId);
+    });
+
+    try {
+      const response = await window.api.getRunJournal({ runId });
+      if (
+        !this._runJournalView.isCurrentDetailRequest(request, runId)
+      ) return;
+      const run = response?.run || response;
+      if (!run) throw new Error('Run not found');
+
+      const visits = Array.isArray(run.blocks) ? run.blocks : [];
+      const results = Array.isArray(run.results) ? run.results : [];
+      const trigger = run.trigger?.kind || 'manual';
+      const storage = run.snapshot?.storage === 'memory'
+        ? 'Memory only · may expire and is unavailable after restart'
+        : 'Protected by the operating system';
+      const finished = run.finishedAt
+        ? ` → ${this._formatJournalTime(run.finishedAt)}`
+        : '';
+
+      detail.innerHTML = `
+        <div class="run-detail-head">
+          <div>
+            <h3>${this._esc(run.workflow?.name || 'Untitled workflow')}</h3>
+            <p>${this._esc(this._formatJournalTime(run.startedAt))}${this._esc(finished)}
+              · ${this._esc(trigger)} · ${this._esc(storage)}</p>
+          </div>
+          <span class="run-status status-${this._esc(run.status)}">${this._esc(run.status)}</span>
+        </div>
+        <section class="run-detail-section">
+          <h4>Block visits <span>${visits.length}</span></h4>
+          ${visits.length ? visits.map((visit, index) => `
+            <div class="run-visit">
+              <span class="run-visit-index">${index + 1}</span>
+              <span class="run-visit-main">
+                <strong>${this._esc(visit.blockType || visit.type || 'block')}</strong>
+                <small>${this._esc(visit.blockId || '')}</small>
+              </span>
+              <span class="run-status status-${this._esc(visit.status)}">${this._esc(visit.status)}</span>
+            </div>`).join('') : '<div class="run-detail-empty">No block visits were recorded.</div>'}
+        </section>
+        <section class="run-detail-section">
+          <h4>Explicit results <span>${results.length}</span></h4>
+          ${results.length ? results.map(result => `
+            <div class="run-result">
+              <div class="run-result-summary">
+                <span>
+                  <strong>${this._esc(result.name || 'result')}</strong>
+                  <small>${this._esc(String(result.lanes?.length || 0))} lane(s)
+                    · ${this._esc(this._formatBytes(result.byteLength))}
+                    · ${this._esc(result.storage === 'memory' ? 'memory only' : 'protected')}</small>
+                </span>
+                <button class="btn btn-secondary btn-sm" type="button"
+                  data-run-id="${this._esc(run.id)}" data-result-id="${this._esc(result.id)}">View</button>
+              </div>
+              <pre class="run-result-body hidden" id="result-body-${this._esc(result.id)}"></pre>
+            </div>`).join('') : '<div class="run-detail-empty">No explicit result was published.</div>'}
+        </section>
+        <div class="run-detail-actions">
+          <button class="btn btn-danger btn-sm" type="button" data-delete-run="${this._esc(run.id)}">Delete run</button>
+        </div>`;
+    } catch (error) {
+      if (
+        !this._runJournalView.isCurrentDetailRequest(request, runId)
+      ) return;
+      detail.innerHTML = `<div class="sched-empty">Could not load run detail.<br>${this._esc(error.message)}</div>`;
+    }
+  }
+
+  async _revealRunResult(runId, resultId) {
+    const body = document.getElementById(`result-body-${resultId}`);
+    if (!body) return;
+    if (body.dataset.loaded === 'true') {
+      body.classList.toggle('hidden');
+      return;
+    }
+    body.classList.remove('hidden');
+    body.textContent = 'Decrypting explicit result…';
+    try {
+      const response = await window.api.getRunResult({ runId, resultId });
+      const result = response?.result || response;
+      if (!result) throw new Error('Result not found');
+      let display = result.body;
+      if (typeof display === 'string') {
+        try { display = JSON.parse(display); } catch (_error) { /* plain text result */ }
+      }
+      body.textContent = typeof display === 'string'
+        ? display
+        : JSON.stringify(display, null, 2);
+      body.dataset.loaded = 'true';
+    } catch (error) {
+      body.textContent = `Result unavailable: ${error.message}`;
+    }
+  }
+
+  _formatJournalTime(value) {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? 'Unknown time' : date.toLocaleString();
+  }
+
+  _formatBytes(value) {
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes < 0) return 'unknown size';
+    if (bytes < 1024) return `${bytes} B`;
+    return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KiB`;
   }
 
   /**
@@ -331,6 +560,7 @@ class App {
     this._initSleep();
     this._initTemplates();
     this._initWorkflows();
+    this._initRunJournal();
     this._initAgents();
     this._initModalDismissal();
     this._initVersionLabel();
@@ -647,22 +877,29 @@ class App {
       }
     };
 
-    engine.onComplete = (success) => {
-      const completedRunId = engine.runId;
+    engine.onComplete = (success, outcome = {}) => {
+      const completedRunId = outcome.runId || engine.runId;
       const completedVisualId = this._visualizedRunId;
+      const stopped = outcome.status === 'stopped';
       // Restore toolbar
       document.getElementById('btn-run').classList.remove('hidden');
       document.getElementById('btn-stop').classList.add('hidden');
 
       // Status badge
       const badge = document.getElementById('workflow-status');
-      badge.textContent = success ? 'Done' : 'Error';
+      badge.textContent = success ? 'Done' : (stopped ? 'Stopped' : 'Error');
       badge.className = `workflow-status ${success ? '' : 'error'}`;
 
       // Status indicator
       const dot = document.getElementById('status-indicator');
       dot.className = `status-indicator ${success ? '' : 'error'}`;
-      document.getElementById('status-text').textContent = success ? 'Completed' : 'Failed';
+      document.getElementById('status-text').textContent = success
+        ? 'Completed'
+        : (stopped ? 'Stopped' : 'Failed');
+
+      if (!document.getElementById('runs-modal')?.classList.contains('hidden')) {
+        this._refreshRunJournal();
+      }
 
       // Reset visual states after a delay
       setTimeout(() => {
@@ -754,6 +991,11 @@ class App {
 
   removeBlock(id) {
     this.workflow.blocks = this.workflow.blocks.filter(b => b.id !== id);
+    for (const block of this.workflow.blocks) {
+      if (block.type === 'agentSend' && block.params?.handoffFrom === id) {
+        block.params.handoffFrom = '';
+      }
+    }
     this.renderBlocks();
     this._onWorkflowChanged();
     this._markDirty();
@@ -798,7 +1040,7 @@ class App {
         list.appendChild(conn);
       }
 
-      const el = renderWorkflowBlock(block, i);
+      const el = renderWorkflowBlock(block, i, this.workflow.blocks);
       if (!el) return;
       const depth = depths[i] || 0;
       if (depth > 0) {
@@ -861,6 +1103,9 @@ class App {
         if (block.type === 'schedule') this._onWorkflowChanged();
       };
       input.addEventListener('change', handler);
+      if (block.type === 'agentJoin' && key === 'resultName') {
+        input.addEventListener('change', () => this.renderBlocks());
+      }
       if (input.type === 'text' || input.tagName === 'TEXTAREA') {
         input.addEventListener('input', handler);
       }
@@ -939,57 +1184,111 @@ class App {
 
   // ── Workflow Execution ─────────────────────────────────────
 
-  async runWorkflow(note = null, { workflow = null, visualize = true } = {}) {
+  async runWorkflow(note = null, {
+    workflow = null,
+    visualize = true,
+    trigger = null,
+  } = {}) {
     const sourceWorkflow = workflow || this.workflow;
     if (!sourceWorkflow || sourceWorkflow.blocks.length === 0) {
       this._flashStatus('No blocks to run');
       return;
     }
-
-    // Stop any currently running workflow engine
-    if (this.engine.isRunning) {
-      this.engine.abort();
+    if (this._runStartPending) {
+      this._flashStatus('A run is already starting');
+      return;
     }
-
-    // Close only the sessions a *previous run* opened. Sessions you started
-    // yourself from the Agents panel are left alone — killing a logged-in
-    // agent because a workflow happened to start would be hostile.
-    this._closePreviousRunSessions();
-
-    document.getElementById('output-log').innerHTML = '';
-    this._clearRunBadges();
-    if (note) this._appendLog(note, 'system');
+    if (this.engine.isRunning) {
+      this._flashStatus('A run is already active — use Stop first');
+      return;
+    }
 
     // Only the editor-owned document has live DOM params. Scheduled workflows
     // arrive as already-normalized documents and must never replace or clear
     // an unrelated dirty editor.
     if (!workflow) this._syncParams();
-    const runPlan = createRunSnapshot(sourceWorkflow);
-    this._visualizedRunId = visualize ? runPlan.id : null;
 
-    // Toggle buttons
-    document.getElementById('btn-run').classList.add('hidden');
-    document.getElementById('btn-stop').classList.remove('hidden');
-
-    // Status badge
-    const badge = document.getElementById('workflow-status');
-    badge.textContent = 'Running';
-    badge.className = 'workflow-status running';
-
-    const dot = document.getElementById('status-indicator');
-    dot.className = 'status-indicator running';
-
-    // Go!
+    this._runStartPending = true;
+    let runPlan;
+    let journalRun = null;
+    let engineStarted = false;
     try {
-      await this.engine.execute(runPlan.blocks, runPlan.defaultDirectory);
+      assertValidResultReferences(sourceWorkflow.blocks);
+      runPlan = createRunSnapshot(sourceWorkflow);
+      if (!window.api.startRunJournal) {
+        throw new Error('Run Journal is unavailable in this build');
+      }
+      journalRun = await window.api.startRunJournal({
+        workflow: runPlan,
+        trigger: trigger || (workflow ? { kind: 'scheduled' } : { kind: 'manual' }),
+        opId: this._operationId('run-start'),
+      });
+      if (!journalRun?.id) throw new Error('Run Journal did not return a run id');
+
+      // Close only the sessions a *previous run* opened. Sessions you started
+      // yourself from the Agents panel are left alone — killing a logged-in
+      // agent because a workflow happened to start would be hostile.
+      this._closePreviousRunSessions();
+
+      document.getElementById('output-log').innerHTML = '';
+      this._clearRunBadges();
+      if (note) this._appendLog(note, 'system');
+
+      this._visualizedRunId = visualize ? runPlan.id : null;
+
+      // Toggle buttons
+      document.getElementById('btn-run').classList.add('hidden');
+      document.getElementById('btn-stop').classList.remove('hidden');
+
+      // Status badge
+      const badge = document.getElementById('workflow-status');
+      badge.textContent = 'Running';
+      badge.className = 'workflow-status running';
+
+      const dot = document.getElementById('status-indicator');
+      dot.className = 'status-indicator running';
+
+      // execute() sets its running flag synchronously before its first await.
+      // Keep the app-level gate until ownership of the journal has transferred
+      // to the engine, so concurrent clicks/ticks cannot create a second run.
+      const execution = this.engine.execute(runPlan.blocks, runPlan.defaultDirectory, {
+        runId: journalRun.id,
+        journal: true,
+      });
+      engineStarted = this.engine.isRunning && this.engine.runId === journalRun.id;
+      if (!engineStarted) throw new Error('The execution engine did not accept the journal run');
+      this._runStartPending = false;
+      await execution;
     } catch (err) {
-      this._termLog(`❌ Run failed: ${err.message}`, 'stderr');
+      if (!engineStarted && journalRun?.id) {
+        try {
+          await window.api.finishRunJournal({
+            runId: journalRun.id,
+            status: 'cancelled',
+            opId: this._operationId('run-start-cancel'),
+          });
+        } catch (journalError) {
+          this._termLog(
+            `❌ Unstarted Run Journal cancellation failed: ${journalError.message}`,
+            'stderr'
+          );
+        }
+      }
+      this._termLog(
+        `❌ ${engineStarted ? 'Run failed' : 'Run did not start'}: ${err.message}`,
+        'stderr'
+      );
       document.getElementById('btn-run').classList.remove('hidden');
       document.getElementById('btn-stop').classList.add('hidden');
+      const badge = document.getElementById('workflow-status');
       badge.textContent = 'Error';
       badge.className = 'workflow-status error';
+      const dot = document.getElementById('status-indicator');
       dot.className = 'status-indicator error';
       document.getElementById('status-text').textContent = 'Failed';
+      this._flashStatus(engineStarted ? 'Run failed' : 'Run did not start');
+    } finally {
+      this._runStartPending = false;
     }
   }
 
@@ -1440,7 +1739,7 @@ class App {
 
     this._renderCountdowns(now);
 
-    if (this.engine && this.engine.isRunning) return;
+    if (this._runStartPending || (this.engine && this.engine.isRunning)) return;
 
     for (const job of this._scheduledJobs) {
       const target = this._jobTarget(job, now);
@@ -1467,11 +1766,24 @@ class App {
       document.getElementById('schedule-modal')?.classList.add('hidden');
       this.runWorkflow(
         `⏰ Scheduled run: "${wf.name}" @ ${new Date().toLocaleString()}`,
-        { workflow: wf, visualize: false }
+        {
+          workflow: wf,
+          visualize: false,
+          trigger: {
+            kind: 'scheduled',
+            scheduledFor: new Date(this._jobTarget(job, Date.now())).toISOString(),
+          },
+        }
       );
     } catch (error) {
       this._termLog(`❌ Scheduled workflow could not start: ${error.message}`, 'stderr');
     }
+  }
+
+  _operationId(prefix = 'op') {
+    const random = globalThis.crypto?.randomUUID?.()
+      || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    return `${prefix}-${random}`;
   }
 
   _markScheduleBlockTargetHandled(block) {
