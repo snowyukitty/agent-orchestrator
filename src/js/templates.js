@@ -77,7 +77,7 @@ export const TEMPLATES = [
     description: 'A minimal workflow: pick a directory and run a single command.',
     blocks: [
       { type: 'directory', params: { path: '' } },
-      { type: 'command', params: { command: 'echo Hello from Agents Orchestrator' } },
+      { type: 'command', params: { command: 'echo Hello from Agent Orchestrator' } },
     ],
   },
 ];

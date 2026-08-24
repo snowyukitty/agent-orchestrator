@@ -162,14 +162,14 @@ test('a saved profile file never contains a credential-shaped key', () => {
 // ── Entrypoint discovery ─────────────────────────────────────
 
 test('resolveEntrypointPath prefers the configured path, then a sibling', () => {
-  const exists = (p) => p.replace(/\\/g, '/').includes('/AI_Projects/ai-agent-entrypoint/bin/');
+  const exists = (p) => p.replace(/\\/g, '/').includes('/workspace/ai-agent-entrypoint/bin/');
   assert.equal(
-    agents.resolveEntrypointPath({ configured: 'C:/AI_Projects/ai-agent-entrypoint', appRoot: 'C:/elsewhere/app', exists }),
-    'C:/AI_Projects/ai-agent-entrypoint'
+    agents.resolveEntrypointPath({ configured: 'C:/workspace/ai-agent-entrypoint', appRoot: 'C:/elsewhere/app', exists }),
+    'C:/workspace/ai-agent-entrypoint'
   );
   assert.equal(
-    agents.resolveEntrypointPath({ appRoot: 'C:/AI_Projects/agents-orchestrator', exists }).replace(/\\/g, '/'),
-    'C:/AI_Projects/ai-agent-entrypoint'
+    agents.resolveEntrypointPath({ appRoot: 'C:/workspace/agent-orchestrator', exists }).replace(/\\/g, '/'),
+    'C:/workspace/ai-agent-entrypoint'
   );
   assert.equal(agents.resolveEntrypointPath({ appRoot: 'C:/nowhere', exists: () => false }), null);
 });

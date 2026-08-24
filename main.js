@@ -1,5 +1,5 @@
 // ============================================================
-// Agents Orchestrator — Electron Main Process
+// Agent Orchestrator — Electron Main Process
 // System Tray Application with Process Automation
 // ============================================================
 const { app, BrowserWindow, Tray, Menu, ipcMain, dialog, nativeImage, powerMonitor, powerSaveBlocker } = require('electron');
@@ -12,9 +12,25 @@ const { SessionRegistry } = require('./src/main/sessions');
 const agentProfiles = require('./src/main/agents');
 const { writeJsonAtomic, readJsonStrict, readJsonDir, ensureDir } = require('./src/main/store');
 const { loadSettings, saveSettings } = require('./src/main/settings');
+const { prepareUserData } = require('./src/main/user-data');
 const {
   asPlainObject, asId, asText, asCols, asRows,
 } = require('./src/main/validate');
+
+// Establish the singular identity before Electron creates storage, sessions,
+// or its single-instance lock. Test modes never touch production AppData.
+const isSmokeTest = process.argv.includes('--smoke-test');
+const isSelfTest = process.argv.includes('--self-test');
+app.setName('Agent Orchestrator');
+const userDataState = prepareUserData({
+  appDataRoot: app.getPath('appData'),
+  tempRoot: app.getPath('temp'),
+  testMode: isSmokeTest || isSelfTest,
+});
+app.setPath('userData', userDataState.path);
+const sessionDataPath = path.join(userDataState.path, 'session');
+fs.mkdirSync(sessionDataPath, { recursive: true });
+app.setPath('sessionData', sessionDataPath);
 
 // ── Timestamped Logging ──────────────────────────────────────
 // Prefix every main-process console line with a local HH:MM:SS.mmm
@@ -58,8 +74,6 @@ let sleepTimer = null;
 let sleepTarget = null; // epoch ms when hibernate fires (null = none armed)
 let sessions = null;    // SessionRegistry, created once the app is ready
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
-const isSmokeTest = process.argv.includes('--smoke-test');
-const isSelfTest = process.argv.includes('--self-test');
 let selfTestTimer = null;
 
 function isDirectory(dir) {
@@ -296,7 +310,7 @@ function createTray() {
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: '🎛️ Agents Orchestrator',
+      label: '🎛️ Agent Orchestrator',
       enabled: false,
     },
     { type: 'separator' },
@@ -324,7 +338,7 @@ function createTray() {
     }
   ]);
 
-  tray.setToolTip('Agents Orchestrator');
+  tray.setToolTip('Agent Orchestrator');
   tray.setContextMenu(contextMenu);
 
   // Left-click on tray icon shows/focuses window
@@ -345,6 +359,14 @@ if (!gotSingleInstanceLock) {
   });
 
   app.whenReady().then(() => {
+    if (userDataState.migrated) {
+      console.log(`[Storage] Migrated ${userDataState.copied} app data file(s) to the singular identity`);
+      if (userDataState.skipped) {
+        console.warn(`[Storage] Left ${userDataState.skipped} invalid legacy JSON file(s) in the backup location`);
+      }
+    } else if (userDataState.conflict) {
+      console.warn('[Storage] Both legacy and canonical app data exist; canonical data was kept without merging');
+    }
     console.log('[Main] App ready, creating window and tray...');
     sessions = createSessionRegistry();
     createWindow();
@@ -438,6 +460,9 @@ function cleanupNonProcessState() {
 function cleanupForQuit() {
   if (!cleanupNonProcessState()) return;
   killAllActiveProcesses('shutdown');
+  if (userDataState.temporary) {
+    try { fs.rmSync(userDataState.path, { recursive: true, force: true }); } catch (_error) { /* best effort */ }
+  }
 }
 
 function handleBeforeQuit(event) {

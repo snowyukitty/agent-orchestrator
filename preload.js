@@ -1,5 +1,5 @@
 // ============================================================
-// Agents Orchestrator — Preload Script
+// Agent Orchestrator — Preload Script
 // Bridges main process APIs to renderer via contextBridge
 // ============================================================
 const { contextBridge, ipcRenderer } = require('electron');

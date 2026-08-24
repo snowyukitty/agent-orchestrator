@@ -1,8 +1,14 @@
 {
-  "name": "agents-orchestrator",
-  "version": "0.2.0",
-  "description": "Visual AI Agent Automation Orchestrator - Block-based CLI automation tool",
+  "name": "agent-orchestrator",
+  "productName": "Agent Orchestrator",
+  "version": "0.4.0",
+  "private": true,
+  "description": "Multi-account desktop workflow orchestrator for local CLI AI agents",
   "main": "main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/snowyukitty/agent-orchestrator.git"
+  },
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
@@ -12,11 +18,13 @@
     "test:app": "electron . --self-test",
     "check": "node scripts/check-syntax.js && node scripts/check-docs.js",
     "icons": "electron scripts/build-icons.js",
-    "build": "electron-packager . AgentsOrchestrator --platform=win32 --arch=x64 --overwrite --out=dist --icon=src/assets/icon.ico --ignore=\"(dist|scripts|tests|mcps|icon-source\\.png|\\.gitignore)\" --asar.unpackDir=node_modules/node-pty"
+    "build": "electron-packager . AgentOrchestrator --platform=win32 --arch=x64 --overwrite --out=dist --icon=src/assets/icon.ico --ignore=\"(dist|scripts|tests|docs|mcps|\\.git|icon-source\\.png|AGENTS\\.md|README\\.md|package-lock\\.json|.*\\.log)\" --asar.unpackDir=node_modules/node-pty && node scripts/verify-package.mjs",
+    "verify:package": "node scripts/verify-package.mjs"
   },
   "devDependencies": {
-    "electron": "^35.0.0",
-    "electron-packager": "^17.1.2"
+    "@electron/asar": "^4.3.0",
+    "@electron/packager": "^20.3.0",
+    "electron": "^43.4.1"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
@@ -25,7 +33,7 @@
     "sortablejs": "^1.15.6"
   },
   "allowScripts": {
-    "electron@35.7.5": true,
+    "electron@43.4.1": true,
     "node-pty@1.1.0": true
   }
 }

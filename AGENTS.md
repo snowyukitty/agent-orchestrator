@@ -1,4 +1,4 @@
-# AGENTS.md — `agents-orchestrator`
+# AGENTS.md — `agent-orchestrator`
 
 Local contract for agents working in this repository. The workspace-root
 `AGENTS.md` still applies and outranks this file for cross-project behavior.
@@ -109,6 +109,9 @@ Manual checks that the suites cannot cover:
 - Legacy IPC channels (`execute-command`, `send-input`, `kill-process`) are
   kept as wrappers over the session registry so workflows saved by earlier
   versions keep running. Don't break that without a migration.
+- The canonical user-data directory is `agent-orchestrator`. The historical
+  plural directory is a read-only migration source and rollback backup; never
+  delete or silently merge it.
 - A workflow run closes only the sessions a *previous run* opened. Sessions
   started by hand from the Agents panel are left alone.
 - `mcps/` is a generated descriptor cache: not edited, reviewed, committed, or

@@ -1,4 +1,4 @@
-# Agents Orchestrator
+# Agent Orchestrator
 
 A desktop orchestrator application built with Electron, allowing users to automate interactions with command-line AI agents (such as Claude and Codex) through a drag-and-drop block interface and an embedded pseudo-terminal (PTY).
 
@@ -6,7 +6,7 @@ Several agents can run at once — one session per account — with a tab per se
 
 ## Project Status
 
-**Version**: 0.2.0
+**Version**: 0.4.0
 
 ## Field guide
 
@@ -47,6 +47,12 @@ buffering while hidden. The quick-send bar targets the current session, every
 session of one agent, or all of them at once.
 
 ### Release Notes
+
+#### v0.4.0 (singular identity migration)
+- **One canonical name everywhere**: repository, npm package, checkout, AppData, documentation, and build artifact now use `agent-orchestrator` / **Agent Orchestrator**.
+- **Safe user-data migration**: the first singular build validates and copies app-owned JSON (`settings.json`, local agent profiles, workflows, and any run journal) from the historical plural AppData directory through a staging directory, then atomically promotes it.
+- **Rollback remains possible**: the historical AppData directory is retained as a read-only backup. Chromium caches are not migrated, and pre-existing data on both sides is never silently merged.
+- **Test storage isolation**: smoke and Electron self-tests use a temporary user-data directory and cannot modify production settings or workflows.
 
 #### v0.2.0 (multi-account agents)
 - **Multiple concurrent agent sessions**, one per account, each with its own terminal tab, status dot, and assurance badge. Background sessions keep rendering, so nothing is lost while you watch another one.
@@ -115,7 +121,7 @@ session of one agent, or all of them at once.
 - **Loops**: A **Loop** block repeats every block up to its matching **End Loop** a configurable number of times. Nested loops are supported and the loop body is indented (with a continuous nesting rail) so the structure is readable at a glance. A live iteration badge (`2/3`) tracks progress during a run, unbalanced loop markers are flagged inline (dashed outline + tooltip) and summarized in a banner, and the engine still runs safely by skipping broken markers.
 - **Drag-to-Position Editing**: Blocks dragged from the palette land exactly where they are dropped (with a live insertion-line preview); they can still be reordered afterward by their drag handles.
 - **Templates**: A **🧩 Templates** picker provides pre-built workflows (including a Loop example) as one-click starting points.
-- **Persistent Storage**: Workflows are saved to and loaded from `%APPDATA%/agents-orchestrator/workflows/`, with atomic writes and resilient loading so one malformed workflow file does not break the whole schedule list.
+- **Persistent Storage**: Workflows are saved to and loaded from `%APPDATA%/agent-orchestrator/workflows/`, with atomic writes and resilient loading so one malformed workflow file does not break the whole schedule list. The first v0.4 launch copies valid app-owned data from the historical plural directory and leaves that source intact as a rollback backup.
 - **Workflow Library**: A **📂 My Workflows** browser lists every saved workflow in-app — open, delete, start a new blank one, or import a `.json` from disk. An unsaved-changes indicator and a discard prompt prevent accidentally losing edits when switching between workflows.
 - **Automated PTY Execution**: The engine executes terminal applications in the background using `node-pty` with modern Windows `ConPTY` enabled, providing full ANSI color support and proper terminal layout.
 - **Dual-Pane Output**: The UI features a horizontally resizable right panel split into:
@@ -170,6 +176,6 @@ npm run test:app    # electron . --self-test
 # Regenerate icon assets (icon.png + icon.ico) from src/assets/icon-source.png
 npm run icons
 
-# Build for Windows x64 (embeds icon.ico into the .exe)
+# Build for Windows x64, then verify package identity and privacy
 npm run build
 ```

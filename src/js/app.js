@@ -1,5 +1,5 @@
 // ============================================================
-// Agents Orchestrator — Main Application
+// Agent Orchestrator — Main Application
 // Wires together blocks, editor, engine, and UI
 // ============================================================
 
@@ -31,16 +31,17 @@ class App {
     this._dirty = false;                // unsaved-changes flag
     this._savedWorkflowsRaw = [];       // last-fetched saved workflows (for the picker)
 
-    this._init();
-    this._loadDemoWorkflow();
-    this._loadDefaultDirectory();
-
     // Headless regression run: `electron . --self-test` loads the page with
     // ?selftest=1, exercises the engine's loop control flow with no real PTYs,
     // and reports pass/fail to the main process which sets the exit code.
     if (new URLSearchParams(location.search).get('selftest') === '1') {
       this._runSelfTest();
+      return;
     }
+
+    this._init();
+    this._loadDemoWorkflow();
+    this._loadDefaultDirectory();
   }
 
   // ── Self-Test (headless regression) ────────────────────────
@@ -382,8 +383,7 @@ class App {
       if (!dir) return;
 
       this._defaultDirectory = dir;
-      const oldDevDir = 'D:\\AI_Projects\\agents-orchestrator';
-      const replaceDefaults = new Set(['', '.', oldDevDir]);
+      const replaceDefaults = new Set(['', '.']);
       let changed = false;
 
       if (replaceDefaults.has(this.workflow.defaultDirectory)) {
