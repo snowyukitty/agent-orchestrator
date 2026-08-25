@@ -18,7 +18,8 @@
     "test:app": "electron . --self-test",
     "check": "node scripts/check-syntax.js && node scripts/check-docs.js",
     "icons": "electron scripts/build-icons.js",
-    "build": "electron-packager . AgentOrchestrator --platform=win32 --arch=x64 --overwrite --out=dist --icon=src/assets/icon.ico --ignore=\"(dist|scripts|tests|docs|mcps|\\.git|icon-source\\.png|AGENTS\\.md|README\\.md|package-lock\\.json|.*\\.log)\" --asar.unpackDir=node_modules/node-pty && node scripts/verify-package.mjs",
+    "build": "electron-packager . AgentOrchestrator --platform=win32 --arch=x64 --overwrite --out=dist --icon=src/assets/icon.ico --ignore=\"(dist|scripts|tests|docs|mcps|\\.git|\\.github|icon-source\\.png|AGENTS\\.md|README\\.md|CONTRIBUTING\\.md|SECURITY\\.md|package-lock\\.json|.*\\.log)\" --asar.unpackDir=node_modules/node-pty && node scripts/verify-package.mjs",
+    "verify": "npm run check && npm test && npm audit --audit-level=moderate && npm run build",
     "verify:package": "node scripts/verify-package.mjs"
   },
   "devDependencies": {

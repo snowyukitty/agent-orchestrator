@@ -19,8 +19,8 @@ const entries = listPackage(asarPath, { isPack: false }).map((entry) => {
 const forbidden = [
   /^\/.*\.log$/i,
   /^\/(?:docs|mcps|scripts|tests)(?:\/|$)/,
-  /^\/\.git(?:\/|$)/,
-  /^\/(?:AGENTS|README)\.md$/,
+  /^\/\.git(?:hub)?(?:\/|$)/,
+  /^\/(?:AGENTS|CONTRIBUTING|README|SECURITY)\.md$/,
   /^\/package-lock\.json$/,
   /^\/src\/assets\/icon-source\.png$/,
 ];
@@ -89,7 +89,8 @@ const looseEntries = fs.readdirSync(packageRoot, { recursive: true, encoding: 'u
 const forbiddenLoose = looseEntries.filter((entry) => {
   const normalized = entry.replaceAll('\\', '/');
   return /(?:^|\/).*\.log$/i.test(normalized) ||
-    /^(?:docs|mcps|scripts|tests)(?:\/|$)/i.test(normalized);
+    /^(?:\.github|docs|mcps|scripts|tests)(?:\/|$)/i.test(normalized) ||
+    /^(?:AGENTS|CONTRIBUTING|README|SECURITY)\.md$/i.test(normalized);
 });
 if (forbiddenLoose.length > 0) {
   throw new Error(`Package contains forbidden loose files: ${forbiddenLoose.join(', ')}`);

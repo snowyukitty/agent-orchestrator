@@ -1,6 +1,6 @@
 # Static field guide
 
-`docs/index.html` is the zero-build, zero-backend product guide for Agents
+`docs/index.html` is the zero-build, zero-backend product guide for Agent
 Orchestrator. It is intentionally plain HTML, CSS, and JavaScript:
 
 - no package install or build step;
@@ -12,6 +12,9 @@ Orchestrator. It is intentionally plain HTML, CSS, and JavaScript:
 
 Open `docs/index.html` in a browser to review it. Run `npm run check` to validate
 its local references, anchor targets, security boundary, and JavaScript syntax.
+
+For the maintainer-facing process model, routing boundary, persistence rules,
+and verification layers, see [`architecture.md`](architecture.md).
 
 GitHub Pages is not enabled by this directory. Enabling or changing a public
 publication surface remains an explicit repository-owner action.

@@ -1,0 +1,76 @@
+name: Bug report
+description: Report a reproducible Agent Orchestrator problem
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Agent Orchestrator. Never paste credentials,
+        account-home paths, or unredacted terminal output. Security issues must
+        use private vulnerability reporting.
+
+  - type: input
+    id: version
+    attributes:
+      label: Agent Orchestrator version
+      placeholder: 0.4.0
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: Windows 11 24H2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: assurance
+    attributes:
+      label: Session type
+      options:
+        - L1-routed
+        - L2-env
+        - L0-native
+        - No agent session involved
+        - Unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Use synthetic account names and paths.
+      placeholder: |
+        1. Open ...
+        2. Add ...
+        3. Run ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Include only minimal, redacted logs if needed.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed credentials, account-home paths, personal data, and unredacted terminal output.
+          required: true
+        - label: This report does not describe a security vulnerability.
+          required: true

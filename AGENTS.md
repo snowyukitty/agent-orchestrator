@@ -87,6 +87,7 @@ tests/               node --test suites for src/main/
 npm run check       # syntax-check every JS file under the source roots
 npm test            # test:unit (node --test) + test:app (Electron self-test)
 npm run smoke       # Electron startup/shutdown cleanup path
+npm run verify      # complete checkpoint gate: check, tests, audit, build/package verification
 ```
 
 Add a case with the behavior. Pure logic goes in `src/main/` (CommonJS,

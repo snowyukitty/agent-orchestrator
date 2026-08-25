@@ -6,7 +6,14 @@ Several agents can run at once — one session per account — with a tab per se
 
 ## Project Status
 
-**Version**: 0.4.0
+**Version**: 0.4.0 · **Platform**: Windows x64 · **Runtime**: Electron 43
+
+Project references:
+
+- [Architecture and safety model](docs/architecture.md)
+- [Interactive field guide](docs/README.md)
+- [Security policy](SECURITY.md)
+- [Contribution and verification guide](CONTRIBUTING.md)
 
 ## Field guide
 
@@ -178,4 +185,7 @@ npm run icons
 
 # Build for Windows x64, then verify package identity and privacy
 npm run build
+
+# Run the complete checkpoint gate used by CI
+npm run verify
 ```
