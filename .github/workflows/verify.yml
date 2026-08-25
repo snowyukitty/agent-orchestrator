@@ -4,6 +4,11 @@ on:
   push:
     branches:
       - main
+    # The checkpoint gate does not read Markdown, and the packaged runtime
+    # excludes it. Issue forms likewise cannot change a gate result.
+    paths-ignore:
+      - '**/*.md'
+      - '.github/ISSUE_TEMPLATE/**'
   pull_request:
   workflow_dispatch:
 
