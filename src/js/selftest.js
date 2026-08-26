@@ -9,7 +9,12 @@
 // timers, no clock reads. Anything needing "now" takes it as an argument.
 // ============================================================
 
-import { ExecutionEngine, analyzeLoops, matchingLoopEnd } from './engine.js';
+import {
+  ExecutionEngine,
+  analyzeHandoffPolicies,
+  analyzeLoops,
+  matchingLoopEnd,
+} from './engine.js';
 import { BLOCK_TYPES, renderWorkflowBlock } from './blocks.js';
 import { TEMPLATES } from './templates.js';
 import {
@@ -92,6 +97,7 @@ export async function runSelfTest() {
     await testTyping(eq, ok);
     await testSessionTargets(eq);
     await testAgentStages(eq, ok);
+    await testHandoffPolicyWarnings(eq, ok);
     await testWorkflowDocuments(eq, ok);
   } catch (err) {
     failures.push(`exception: ${err && err.message ? err.message : err}`);
@@ -421,6 +427,28 @@ async function testResultHandoff(eq, ok) {
   eq('unknown-result-field-rejected',
     errorCode(() => normalizeResultBundle({ ...bundle, shellCommand: 'echo unsafe' })),
     'unknown-field');
+
+  // Aggregate/envelope caps bound the composed downstream prompt only. A Join
+  // that merely captures/journals results (allowIncomplete) must accept many
+  // lanes that are each within the per-lane cap, even past 128KB in total.
+  const nearLaneCap = 'x'.repeat(MAX_RESULT_BYTES_PER_LANE - 16);
+  const wideBundle = {
+    producerBlockId: 'join-wide',
+    name: 'wide',
+    status: 'complete',
+    lanes: [1, 2, 3, 4, 5].map(n => ({
+      laneId: `lane-${n}`,
+      label: `Lane ${n}`,
+      text: nearLaneCap,
+      complete: true,
+    })),
+  };
+  eq('aggregate-cap-not-enforced-on-journal-only-capture',
+    normalizeResultBundle(wideBundle, { allowIncomplete: true }).lanes.length,
+    5);
+  eq('aggregate-cap-still-guards-composed-handoff',
+    errorCode(() => normalizeResultBundle(wideBundle)),
+    'handoff-too-large');
 
   const atLaneLimit = '😀'.repeat(MAX_RESULT_BYTES_PER_LANE / 4);
   eq('result-byte-limit-counts-utf8',
@@ -1849,9 +1877,11 @@ async function testAgentStages(eq, ok) {
   }
   ok('exited-pending-lane-stops-strict-join', exitedStopped);
 
-  // A removed lane has lost its observation capability, so continue mode may
-  // not turn it into a policy-controlled timeout or exit.
+  // A manually closed tab surfaces as a "removed" lane. That incompleteness is
+  // policy-controlled: onIncomplete "continue" absorbs it with a warning, and
+  // onIncomplete "stop" stops downstream blocks while naming the lane.
   let removedWaitCalls = 0;
+  const removedLogs = [];
   const removedEngine = new ExecutionEngine({
     getSessions: () => sessions,
     api: {
@@ -1859,13 +1889,14 @@ async function testAgentStages(eq, ok) {
       cancelSessionWait: async () => true,
     },
   });
+  removedEngine.onLog = message => removedLogs.push(message);
   removedEngine.runId = 'run-removed';
   removedEngine._spawnedIds = spawned;
   removedEngine._pendingAgentIds = new Set(['gone']);
   removedEngine._pendingAgentLanes = new Map([
     ['gone', { id: 'gone', profileId: 'claude-gone', label: 'Gone' }],
   ]);
-  let removedRejected = false;
+  let removedContinueError = '';
   try {
     await removedEngine._executeBlock({
       id: 'removed-join',
@@ -1873,10 +1904,39 @@ async function testAgentStages(eq, ok) {
       params: { idleMs: 1, pattern: '', timeoutMs: 100, onIncomplete: 'continue' },
     });
   } catch (error) {
-    removedRejected = /could not observe every lane/.test(error.message);
+    removedContinueError = error.message;
   }
-  ok('removed-pending-lane-is-never-policy-continued', removedRejected);
+  eq('removed-pending-lane-is-policy-continued', removedContinueError, '');
+  ok('removed-pending-lane-continue-logs-incomplete-warning',
+    removedLogs.some(message => /Join incomplete for 1\/1/.test(message)));
   eq('removed-pending-lane-does-not-register-main-wait', removedWaitCalls, 0);
+
+  const removedStopEngine = new ExecutionEngine({
+    getSessions: () => sessions,
+    api: {
+      waitForSession: async () => ({ reason: 'idle' }),
+      cancelSessionWait: async () => true,
+    },
+  });
+  removedStopEngine.runId = 'run-removed-stop';
+  removedStopEngine._spawnedIds = spawned;
+  removedStopEngine._pendingAgentIds = new Set(['gone']);
+  removedStopEngine._pendingAgentLanes = new Map([
+    ['gone', { id: 'gone', profileId: 'claude-gone', label: 'Gone' }],
+  ]);
+  let removedStopError = '';
+  try {
+    await removedStopEngine._executeBlock({
+      id: 'removed-stop-join',
+      type: 'agentJoin',
+      params: { idleMs: 1, pattern: '', timeoutMs: 100, onIncomplete: 'stop' },
+    });
+  } catch (error) {
+    removedStopError = error.message;
+  }
+  ok('removed-pending-lane-still-honors-stop-policy',
+    /downstream blocks were stopped/.test(removedStopError)
+    && /Gone \(removed\)/.test(removedStopError));
 
   const cancelledEngine = new ExecutionEngine({
     getSessions: () => sessions,
@@ -2108,6 +2168,226 @@ async function testAgentStages(eq, ok) {
     partialHandoffRejected = /Partial result bundles/.test(error.message);
   }
   ok('partial-result-never-reaches-downstream-agent', partialHandoffRejected);
+
+  // A Send Input between a publishing Send and its named Join refreshes the
+  // pending-lane record; it must merge, not replace, so the lane keeps its
+  // result contract and the named Join still collects it.
+  let confirmSequence = 88;
+  const confirmEngine = new ExecutionEngine({
+    getSessions: () => sessions,
+    api: {
+      sessionCheckpoint: async () => ({ outputSeq: ++confirmSequence }),
+      sendStructuredInput: async () => true,
+      waitForSession: async () => ({
+        reason: 'match',
+        outputSeq: ++confirmSequence,
+        capture: {
+          complete: true,
+          truncatedBefore: false,
+          truncatedAfter: false,
+          text: 'confirmed finding',
+        },
+      }),
+      cancelSessionWait: async () => true,
+    },
+    typeIntoFn: async ({ sessionId, structured, send, onTyped }) => {
+      if (structured) await send(sessionId, 'chunk');
+      await onTyped();
+      return { sent: true, aborted: false };
+    },
+  });
+  confirmEngine.runId = 'run-confirm-flow';
+  confirmEngine._spawnedIds = spawned;
+  await confirmEngine._executeBlock({
+    id: 'confirm-publish',
+    type: 'agentSend',
+    params: {
+      profileId: 'claude-work',
+      text: 'Research, then ask before finishing.',
+      pressEnter: true,
+      expectResult: true,
+      handoffFrom: '',
+    },
+  });
+  const contractBeforeInput = confirmEngine._pendingAgentLanes.get('lane-a').resultContract;
+  const afterSeqBeforeInput = confirmEngine._pendingAgentLanes.get('lane-a').resultAfterSeq;
+  ok('publishing-send-records-lane-contract', !!contractBeforeInput);
+  confirmEngine.currentProcessId = 'lane-a';
+  await confirmEngine._executeBlock({
+    id: 'confirm-input',
+    type: 'input',
+    params: { text: 'y', pressEnter: true },
+  });
+  eq('send-input-preserves-recorded-result-contract',
+    [
+      confirmEngine._pendingAgentLanes.get('lane-a').resultContract === contractBeforeInput,
+      confirmEngine._pendingAgentLanes.get('lane-a').resultAfterSeq,
+    ],
+    [true, afterSeqBeforeInput]);
+  let namedJoinAfterInputError = '';
+  try {
+    await confirmEngine._executeBlock({
+      id: 'confirm-join',
+      type: 'agentJoin',
+      params: {
+        idleMs: 0,
+        pattern: '',
+        timeoutMs: 500,
+        onIncomplete: 'stop',
+        resultName: 'confirmed',
+      },
+    });
+  } catch (error) {
+    namedJoinAfterInputError = error.message;
+  }
+  eq('named-join-still-collects-lane-after-send-input', namedJoinAfterInputError, '');
+  eq('named-join-after-send-input-publishes-result',
+    [
+      confirmEngine._resultsByProducer.get('confirm-join')?.status,
+      confirmEngine._resultsByProducer.get('confirm-join')?.lanes.map(lane => lane.text),
+    ],
+    ['complete', ['confirmed finding']]);
+
+  // A continue-policy Join may complete partial; the later handoff Send must
+  // still refuse the bundle, and its error must blame the Join interaction
+  // (which Join, its policy, the missing lanes) rather than the Send.
+  let continueSequence = 60;
+  const continueEngine = new ExecutionEngine({
+    getSessions: () => sessions,
+    api: {
+      sessionCheckpoint: async () => ({ outputSeq: ++continueSequence }),
+      sendStructuredInput: async () => true,
+      waitForSession: async ({ id }) => (id === 'lane-a'
+        ? {
+          reason: 'match',
+          outputSeq: ++continueSequence,
+          capture: {
+            complete: true,
+            truncatedBefore: false,
+            truncatedAfter: false,
+            text: 'A finding',
+          },
+        }
+        : { reason: 'timeout', outputSeq: ++continueSequence }),
+      cancelSessionWait: async () => true,
+    },
+    typeIntoFn: async ({ sessionId, structured, send, onTyped }) => {
+      if (structured) await send(sessionId, 'chunk');
+      await onTyped();
+      return { sent: true, aborted: false };
+    },
+  });
+  continueEngine.runId = 'run-continue-handoff';
+  continueEngine._spawnedIds = spawned;
+  await continueEngine._executeBlock({
+    id: 'cont-publish',
+    type: 'agentSend',
+    params: {
+      profileId: WORKFLOW_AGENT_TARGET,
+      text: 'Research.',
+      pressEnter: true,
+      expectResult: true,
+      handoffFrom: '',
+    },
+  });
+  let continueJoinError = '';
+  try {
+    await continueEngine._executeBlock({
+      id: 'cont-join',
+      type: 'agentJoin',
+      params: {
+        idleMs: 0,
+        pattern: '',
+        timeoutMs: 100,
+        onIncomplete: 'continue',
+        resultName: 'research',
+      },
+    });
+  } catch (error) {
+    continueJoinError = error.message;
+  }
+  eq('continue-join-stores-partial-bundle-without-failing',
+    [continueJoinError, continueEngine._resultsByProducer.get('cont-join')?.status],
+    ['', 'partial']);
+  let continueHandoffError = '';
+  try {
+    await continueEngine._executeBlock({
+      id: 'cont-consumer',
+      type: 'agentSend',
+      params: {
+        profileId: '',
+        text: 'Use this.',
+        pressEnter: true,
+        expectResult: false,
+        handoffFrom: 'cont-join',
+      },
+    });
+  } catch (error) {
+    continueHandoffError = error.message;
+  }
+  ok('partial-handoff-error-names-producing-join',
+    /Partial result bundles cannot be handed/.test(continueHandoffError)
+    && /"cont-join"/.test(continueHandoffError));
+  ok('partial-handoff-error-names-policy-and-missing-lanes',
+    /"continue"/.test(continueHandoffError)
+    && /Codex · build/.test(continueHandoffError));
+}
+
+// ── Static handoff-policy validation (guaranteed-failure configs) ─
+
+async function testHandoffPolicyWarnings(eq, ok) {
+  const continueJoin = {
+    id: 'gate',
+    type: 'agentJoin',
+    params: {
+      idleMs: 0,
+      pattern: '',
+      timeoutMs: 100,
+      onIncomplete: 'continue',
+      resultName: 'research',
+    },
+  };
+  const consumer = {
+    id: 'use',
+    type: 'agentSend',
+    params: {
+      profileId: '',
+      text: 'Synthesize.',
+      pressEnter: true,
+      expectResult: false,
+      handoffFrom: 'gate',
+    },
+  };
+  const warnings = analyzeHandoffPolicies([continueJoin, consumer]);
+  eq('handoff-from-continue-join-is-flagged',
+    warnings.map(warning => [warning.code, warning.severity, warning.blockId, warning.reference]),
+    [['partial-handoff-policy', 'warning', 'use', 'gate']]);
+  ok('handoff-policy-warning-explains-guaranteed-failure',
+    /guaranteed/.test(warnings[0].message) && /research/.test(warnings[0].message));
+
+  const stopJoin = {
+    ...continueJoin,
+    params: { ...continueJoin.params, onIncomplete: 'stop' },
+  };
+  eq('handoff-from-stop-join-is-not-flagged',
+    analyzeHandoffPolicies([stopJoin, consumer]),
+    []);
+  eq('send-without-handoff-is-not-flagged',
+    analyzeHandoffPolicies([continueJoin, {
+      ...consumer,
+      params: { ...consumer.params, handoffFrom: '' },
+    }]),
+    []);
+
+  // The engine surfaces the same warning in the run log at start, mirroring
+  // how loop-structure problems reach the user.
+  const warnEngine = new ExecutionEngine();
+  const warnLogs = [];
+  warnEngine.onLog = message => warnLogs.push(message);
+  await warnEngine.execute([continueJoin, consumer], '.', { dryRun: true });
+  ok('engine-logs-handoff-policy-warning-at-run-start',
+    warnLogs.some(message => message.includes('⚠️')
+      && message.includes('partial results are never handed to a downstream agent')));
 }
 
 // ── Versioned workflow documents and immutable run plans ─────

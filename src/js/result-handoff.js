@@ -184,7 +184,13 @@ export function normalizeResultBundle(bundle, { allowIncomplete = false } = {}) 
     return normalized;
   });
 
-  if (totalResultBytes > MAX_HANDOFF_BYTES) {
+  // The aggregate/envelope caps bound what may be pasted into one downstream
+  // agent prompt. They deliberately do not apply on the journal-only path
+  // (allowIncomplete): a Join capturing N lanes each within the per-lane cap
+  // must be able to record them all; the handoff limit is enforced again when
+  // a Send actually composes the prompt (composeAgentPrompt → strict
+  // normalization + formatHandoffEnvelope).
+  if (!allowIncomplete && totalResultBytes > MAX_HANDOFF_BYTES) {
     throw new ResultHandoffError(
       `Result bundle contains ${totalResultBytes} UTF-8 bytes; the handoff limit is ${MAX_HANDOFF_BYTES}`,
       'handoff-too-large'
@@ -198,9 +204,11 @@ export function normalizeResultBundle(bundle, { allowIncomplete = false } = {}) 
     status: bundle.status,
     lanes,
   };
-  // Validate the actual framed size as well as the sum of raw lane bodies.
-  // Metadata and deterministic escaping also consume the total byte budget.
-  formatHandoffEnvelope(normalized, null);
+  if (!allowIncomplete) {
+    // Validate the actual framed size as well as the sum of raw lane bodies.
+    // Metadata and deterministic escaping also consume the total byte budget.
+    formatHandoffEnvelope(normalized, null);
+  }
   return deepFreeze(normalized);
 }
 

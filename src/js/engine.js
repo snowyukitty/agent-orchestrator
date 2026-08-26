@@ -39,6 +39,7 @@ export class ExecutionEngine {
     this._pendingAgentLanes = new Map(); // id → identity captured before a lane can exit/disappear
     this._activeWaits = new Map(); // wait id → { id, waitId }, supports group barriers
     this._resultsByProducer = new Map(); // Join block id → explicit result bundle
+    this._resultPolicies = new Map(); // Join block id → { resultName, onIncomplete, missingLanes }
     this._journalEnabled = false;
     this.currentVisitId = null;
     this.lastOutcome = null;
@@ -78,6 +79,7 @@ export class ExecutionEngine {
     this._pendingAgentLanes = new Map();
     this._activeWaits = new Map();
     this._resultsByProducer = new Map();
+    this._resultPolicies = new Map();
     this._abortLogged = false;
     this._finalizing = false;
     this._dryRun = !!opts.dryRun;   // record-only mode for tests (no PTY, no waits)
@@ -99,6 +101,9 @@ export class ExecutionEngine {
       this._setStatus('running');
       this._log('▶ Workflow execution started', 'system');
       this._log(`  Working directory: ${this.cwd}`, 'system');
+      for (const warning of analyzeHandoffPolicies(blocks)) {
+        this._log(`⚠️ ${warning.message}`, 'system');
+      }
       success = await this._drive(blocks);
     } catch (error) {
       preserveFirstError(error);
@@ -510,6 +515,23 @@ export class ExecutionEngine {
       if (handoffFrom && !handoffBundle) {
         throw new Error('The selected result is unavailable in this run');
       }
+      if (handoffBundle && handoffBundle.status !== 'complete') {
+        // The safety rule (partial bundles never reach a downstream agent)
+        // would also fire inside composeAgentPrompt, but with a message that
+        // blames this Send. Name the interaction instead: which Join produced
+        // the partial bundle, its on-incomplete policy, and the missing lanes.
+        const policy = this._resultPolicies.get(handoffFrom);
+        const missingLanes = handoffBundle.lanes
+          .filter(lane => !lane.complete || lane.truncated)
+          .map(lane => lane.label);
+        throw new Error(
+          `Partial result bundles cannot be handed to a downstream agent. `
+          + `Result "${handoffBundle.name}" from Join "${handoffFrom}" completed partial `
+          + `(missing lanes: ${missingLanes.join(', ') || 'none reported'}) and that Join's `
+          + `on-incomplete policy is "${policy?.onIncomplete || 'unknown'}", which let the run `
+          + `reach this Send. Set the Join to stop on incomplete, or fix the missing lanes.`
+        );
+      }
       if (sessionIds.length === 0) {
         throw new Error(target
           ? (target === WORKFLOW_AGENT_TARGET
@@ -821,10 +843,24 @@ export class ExecutionEngine {
           }, { allowIncomplete: true });
         }
         this._resultsByProducer.set(producerBlockId, bundle);
+        // Remember how this Join was configured so a later handoff Send can
+        // blame the right block if the bundle turns out to be partial.
+        this._resultPolicies.set(producerBlockId, { resultName, onIncomplete });
       }
 
       const incomplete = outcomes.filter(outcome => !outcome.ready);
-      const policyControlledReasons = new Set(['timeout', 'exit', 'result-partial']);
+      // Incompleteness the block's onIncomplete policy may absorb. "removed"
+      // is a manually closed tab reconstructed from captured lane metadata;
+      // "replaced" is its legacy synonym from older wait plumbing. "cancelled"
+      // stays out: outside an abort it signals an IPC-level fault, not a lane
+      // outcome, and must hard-fail the Join.
+      const policyControlledReasons = new Set([
+        'timeout',
+        'exit',
+        'result-partial',
+        'removed',
+        'replaced',
+      ]);
       for (const { session, reason, ready: laneReady } of outcomes) {
         this._log(
           `${laneReady ? '◆' : '⚠️'} ${session.label}: ${joinReasonLabel(reason, idleMs, timeoutMs)}`,
@@ -1192,12 +1228,18 @@ export class ExecutionEngine {
   _rememberPendingAgentLane(session, { afterSeq = null, resultContract = null } = {}) {
     if (!session?.id) return;
     this._pendingAgentIds.add(session.id);
+    // Merge into any existing record. A follow-up write without contract
+    // options (for example a Send Input "y" between a publishing Send and its
+    // named Join) must refresh the lane identity without dropping the
+    // previously recorded resultContract/resultAfterSeq.
+    const previous = this._pendingAgentLanes.get(session.id) || {};
     this._pendingAgentLanes.set(session.id, {
+      ...previous,
       id: session.id,
-      label: session.label || session.id,
-      profileId: session.profileId,
-      agent: session.agent,
-      assurance: session.assurance,
+      label: session.label || previous.label || session.id,
+      profileId: session.profileId ?? previous.profileId,
+      agent: session.agent ?? previous.agent,
+      assurance: session.assurance ?? previous.assurance,
       ...(resultContract ? {
         resultAfterSeq: afterSeq,
         resultContract,
@@ -1318,6 +1360,42 @@ export function matchingLoopEnd(blocks, startIdx) {
     }
   }
   return -1;
+}
+
+/**
+ * Flag agentSend blocks whose attached result comes from a Join Agents block
+ * configured with onIncomplete "continue". That combination is a guaranteed
+ * failure whenever the Join completes partial: partial bundles are never
+ * handed to a downstream agent, so the run would fail at the Send instead of
+ * the Join. Pure, like analyzeLoops, so the editor can surface it as a
+ * validation banner; the engine also logs it at run start.
+ * Returns [{ code, severity, index, blockId, reference, message }].
+ */
+export function analyzeHandoffPolicies(blocks) {
+  const list = Array.isArray(blocks) ? blocks : [];
+  const byId = new Map(list.map(block => [block?.id, block]));
+  const warnings = [];
+  list.forEach((block, index) => {
+    if (block?.type !== 'agentSend') return;
+    const ref = String(block.params?.handoffFrom || '').trim();
+    if (!ref) return;
+    const producer = byId.get(ref);
+    if (producer?.type !== 'agentJoin') return;
+    if (producer.params?.onIncomplete !== 'continue') return;
+    const resultName = String(producer.params?.resultName || '').trim() || ref;
+    warnings.push({
+      code: 'partial-handoff-policy',
+      severity: 'warning',
+      index,
+      blockId: block.id || null,
+      reference: ref,
+      message: `Step ${index + 1} hands off result "${resultName}" from a Join set to `
+        + `"continue on incomplete". If that Join completes partial, this Send is guaranteed `
+        + `to fail: partial results are never handed to a downstream agent. Set the Join to `
+        + `stop on incomplete, or remove the handoff.`,
+    });
+  });
+  return warnings;
 }
 
 /**

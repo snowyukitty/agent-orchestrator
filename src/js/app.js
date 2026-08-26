@@ -8,7 +8,7 @@ import {
   currentDateTimeLocalValue, renderPaletteBlock, renderWorkflowBlock
 } from './blocks.js';
 
-import { ExecutionEngine, analyzeLoops } from './engine.js';
+import { ExecutionEngine, analyzeLoops, analyzeHandoffPolicies } from './engine.js';
 import { TEMPLATES } from './templates.js';
 import {
   computeJobTarget,
@@ -1057,7 +1057,9 @@ class App {
       list.appendChild(el);
     });
 
-    this._renderLoopValidation(errors);
+    const handoffWarnings = analyzeHandoffPolicies(this.workflow.blocks)
+      .map(warning => warning.message);
+    this._renderLoopValidation([...errors, ...handoffWarnings]);
 
     this._updateEmptyState();
     this._initSortable();
@@ -1073,8 +1075,8 @@ class App {
       return;
     }
     const head = errors.length === 1
-      ? '⚠ 1 loop structure issue:'
-      : `⚠ ${errors.length} loop structure issues:`;
+      ? '⚠ 1 workflow structure issue:'
+      : `⚠ ${errors.length} workflow structure issues:`;
     banner.textContent = `${head} ${errors.join(' · ')}`;
     banner.classList.remove('hidden');
   }
