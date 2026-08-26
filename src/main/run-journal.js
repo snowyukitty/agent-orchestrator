@@ -104,6 +104,9 @@ const MAX_ITERATION_DEPTH = 32;
 const TERMINAL_CAPACITY_TIMESTAMP = '9999-12-31T23:59:59.999Z';
 const TERMINAL_CAPACITY_OP_ID = 'x'.repeat(256);
 const TERMINAL_CAPACITY_CIPHERTEXT = 'A'.repeat(MAX_OPERATION_CIPHERTEXT_BYTES);
+// Worst-case truncation reason reserved by the terminal projection so the
+// one-time truncated marker can always be written to an active record.
+const TERMINAL_CAPACITY_REASON = 'x'.repeat(128);
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const PUBLIC_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
@@ -140,6 +143,17 @@ class RunJournalError extends Error {
     this.name = 'RunJournalError';
     this.code = code;
   }
+}
+
+/**
+ * Tag a capacity failure that should degrade an active run to a truncated
+ * journal instead of failing the workflow mid-run. `journalCapacity` names
+ * the exhausted budget and becomes the recorded truncation reason.
+ */
+function capacityError(message, capacity) {
+  const error = new RunJournalError(message, 'size-limit');
+  error.journalCapacity = capacity;
+  return error;
 }
 
 class BoundedMemoryStore {
@@ -819,6 +833,7 @@ function publicRun(run) {
       storage: run.snapshot.storage,
       byteLength: run.snapshot.byteLength,
     },
+    truncated: run.truncated ? clonePublic(run.truncated) : null,
     blocks: run.blocks.map(publicBlock),
     results: run.results.map(publicResult),
     events: run.events.map(publicEvent),
@@ -841,6 +856,7 @@ function runSummary(run) {
       storage: run.snapshot.storage,
       byteLength: run.snapshot.byteLength,
     },
+    truncated: run.truncated ? clonePublic(run.truncated) : null,
     blockVisitCount: run.blocks.length,
     resultCount: run.results.length,
     resultBytes: run.results.reduce((sum, result) => sum + result.byteLength, 0),
@@ -872,6 +888,7 @@ function assertStoredRun(run) {
       'workflow',
       'trigger',
       'snapshot',
+      'truncated',
       'blocks',
       'results',
       'operations',
@@ -900,6 +917,14 @@ function assertStoredRun(run) {
   }
   if (RUN_TERMINAL_VALUES.has(run.status) && run.finishedAt === null) {
     throw new RunJournalError('Terminal run is missing its finish timestamp', 'corrupt-run');
+  }
+  if (Object.hasOwn(run, 'truncated')) {
+    asObject(run.truncated, 'run.truncated');
+    assertOnlyKeys(run.truncated, new Set(['reason', 'at']), 'run.truncated');
+    asSlug(run.truncated.reason, 'run.truncated.reason');
+    if (!isIsoTimestamp(run.truncated.at)) {
+      throw new RunJournalError('Run truncation timestamp is invalid', 'corrupt-run');
+    }
   }
 
   asObject(run.workflow, 'run.workflow');
@@ -1207,7 +1232,7 @@ function assertStoredRun(run) {
 
 function appendEvent(run, type, at, fields = {}) {
   if (run.events.length >= MAX_EVENTS || run.eventSeq >= Number.MAX_SAFE_INTEGER) {
-    throw new RunJournalError('Run event capacity has been reached', 'size-limit');
+    throw capacityError('Run event capacity has been reached', 'event-capacity');
   }
   run.eventSeq += 1;
   run.events.push({ seq: run.eventSeq, type, at, ...fields });
@@ -1231,6 +1256,12 @@ function terminalCapacityProjection(run) {
     status: RUN_STATUS.INTERRUPTED,
     updatedAt: TERMINAL_CAPACITY_TIMESTAMP,
     finishedAt: TERMINAL_CAPACITY_TIMESTAMP,
+    // Reserve room for the one-time truncated marker a capacity degrade
+    // writes to an active record. An actual marker is never larger.
+    truncated: run.truncated ?? {
+      reason: TERMINAL_CAPACITY_REASON,
+      at: TERMINAL_CAPACITY_TIMESTAMP,
+    },
     blocks: run.blocks.map(visit => (
       visit.status === BLOCK_STATUS.RUNNING
         ? {
@@ -1439,10 +1470,23 @@ class RunJournal {
         if (!visit) throw new RunJournalError('Replayed block visit is missing', 'corrupt-run');
         return publicBlock(visit);
       },
+      degraded: (run, at) => ({
+        visitId: this._newUuid(new Set(run.blocks.map(entry => entry.visitId))),
+        blockId: block.blockId,
+        blockIndex: block.blockIndex,
+        blockType: block.blockType,
+        iterationPath: clonePublic(block.iterationPath),
+        lanes: clonePublic(lanes),
+        status: BLOCK_STATUS.RUNNING,
+        startedAt: at,
+        finishedAt: null,
+        reasonCode: null,
+        truncated: true,
+      }),
       apply: async (run, at) => {
         this._assertActive(run);
         if (run.blocks.length >= MAX_BLOCK_VISITS) {
-          throw new RunJournalError('Run block visit capacity has been reached', 'size-limit');
+          throw capacityError('Run block visit capacity has been reached', 'visit-capacity');
         }
         if (block.blockIndex !== null && block.blockIndex >= run.workflow.blockCount) {
           throw new RunJournalError('block index is outside the workflow snapshot', 'invalid-input');
@@ -1503,6 +1547,25 @@ class RunJournal {
         const visit = run.blocks.find(entry => entry.visitId === visitId);
         if (!visit) throw new RunJournalError('Replayed block visit is missing', 'corrupt-run');
         return publicBlock(visit);
+      },
+      degraded: (run, at) => {
+        const visit = run.blocks.find(entry => entry.visitId === visitId);
+        if (visit && visit.status !== BLOCK_STATUS.RUNNING) {
+          return { ...publicBlock(visit), truncated: true };
+        }
+        return {
+          visitId,
+          blockId: visit ? visit.blockId : null,
+          blockIndex: visit ? visit.blockIndex : null,
+          blockType: visit ? visit.blockType : null,
+          iterationPath: visit ? clonePublic(visit.iterationPath) : [],
+          lanes: visit ? clonePublic(visit.lanes) : [],
+          status,
+          startedAt: visit ? visit.startedAt : at,
+          finishedAt: at,
+          reasonCode,
+          truncated: true,
+        };
       },
       apply: async (run, at) => {
         this._assertActive(run);
@@ -1580,6 +1643,18 @@ class RunJournal {
         if (!result) throw new RunJournalError('Replayed result is missing', 'corrupt-run');
         return publicResult(result);
       },
+      degraded: (run, at) => ({
+        id: this._newUuid(new Set(run.results.map(entry => entry.id))),
+        producerBlockId,
+        visitId,
+        name,
+        status,
+        lanes: clonePublic(lanes),
+        createdAt: at,
+        byteLength,
+        storage: STORAGE.MEMORY,
+        truncated: true,
+      }),
       apply: async (run, at) => {
         this._assertActive(run);
         if (run.results.length >= MAX_RESULTS) {
@@ -1596,7 +1671,7 @@ class RunJournal {
           );
         }
         if (run.events.length >= MAX_EVENTS) {
-          throw new RunJournalError('Run event capacity has been reached', 'size-limit');
+          throw capacityError('Run event capacity has been reached', 'event-capacity');
         }
         const visit = run.blocks.find(entry => entry.visitId === visitId);
         if (!visit) {
@@ -1669,19 +1744,24 @@ class RunJournal {
         const activeVisits = run.blocks.filter(
           block => block.status === BLOCK_STATUS.RUNNING
         );
-        if (status === RUN_STATUS.COMPLETED && activeVisits.length > 0) {
+        if (status === RUN_STATUS.COMPLETED && activeVisits.length > 0 && !run.truncated) {
           throw new RunJournalError(
             'A completed run cannot contain running block visits',
             'invalid-state'
           );
         }
-        const childStatus = status === RUN_STATUS.CANCELLED
-          ? BLOCK_STATUS.CANCELLED
-          : BLOCK_STATUS.FAILED;
+        // A truncated journal stopped observing its visits: they may well
+        // have finished, so close them as interrupted rather than claiming
+        // a failure or cancellation the journal never saw.
+        const childStatus = run.truncated
+          ? BLOCK_STATUS.INTERRUPTED
+          : status === RUN_STATUS.CANCELLED
+            ? BLOCK_STATUS.CANCELLED
+            : BLOCK_STATUS.FAILED;
         for (const visit of activeVisits) {
           visit.status = childStatus;
           visit.finishedAt = at;
-          visit.reasonCode = 'run-finished';
+          visit.reasonCode = run.truncated ? 'journal-truncated' : 'run-finished';
         }
         run.status = status;
         run.finishedAt = at;
@@ -1880,6 +1960,7 @@ class RunJournal {
     fingerprint,
     replay,
     apply,
+    degraded,
   }) {
     return this._withLock(`run:${runId}`, () => this._withLock('memory', async () => {
       const run = this._readRun(runId);
@@ -1889,39 +1970,76 @@ class RunJournal {
         await this._assertReplay(run, operation, action, fingerprint);
         return replay(run, operation);
       }
-      if (run.operations.length >= MAX_OPERATIONS) {
-        throw new RunJournalError('Run operation capacity has been reached', 'size-limit');
-      }
-      const at = this._timestamp();
-      const mutation = await apply(run, at);
-      let proof;
-      try {
-        proof = await this._secureOperationProof(runId, opId, fingerprint);
-      } catch (error) {
-        if (mutation.rollback) mutation.rollback();
-        throw error;
+      // A truncated active run accepts every non-terminal mutation as a
+      // successful no-op: the workflow keeps running while the journal keeps
+      // only what it recorded before capacity was reached.
+      if (run.truncated && degraded && run.status === RUN_STATUS.RUNNING) {
+        return degraded(run, this._timestamp());
       }
       try {
-        run.operations.push({
-          opId,
-          action,
-          proof: {
-            storage: proof.storage,
-            ...(proof.ciphertext ? { ciphertext: proof.ciphertext } : {}),
-          },
-          at,
-          refId: mutation.refId ?? null,
-        });
-        run.updatedAt = at;
-        this._advanceRevision(run);
-        this._writeRun(run);
+        if (run.operations.length >= MAX_OPERATIONS) {
+          throw capacityError('Run operation capacity has been reached', 'operation-capacity');
+        }
+        const at = this._timestamp();
+        const mutation = await apply(run, at);
+        let proof;
+        try {
+          proof = await this._secureOperationProof(runId, opId, fingerprint);
+        } catch (error) {
+          if (mutation.rollback) mutation.rollback();
+          throw error;
+        }
+        try {
+          run.operations.push({
+            opId,
+            action,
+            proof: {
+              storage: proof.storage,
+              ...(proof.ciphertext ? { ciphertext: proof.ciphertext } : {}),
+            },
+            at,
+            refId: mutation.refId ?? null,
+          });
+          run.updatedAt = at;
+          this._advanceRevision(run);
+          this._writeRun(run);
+        } catch (error) {
+          if (proof.rollback) proof.rollback();
+          if (mutation.rollback) mutation.rollback();
+          throw error;
+        }
+        return mutation.value(run);
       } catch (error) {
-        if (proof.rollback) proof.rollback();
-        if (mutation.rollback) mutation.rollback();
-        throw error;
+        if (
+          !degraded
+          || !(error instanceof RunJournalError)
+          || !error.journalCapacity
+        ) {
+          throw error;
+        }
+        return this._degradeTruncated(runId, error, degraded);
       }
-      return mutation.value(run);
     }));
+  }
+
+  /**
+   * A journal capacity was reached mid-run. Reload the last persisted state
+   * (every rollback above already ran), stamp the one-time truncated marker
+   * inside the byte/entry room the terminal projection reserved for it, and
+   * answer the mutation as a successful no-op. Terminal recording via
+   * finishRun/recoverInterrupted keeps working from its own reservation.
+   */
+  _degradeTruncated(runId, cause, degraded) {
+    const run = this._readRun(runId);
+    if (!run || run.status !== RUN_STATUS.RUNNING) throw cause;
+    if (!run.truncated) {
+      const at = this._timestamp();
+      run.truncated = { reason: cause.journalCapacity, at };
+      run.updatedAt = at;
+      this._advanceRevision(run);
+      this._writeRun(run);
+    }
+    return degraded(run, this._timestamp());
   }
 
   async _assertReplay(run, operation, action, fingerprint) {
@@ -2161,19 +2279,28 @@ class RunJournal {
 
   _writeRun(run) {
     assertStoredRun(run);
-    if (
-      run.status === RUN_STATUS.RUNNING
-      && (
-        run.events.length >= MAX_EVENTS
-        || run.operations.length >= MAX_OPERATIONS
-        || run.eventSeq >= Number.MAX_SAFE_INTEGER
+    if (run.status === RUN_STATUS.RUNNING) {
+      if (run.operations.length >= MAX_OPERATIONS) {
+        throw capacityError(
+          'Run Journal terminal capacity has been reached',
+          'operation-capacity'
+        );
+      }
+      if (run.events.length >= MAX_EVENTS) {
+        throw capacityError(
+          'Run Journal terminal capacity has been reached',
+          'event-capacity'
+        );
+      }
+      if (
+        run.eventSeq >= Number.MAX_SAFE_INTEGER
         || run.revision >= Number.MAX_SAFE_INTEGER
-      )
-    ) {
-      throw new RunJournalError(
-        'Run Journal terminal capacity has been reached',
-        'size-limit'
-      );
+      ) {
+        throw capacityError(
+          'Run Journal terminal capacity has been reached',
+          'revision-capacity'
+        );
+      }
     }
     const capacityRecord = run.status === RUN_STATUS.RUNNING
       ? terminalCapacityProjection(run)
@@ -2182,9 +2309,9 @@ class RunJournal {
       Buffer.byteLength(JSON.stringify(capacityRecord, null, 2), 'utf8')
       > this.recordMaxBytes
     ) {
-      throw new RunJournalError(
+      throw capacityError(
         'Run Journal record capacity has been reached',
-        'size-limit'
+        'record-capacity'
       );
     }
     try {

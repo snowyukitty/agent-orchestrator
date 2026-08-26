@@ -1483,3 +1483,180 @@ test('public workflow, result, and lane names use a 512 UTF-8 byte cap', async (
     error => error instanceof RunJournalError && error.code === 'size-limit'
   );
 });
+
+async function journalTruncatedByRecordCapacity() {
+  let stored;
+  const probe = makeJournal({
+    writeRecord(file, data) {
+      stored = structuredClone(data);
+      writeJsonAtomic(file, data);
+    },
+  });
+  const probeRun = await startRun(probe.journal);
+  await startVisit(probe.journal, probeRun.id);
+
+  // Minimal recordMaxBytes that accepts the record holding one open visit.
+  const sizing = makeJournal({ writeRecord: () => {} });
+  let low = 1;
+  let high = MAX_RUN_RECORD_BYTES;
+  while (low < high) {
+    const candidate = low + Math.floor((high - low) / 2);
+    sizing.journal.recordMaxBytes = candidate;
+    try {
+      sizing.journal._writeRun(structuredClone(stored));
+      high = candidate;
+    } catch (error) {
+      assert.equal(error.code, 'size-limit');
+      low = candidate + 1;
+    }
+  }
+
+  const constrained = makeJournal({ recordMaxBytes: low });
+  const run = await startRun(constrained.journal);
+  const visit = await startVisit(constrained.journal, run.id);
+  const second = await constrained.journal.startBlock({
+    runId: run.id,
+    opId: 'op-block-two',
+    block: { id: 'blk-prompt', index: 0, type: 'prompt', iterationPath: [] },
+  });
+  return { ...constrained, run, visit, second };
+}
+
+test('exceeding operation capacity mid-run degrades to a truncated no-op journal', async () => {
+  const dir = tmpDir();
+  const runId = '11111111-1111-4111-8111-111111111111';
+  const at = '2026-07-30T00:00:00.000Z';
+  const operations = [];
+  for (let index = 0; index < MAX_OPERATIONS - 1; index++) {
+    operations.push({
+      opId: `pad-${index}`,
+      action: 'start-run',
+      proof: { storage: STORAGE.MEMORY },
+      at,
+      refId: null,
+    });
+  }
+  writeJsonAtomic(path.join(dir, `${runId}.json`), {
+    schemaVersion: SCHEMA_VERSION,
+    id: runId,
+    revision: 1,
+    eventSeq: 1,
+    status: RUN_STATUS.RUNNING,
+    startedAt: at,
+    updatedAt: at,
+    finishedAt: null,
+    workflow: { id: 'wf-demo', name: 'Demo workflow', formatVersion: 1, blockCount: 1 },
+    trigger: { kind: 'manual' },
+    snapshot: { storage: STORAGE.MEMORY, byteLength: 16 },
+    blocks: [],
+    results: [],
+    operations,
+    events: [{ seq: 1, type: 'run.started', at }],
+  });
+
+  const { journal } = makeJournal({ dir });
+  const degradedVisit = await journal.startBlock({
+    runId,
+    opId: 'op-over-capacity',
+    block: { id: 'blk-prompt', index: 0, type: 'prompt', iterationPath: [] },
+  });
+  assert.equal(degradedVisit.truncated, true);
+  assert.equal(degradedVisit.status, BLOCK_STATUS.RUNNING);
+  assert.equal(degradedVisit.blockId, 'blk-prompt');
+
+  const afterTruncation = await journal.getRun(runId);
+  assert.equal(afterTruncation.status, RUN_STATUS.RUNNING);
+  assert.equal(afterTruncation.truncated.reason, 'operation-capacity');
+  assert.equal(afterTruncation.blocks.length, 0, 'the over-capacity visit is not recorded');
+
+  const laterVisit = await journal.startBlock({
+    runId,
+    opId: 'op-still-degraded',
+    block: { id: 'blk-prompt', index: 0, type: 'prompt', iterationPath: [] },
+  });
+  assert.equal(laterVisit.truncated, true);
+  const laterResult = await journal.storeResult({
+    runId,
+    producerBlockId: 'blk-prompt',
+    visitId: degradedVisit.visitId,
+    name: 'late',
+    status: 'complete',
+    lanes: [{ laneId: 'lane-a' }],
+    body: 'dropped body',
+    opId: 'op-late-result',
+  });
+  assert.equal(laterResult.truncated, true);
+  const unchanged = await journal.getRun(runId);
+  assert.equal(unchanged.blocks.length, 0);
+  assert.equal(unchanged.results.length, 0);
+  assert.equal(unchanged.status, RUN_STATUS.RUNNING);
+
+  const finished = await journal.finishRun({
+    runId,
+    status: RUN_STATUS.COMPLETED,
+    opId: 'op-run-finish',
+  });
+  assert.equal(finished.status, RUN_STATUS.COMPLETED);
+  assert.equal(finished.truncated.reason, 'operation-capacity');
+  assert.equal(finished.events.at(-1).type, 'run.finished');
+
+  const summaries = await journal.listRuns();
+  assert.equal(summaries.length, 1);
+  assert.equal(summaries[0].truncated.reason, 'operation-capacity');
+  assert.equal(summaries[0].status, RUN_STATUS.COMPLETED);
+});
+
+test('record capacity truncates mid-run and finishRun still records terminal state', async () => {
+  const { journal, run, visit, second } = await journalTruncatedByRecordCapacity();
+  assert.equal(second.truncated, true);
+  assert.equal(second.status, BLOCK_STATUS.RUNNING);
+
+  const truncatedRun = await journal.getRun(run.id);
+  assert.equal(truncatedRun.status, RUN_STATUS.RUNNING);
+  assert.equal(truncatedRun.truncated.reason, 'record-capacity');
+  assert.equal(truncatedRun.blocks.length, 1, 'the pre-truncation visit is retained');
+
+  const closed = await journal.finishBlock({
+    runId: run.id,
+    visitId: visit.visitId,
+    status: BLOCK_STATUS.COMPLETED,
+    opId: 'op-block-finish',
+  });
+  assert.equal(closed.truncated, true);
+  assert.equal(closed.status, BLOCK_STATUS.COMPLETED);
+
+  const finished = await journal.finishRun({
+    runId: run.id,
+    status: RUN_STATUS.COMPLETED,
+    opId: 'op-run-finish',
+  });
+  assert.equal(finished.status, RUN_STATUS.COMPLETED);
+  assert.equal(finished.truncated.reason, 'record-capacity');
+  assert.equal(finished.blocks[0].status, BLOCK_STATUS.INTERRUPTED);
+  assert.equal(finished.blocks[0].reasonCode, 'journal-truncated');
+  assert.equal(finished.events.at(-1).type, 'run.finished');
+});
+
+test('a truncated run round-trips through listing, read, and crash recovery', async () => {
+  const { dir, run } = await journalTruncatedByRecordCapacity();
+
+  const reopened = makeJournal({ dir }).journal;
+  const summaries = await reopened.listRuns();
+  assert.equal(summaries.length, 1);
+  assert.equal(summaries[0].id, run.id);
+  assert.equal(summaries[0].truncated.reason, 'record-capacity');
+  const read = await reopened.getRun(run.id);
+  assert.deepEqual(Object.keys(read.truncated).sort(), ['at', 'reason']);
+  assert.equal(read.truncated.reason, 'record-capacity');
+
+  const recovered = await reopened.recoverInterrupted();
+  assert.equal(recovered.length, 1);
+  assert.equal(recovered[0].status, RUN_STATUS.INTERRUPTED);
+  assert.equal(recovered[0].truncated.reason, 'record-capacity');
+  assert.equal(recovered[0].blocks[0].status, BLOCK_STATUS.INTERRUPTED);
+  assert.equal(recovered[0].blocks[0].reasonCode, 'process-recovery');
+
+  const listed = await reopened.listRuns();
+  assert.equal(listed[0].status, RUN_STATUS.INTERRUPTED);
+  assert.equal(listed[0].truncated.reason, 'record-capacity');
+});
