@@ -102,6 +102,23 @@ export const TEMPLATES = [
     ],
   },
   {
+    id: 'tpl-usage-window-prewarm',
+    name: 'Usage-window pre-warm',
+    description: 'Daily early-morning ping that starts your metered 5-hour usage window before you sit down, so the window rolls over soon after you start working. Set the schedule time to ~4–5 hours before your work start.',
+    blocks: [
+      // Example: work starts at 09:00 → schedule this at 05:00. The provider's
+      // rolling 5-hour window then spans 05:00–10:00, so a fresh window opens
+      // at 10:00 — two windows' worth of usage across one working morning.
+      { type: 'schedule', params: { datetime: '', mode: 'cron' } },
+      { type: 'directory', params: { path: '' } },
+      { type: 'command', params: { command: 'claude --permission-mode bypassPermissions' } },
+      { type: 'agentWait', params: { profileId: '', idleMs: 1000, pattern: '', timeoutMs: 20000 } },
+      { type: 'input', params: { text: 'ping. reply ok only. (usage-window pre-warm)', pressEnter: true } },
+      { type: 'agentWait', params: { profileId: '', idleMs: 2000, pattern: '', timeoutMs: 60000 } },
+      { type: 'input', params: { text: '/exit', pressEnter: true } },
+    ],
+  },
+  {
     id: 'tpl-quick-command',
     name: 'Quick command',
     description: 'A minimal workflow: pick a directory and run a single command.',

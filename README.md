@@ -12,10 +12,24 @@ continuing only after every prompted workflow session is ready.
 
 Project references:
 
+- [Getting started](docs/getting-started.md)
 - [Architecture and safety model](docs/architecture.md)
 - [Interactive field guide](docs/README.md)
+- [Getting two usage windows out of one morning](docs/five-hour-window.md)
+- [Website plan (future)](docs/website-plan.md)
 - [Security policy](SECURITY.md)
 - [Contribution and verification guide](CONTRIBUTING.md)
+
+## Why schedule an agent? The 5-hour-window trick
+
+Subscription CLI agents meter usage in a rolling 5-hour window that starts at
+your **first message**. Schedule a trivial ping at 05:00 and the window spans
+05:00–10:00 — so when you sit down at 09:00, a *fresh* window opens at 10:00
+and one working morning spans two windows' worth of usage. The
+**Usage-window pre-warm** template ships this pattern ready to run; see the
+[full walkthrough](docs/five-hour-window.md) for tuning the ping time to your
+burn rate and pre-warming several accounts at once with a single
+`Send to All → Join Agents` stage.
 
 ## Field guide
 
