@@ -149,7 +149,11 @@ function normalizeProfile(raw) {
     throw new Error(`Unknown agent "${agent}". Known: ${Object.keys(AGENT_KINDS).join(', ')}`);
   }
   if (agent === 'codex') {
-    throw new Error('Local Codex profiles are not allowed; choose a discovered routed Codex account');
+    throw new Error(
+      'Local Codex profiles are not allowed; choose a discovered routed Codex account. ' +
+      'A legacy local Codex profile stays in agents.json untouched — recreate the ' +
+      'account as a routed alias in ai-agent-entrypoint.'
+    );
   }
   const displayName = String(raw.displayName ?? '').trim();
   if (!displayName) throw new Error('Profile needs a display name');
@@ -189,21 +193,43 @@ function emptyProfileFile() {
 }
 
 /**
+ * Read the profile file, separating loadable profiles from entries the
+ * current rules reject (for example a legacy local Codex profile saved by an
+ * older version). Rejected entries are preserved verbatim so a rules change
+ * never destroys user data on the next write.
+ */
+function readProfileFile(filePath) {
+  const raw = readJson(filePath, null);
+  const list = Array.isArray(raw?.profiles) ? raw.profiles : [];
+  const valid = [];
+  const rejected = [];
+  for (const entry of list) {
+    try {
+      valid.push(normalizeProfile(entry));
+    } catch (err) {
+      rejected.push({ entry, error: err });
+    }
+  }
+  return { valid, rejected };
+}
+
+function rejectedEntryId(rejectedItem) {
+  const id = rejectedItem?.entry?.id;
+  return typeof id === 'string' ? id.trim() : null;
+}
+
+/**
  * Read local profiles. A malformed entry is skipped rather than failing the
  * whole list, so one bad profile never hides the rest.
  */
 function loadLocalProfiles(filePath, onError = null) {
-  const raw = readJson(filePath, null);
-  const list = Array.isArray(raw?.profiles) ? raw.profiles : [];
-  const out = [];
-  for (const entry of list) {
-    try {
-      out.push(normalizeProfile(entry));
-    } catch (err) {
-      if (onError) onError(entry?.id ?? '(unnamed)', err);
+  const { valid, rejected } = readProfileFile(filePath);
+  if (onError) {
+    for (const item of rejected) {
+      onError(rejectedEntryId(item) ?? '(unnamed)', item.error);
     }
   }
-  return out;
+  return valid;
 }
 
 /**
@@ -215,7 +241,7 @@ function loadLocalProfiles(filePath, onError = null) {
  * means "unchanged", while an explicit `{}` clears the account selection.
  */
 function saveLocalProfile(filePath, raw) {
-  const profiles = loadLocalProfiles(filePath);
+  const { valid: profiles, rejected } = readProfileFile(filePath);
   const existing = profiles.find(p => p.id === String(raw?.id ?? '').trim());
   const incoming = (raw && raw.env === undefined && existing)
     ? { ...raw, env: existing.env }
@@ -225,16 +251,30 @@ function saveLocalProfile(filePath, raw) {
   const idx = profiles.findIndex(p => p.id === profile.id);
   if (idx >= 0) profiles[idx] = profile;
   else profiles.push(profile);
-  writeJsonAtomic(filePath, { schemaVersion: SCHEMA_VERSION, profiles });
+  // Preserve entries the current rules reject (legacy formats) instead of
+  // erasing them on rewrite — except one being deliberately replaced by id.
+  const preserved = rejected
+    .filter(item => rejectedEntryId(item) !== profile.id)
+    .map(item => item.entry);
+  writeJsonAtomic(filePath, {
+    schemaVersion: SCHEMA_VERSION,
+    profiles: [...profiles, ...preserved],
+  });
   return profile;
 }
 
 /** Remove one profile by id. Returns true when something was removed. */
 function deleteLocalProfile(filePath, id) {
-  const profiles = loadLocalProfiles(filePath);
+  const { valid: profiles, rejected } = readProfileFile(filePath);
   const kept = profiles.filter(p => p.id !== id);
-  if (kept.length === profiles.length) return false;
-  writeJsonAtomic(filePath, { schemaVersion: SCHEMA_VERSION, profiles: kept });
+  const keptRejected = rejected.filter(item => rejectedEntryId(item) !== id);
+  if (kept.length === profiles.length && keptRejected.length === rejected.length) {
+    return false;
+  }
+  writeJsonAtomic(filePath, {
+    schemaVersion: SCHEMA_VERSION,
+    profiles: [...kept, ...keptRejected.map(item => item.entry)],
+  });
   return true;
 }
 

@@ -429,6 +429,28 @@ test('SGR-concealed text cannot forge a visible result frame', async () => {
   assert.equal(result.capture.text, 'visible result');
 });
 
+test('256-color and truecolor SGR arguments are not read as conceal', async () => {
+  const { reg, pty } = makeRegistry();
+  const { id } = reg.create(SPEC);
+  const startMarker = '<<<DIM:BEGIN>>>';
+  const endMarker = '<<<DIM:END>>>';
+  const waiting = reg.waitForOutput(id, {
+    idleMs: 0,
+    timeoutMs: 500,
+    capture: { startMarker, endMarker, maxBytes: 100 },
+  });
+
+  // 38;5;8 selects palette color 8 (a very common dim gray); the trailing
+  // "8" is a color index, never the conceal attribute. Same for 48;2;r;g;b.
+  pty.spawned[0].emitData(
+    `\x1b[38;5;8m${startMarker}dim result\x1b[48;2;8;8;8m${endMarker}\x1b[0m`
+  );
+  const result = await waiting;
+  assert.equal(result.reason, 'match');
+  assert.equal(result.capture.complete, true);
+  assert.equal(result.capture.text, 'dim result');
+});
+
 test('redraw and hidden controls cannot join visible marker fragments', async () => {
   const { reg, pty } = makeRegistry();
   const { id } = reg.create(SPEC);

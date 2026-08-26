@@ -414,11 +414,20 @@ function createWindow() {
     'did-frame-navigate',
     (_event, _url, _code, _status, isMainFrame) => {
       if (!isMainFrame || !rendererLifecycle.didNavigateCommit()) return;
+      if (containmentEnabled && rendererContainment.failed) {
+        // A committed replacement renderer is the recovery point after a
+        // failed cleanup sweep: rerun the sweep so a single failure does not
+        // block every future run and session until an app restart.
+        beginRendererContainment('renderer recovered after failed cleanup', {
+          advanceEpoch: false,
+          newIncident: true,
+        });
+      }
       rendererContainment.commitRenderer();
       committedRendererToken = rendererContainment.getCommittedToken();
     }
   );
-  mainWindow.webContents.on('dom-ready', () => {
+  const deliverDocumentToken = () => {
     const token = rendererContainment.getCommittedToken();
     if (
       app.isQuitting
@@ -428,6 +437,16 @@ function createWindow() {
     // Preload installed this private listener before dom-ready. The token never
     // crosses contextBridge into page JavaScript.
     sendToRenderer('renderer-document-token', token);
+  };
+  mainWindow.webContents.on('dom-ready', deliverDocumentToken);
+  // The dom-ready delivery can race a navigation that momentarily cleared the
+  // committed token. The preload re-requests until a token arrives, so a lost
+  // first message cannot leave the document permanently unable to call IPC.
+  ipcMain.removeAllListeners('renderer-document-token-request');
+  ipcMain.on('renderer-document-token-request', (event) => {
+    const expected = getUsableWebContents(mainWindow);
+    if (!expected || event.sender !== expected) return;
+    deliverDocumentToken();
   });
   if (containmentEnabled) {
     mainWindow.webContents.on('render-process-gone', () => {

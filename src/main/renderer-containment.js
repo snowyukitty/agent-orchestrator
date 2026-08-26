@@ -141,6 +141,11 @@ class RendererContainmentCoordinator {
     return this.requireCommittedEpoch();
   }
 
+  /** True while a failed cleanup sweep is latched and blocking admission. */
+  get failed() {
+    return this._failure !== null;
+  }
+
   _advanceEpoch() {
     this._epoch += 1;
     return this._epoch;
@@ -228,10 +233,12 @@ class RendererContainmentCoordinator {
     { advanceEpoch = true, newIncident = advanceEpoch } = {}
   ) {
     if (this._incident) {
-      if (newIncident && this._incident.settled && !this._failure) {
+      if (newIncident && this._incident.settled) {
         // A replacement document may begin issuing IPC after the prior cleanup
         // settles but before its load finishes. Losing that document is a new
-        // incident and needs a fresh kill/recovery sweep.
+        // incident and needs a fresh kill/recovery sweep. A settled *failed*
+        // sweep gets the same fresh sweep: the failure below is cleared for
+        // the retry and re-latches if this attempt also fails.
         this._incident = null;
         return this.contain(reason, { advanceEpoch, newIncident: true });
       }
@@ -247,7 +254,15 @@ class RendererContainmentCoordinator {
       return this._incident.promise;
     }
     if (this._failure) {
-      return Promise.reject(new RendererContainmentError(this._failure));
+      if (!newIncident) {
+        return Promise.reject(new RendererContainmentError(this._failure));
+      }
+      // A new incident is a fresh chance to finish the kill/recovery sweep.
+      // Without this, one failed pass would block every future run and
+      // session until an app restart. Fail-closed still holds: admission
+      // stays blocked until this sweep succeeds, and a second failure
+      // latches again.
+      this._failure = null;
     }
 
     if (advanceEpoch) {

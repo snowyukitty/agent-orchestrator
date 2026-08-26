@@ -7,13 +7,47 @@ const { contextBridge, ipcRenderer } = require('electron');
 // Main mints one opaque token for each committed top-level document and sends
 // it at dom-ready. It stays in this isolated preload closure; page JavaScript
 // receives only the fixed API methods below.
-const documentToken = new Promise((resolve) => {
-  ipcRenderer.once('renderer-document-token', (_event, token) => {
-    if (typeof token === 'string' && token.length >= 16) resolve(token);
-  });
+//
+// Delivery must not be a single fire-and-forget message: dom-ready can race a
+// navigation that clears main's committed token, and a lost message would
+// otherwise leave every window.api call awaiting forever with no error. So
+// the listener is persistent, the preload re-requests the token until it
+// arrives, and callers get a visible rejection instead of a silent hang.
+const TOKEN_REQUEST_INTERVAL_MS = 2000;
+const TOKEN_WAIT_LIMIT_MS = 30000;
+
+let resolveDocumentToken;
+const documentToken = new Promise((resolve) => { resolveDocumentToken = resolve; });
+let tokenDelivered = false;
+ipcRenderer.on('renderer-document-token', (_event, token) => {
+  if (tokenDelivered) return;
+  if (typeof token === 'string' && token.length >= 16) {
+    tokenDelivered = true;
+    resolveDocumentToken(token);
+  }
 });
+const tokenRequestTimer = setInterval(() => {
+  if (tokenDelivered) {
+    clearInterval(tokenRequestTimer);
+    return;
+  }
+  ipcRenderer.send('renderer-document-token-request');
+}, TOKEN_REQUEST_INTERVAL_MS);
+setTimeout(() => clearInterval(tokenRequestTimer), TOKEN_WAIT_LIMIT_MS);
+
+const documentTokenOrFail = () => Promise.race([
+  documentToken,
+  new Promise((_resolve, reject) => {
+    setTimeout(() => {
+      reject(new Error(
+        'The renderer never received its document token from the main process; reload the window'
+      ));
+    }, TOKEN_WAIT_LIMIT_MS);
+  }),
+]);
+
 const invokeTrusted = async (channel, ...args) => (
-  ipcRenderer.invoke(channel, ...args, await documentToken)
+  ipcRenderer.invoke(channel, ...args, await (tokenDelivered ? documentToken : documentTokenOrFail()))
 );
 
 const api = {

@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { ShutdownCoordinator } = require('../src/main/shutdown');
+const { ShutdownCoordinator, MAX_DRAIN_ATTEMPTS } = require('../src/main/shutdown');
 
 function deferred() {
   let resolve;
@@ -71,23 +71,58 @@ test('quit without a session registry still uses the two-phase gate', async () =
   assert.equal(quitRequests, 1);
 });
 
-test('a failed termination drain never allows process exit', async () => {
+test('a transiently failed drain retries and then quits cleanly', async () => {
+  // Cleanup has already destroyed the tray by the time the drain runs, so a
+  // failed drain must recover on its own — there is no UI left to ask again.
   const errors = [];
   let quitRequests = 0;
+  let killCalls = 0;
   const registry = {
     closeAdmission() {},
-    async killAllSequential() { throw new Error('termination failed'); },
+    async killAllSequential() {
+      killCalls += 1;
+      if (killCalls === 1) throw new Error('termination failed');
+    },
     async whenTerminationsComplete() {},
   };
   const coordinator = new ShutdownCoordinator({
     getRegistry: () => registry,
     requestQuit: () => { quitRequests += 1; },
     onError: err => errors.push(err.message),
+    schedule: (fn) => { fn(); },
   });
 
   coordinator.handleBeforeQuit({ preventDefault() {} });
   await coordinator.whenDrained();
-  assert.equal(quitRequests, 0);
+  assert.equal(killCalls, 2);
   assert.deepEqual(errors, ['termination failed']);
-  assert.equal(coordinator.ready, false);
+  assert.equal(quitRequests, 1);
+  assert.equal(coordinator.ready, true);
+});
+
+test('a permanently wedged drain still exits instead of leaving a zombie', async () => {
+  const errors = [];
+  let quitRequests = 0;
+  let killCalls = 0;
+  const registry = {
+    closeAdmission() {},
+    async killAllSequential() {
+      killCalls += 1;
+      throw new Error('session-termination-timeout');
+    },
+    async whenTerminationsComplete() {},
+  };
+  const coordinator = new ShutdownCoordinator({
+    getRegistry: () => registry,
+    requestQuit: () => { quitRequests += 1; },
+    onError: err => errors.push(err.message),
+    schedule: (fn) => { fn(); },
+  });
+
+  coordinator.handleBeforeQuit({ preventDefault() {} });
+  await coordinator.whenDrained();
+  assert.equal(killCalls, MAX_DRAIN_ATTEMPTS);
+  assert.equal(errors.length, MAX_DRAIN_ATTEMPTS);
+  assert.equal(quitRequests, 1, 'the process must still exit');
+  assert.equal(coordinator.ready, true);
 });

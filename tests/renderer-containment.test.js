@@ -528,6 +528,60 @@ test('a stale deferred journal start is recovered before new journal IPC runs', 
   assert.equal(runStatus, 'running');
 });
 
+test('a failed cleanup sweep is retried by a new incident and unlatches on success', async () => {
+  let sessionCalls = 0;
+  let recoveryCalls = 0;
+  const coordinator = committedCoordinator({
+    containSessions() {
+      sessionCalls += 1;
+      // First and second sweeps fail (e.g. a transiently wedged ConPTY);
+      // the third succeeds after the backstop kill finally lands.
+      if (sessionCalls <= 2) return Promise.reject(new Error(`wedged ${sessionCalls}`));
+      return Promise.resolve();
+    },
+    recoverJournal() {
+      recoveryCalls += 1;
+      return Promise.resolve();
+    },
+  });
+
+  await assert.rejects(coordinator.contain('renderer lost'), /wedged 1/);
+  assert.equal(coordinator.failed, true);
+
+  // Without a new incident, admission stays failed closed.
+  coordinator.commitRenderer();
+  const epoch = coordinator.captureEpoch();
+  await assert.rejects(
+    coordinator.waitUntilSafe(epoch),
+    error => error instanceof RendererContainmentError
+  );
+
+  // A fresh incident retries the sweep; a second failure latches again.
+  await assert.rejects(
+    coordinator.contain('renderer recovered after failed cleanup', {
+      advanceEpoch: false,
+      newIncident: true,
+    }),
+    /wedged 2/
+  );
+  assert.equal(coordinator.failed, true);
+
+  // The next retry succeeds and unlatches admission.
+  await coordinator.contain('renderer recovered after failed cleanup', {
+    advanceEpoch: false,
+    newIncident: true,
+  });
+  assert.equal(coordinator.failed, false);
+  coordinator.commitRenderer();
+  const recoveredEpoch = coordinator.captureEpoch();
+  await coordinator.waitUntilSafe(recoveredEpoch);
+  let ran = false;
+  await coordinator.runJournal(recoveredEpoch, async () => { ran = true; });
+  assert.equal(ran, true);
+  assert.equal(sessionCalls, 3);
+  assert.equal(recoveryCalls, 3);
+});
+
 for (const failingStage of ['sessions', 'journal']) {
   test(`${failingStage} containment failure permanently fails journal IPC closed`, async () => {
     const expected = new Error(`${failingStage} failed`);

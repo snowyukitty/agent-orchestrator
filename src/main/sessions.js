@@ -152,7 +152,8 @@ function applySgrState(state) {
     return;
   }
   const fields = state.csi === '' ? ['0'] : state.csi.split(';');
-  for (const field of fields) {
+  for (let i = 0; i < fields.length; i += 1) {
+    const field = fields[i];
     const primary = field.split(':', 1)[0];
     if (!/^\d*$/.test(primary)) continue;
     const code = primary === '' ? 0 : Number(primary);
@@ -161,6 +162,14 @@ function applySgrState(state) {
     } else if (code === 8) {
       state.concealed = true;
       state.concealSeen = true;
+    } else if ((code === 38 || code === 48 || code === 58) && field === primary) {
+      // Semicolon-form extended color (e.g. 38;5;8 or 48;2;r;g;b): the
+      // arguments that follow are color components, not SGR attributes.
+      // Skip them so a 256-color index of 8 is never read as "conceal".
+      // (The colon form 38:5:8 arrives as a single field and needs no skip.)
+      const next = fields[i + 1];
+      if (next === '5') i += 2;
+      else if (next === '2') i += 4;
     }
   }
 }

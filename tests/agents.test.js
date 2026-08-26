@@ -179,6 +179,38 @@ test('one malformed stored profile does not hide the others', () => {
   assert.deepEqual(errors, ['broken']);
 });
 
+test('entries the current rules reject survive saves and are removable by id', () => {
+  // A legacy local Codex profile written by an older version no longer
+  // normalizes. It must be skipped at load but never destroyed by a rewrite.
+  const file = tmpFile();
+  const legacyCodex = {
+    id: 'codex-old', agent: 'codex', displayName: 'Codex · legacy',
+    env: { CODEX_HOME: 'C:/state/codex-old' },
+  };
+  fs.writeFileSync(file, JSON.stringify({
+    schemaVersion: 1,
+    profiles: [legacyCodex, CLAUDE_WORK],
+  }));
+
+  assert.deepEqual(agents.loadLocalProfiles(file).map(p => p.id), ['claude-work']);
+
+  // Saving an unrelated profile rewrites the file but keeps the legacy entry.
+  agents.saveLocalProfile(file, { ...CLAUDE_WORK, id: 'grok-main', agent: 'grok', displayName: 'Grok', env: {} });
+  let stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.ok(stored.profiles.some(p => p.id === 'codex-old'), 'legacy entry preserved on save');
+
+  // Deleting an unrelated profile also keeps it.
+  assert.equal(agents.deleteLocalProfile(file, 'grok-main'), true);
+  stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.ok(stored.profiles.some(p => p.id === 'codex-old'), 'legacy entry preserved on delete');
+
+  // Deleting the legacy entry itself works, by id.
+  assert.equal(agents.deleteLocalProfile(file, 'codex-old'), true);
+  stored = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.ok(!stored.profiles.some(p => p.id === 'codex-old'));
+  assert.deepEqual(agents.loadLocalProfiles(file).map(p => p.id), ['claude-work']);
+});
+
 test('a saved profile file never contains a credential-shaped key', () => {
   const file = tmpFile();
   assert.throws(
