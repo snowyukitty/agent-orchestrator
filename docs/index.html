@@ -35,6 +35,7 @@
       <a href="#compose">Compose</a>
       <a href="#wait">Join Lab</a>
       <a href="#integrity">Integrity</a>
+      <a href="#prewarm">Pre-warm</a>
       <a href="#architecture">Boundaries</a>
     </nav>
 
@@ -498,6 +499,50 @@
           commands cannot receive it. Each record has a hard size bound, while
           listing and recovery still scan retained history; pagination and a
           metadata index belong with the future resume milestone.
+        </p>
+      </div>
+    </section>
+
+    <section class="guide-section section-shell" id="prewarm" aria-labelledby="prewarm-title">
+      <div class="section-heading split-heading">
+        <div>
+          <p class="section-kicker">SCHEDULED PRE-WARM</p>
+          <h2 id="prewarm-title">One morning, two usage windows.</h2>
+        </div>
+        <p>
+          Metered CLI-agent plans start a rolling 5-hour usage window at your
+          first message. A scheduled early ping decides when that clock starts
+          — before you even sit down.
+        </p>
+      </div>
+
+      <div class="integrity-grid">
+        <article>
+          <span class="integrity-mark">05:00</span>
+          <h3>The scheduled ping</h3>
+          <p>A daily <em>cron</em> workflow opens the agent, sends one trivial prompt, and exits. The provider's 5-hour window now spans 05:00–10:00.</p>
+        </article>
+        <article>
+          <span class="integrity-mark">09:00</span>
+          <h3>You start working</h3>
+          <p>Your real session lands in the tail of the pre-warmed window instead of opening a fresh one that would run until 14:00.</p>
+        </article>
+        <article>
+          <span class="integrity-mark">10:00</span>
+          <h3>The window rolls over</h3>
+          <p>Your next prompt opens a fresh 10:00–15:00 window. One working morning spans two windows' worth of usage — per account, so multi-account fan-out pre-warms every login at once.</p>
+        </article>
+      </div>
+
+      <div class="integrity-note">
+        <span aria-hidden="true">≠</span>
+        <p>
+          This shifts when a window you already pay for begins; it does not
+          create free usage, and weekly caps are unaffected. The
+          <strong>Usage-window pre-warm</strong> template ships the pattern
+          ready to run — tune the ping time to your own burn rate, and keep
+          the machine awake for the scheduled minute (the heartbeat survives
+          tray and lock, not sleep).
         </p>
       </div>
     </section>
