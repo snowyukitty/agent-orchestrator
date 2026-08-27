@@ -10,6 +10,9 @@ purpose — items land when they are verified, not when a calendar says so.
 - **Field guide live** — GitHub Pages at
   <https://snowyukitty.github.io/agent-orchestrator/>, mirrored on Cloudflare
   Pages (shipped).
+- **Journal scale and retention** — stable cursor pages now read a rebuildable
+  public-metadata index; count/age pruning is preview-first, user-confirmed,
+  and excludes active runs (implemented on `main`, unreleased).
 - **Promo media** — two HyperFrames explainers (product overview, 5-hour
   window) and a 30 s cinematic hero b-roll exist as candidates behind their
   human review gates; they attach to the README and website once reviewed.
@@ -19,8 +22,6 @@ purpose — items land when they are verified, not when a calendar says so.
 - **Resume design** — the journal already records immutable snapshots and
   ordered visits with terminal states; v0.5 designs (not necessarily ships)
   restart-from-evidence for interrupted runs.
-- **Journal retention policy** — explicit, configurable pruning plus a
-  paginated metadata index, so large histories stop paying a linear scan.
 - **Licensing decision** — the repository is public but carries no license,
   which legally means "all rights reserved" and blocks adoption. Choosing one
   (MIT/Apache-2.0 vs. something protective) is an owner decision.

@@ -85,6 +85,19 @@ broadcast.
 
 ### Release Notes
 
+#### Unreleased (Indexed Run History + Explicit Retention)
+
+- **Cursor-paged run history**: **📖 Runs** reads a rebuildable public-metadata
+  index and loads 50 entries at a time. Newer runs do not shift an issued
+  cursor, and ordinary refreshes no longer parse every protected run record.
+- **Preview-first retention**: choose a terminal-run count, an age limit, or
+  both, then preview the exact match count before confirming deletion. Active
+  runs are always excluded and no policy runs automatically.
+- **Crash-safe derived state**: run files remain the source of truth. A durable
+  dirty marker makes an interrupted index update rebuild from those records;
+  corrupt indexes are reported and replaced without exposing result bodies,
+  ciphertext, or machine-local paths.
+
 #### v0.4.0 (Durable Run Journal + Result Handoff + Singular Identity)
 - **One canonical name everywhere**: repository, npm package, checkout, AppData, documentation, and build artifact now use `agent-orchestrator` / **Agent Orchestrator**.
 - **Safe user-data migration**: the first singular build validates and copies app-owned JSON (`settings.json`, local agent profiles, workflows, and any run journal) from the historical plural AppData directory through a staging directory, then atomically promotes it.
@@ -242,7 +255,12 @@ broadcast.
   trigger, ordered block visits, terminal status, and explicit result metadata.
   Snapshots and result bodies are protected with Electron `safeStorage`; bodies
   are fetched and decrypted only on request. No-encryption environments fall
-  back to bounded memory, never plaintext files.
+  back to bounded memory, never plaintext files. A rebuildable metadata index
+  serves stable cursor pages without copying ciphertext or result bodies.
+- **Explicit Journal Retention**: **📖 Runs** can preview and apply a count
+  limit, an age limit, or both to terminal runs. Active runs are never selected,
+  history is never pruned automatically, and a changed preview must be reviewed
+  again before deletion.
 - **Loops**: A **Loop** block repeats every block up to its matching **End Loop** a configurable number of times. Nested loops are supported and the loop body is indented (with a continuous nesting rail) so the structure is readable at a glance. A live iteration badge (`2/3`) tracks progress during a run, unbalanced loop markers are flagged inline (dashed outline + tooltip) and summarized in a banner, and the engine still runs safely by skipping broken markers.
 - **Drag-to-Position Editing**: Blocks dragged from the palette land exactly where they are dropped (with a live insertion-line preview); they can still be reordered afterward by their drag handles.
 - **Templates**: A **🧩 Templates** picker provides pre-built workflows (including a Loop example) as one-click starting points.
@@ -317,13 +335,12 @@ broadcast.
   completed visits are durable enough to inform a future resume design, but
   v0.4 does not restart them. Workflows remain ordered block programs with
   structured Loop / End Loop pairs, not a general-purpose DAG.
-- **Journal retention is explicit**: encrypted journal files are not
-  age-pruned automatically in v0.4. Delete individual runs from **📖 Runs**
-  when they are no longer useful; a configurable retention policy belongs in
-  a later release so history is never removed by an implicit default. Listing
-  and crash recovery currently scan the retained records (each record is
-  hard-bounded), so very large histories have linear scan cost; a paginated
-  metadata index belongs with the resume milestone.
+- **Journal retention is explicit**: encrypted journal files are never pruned
+  automatically. Individual deletion remains available, while preview-first
+  retention can match terminal runs by count and/or age; active runs are always
+  kept. Cursor-paged listing reads a derived metadata index. Startup recovery
+  still validates retained source records so an unknowable active run fails
+  containment closed, and a dirty or corrupt index is rebuilt from those files.
 - **CLI-specific prompt controls**: Highly interactive CLIs can consume the first Enter, so typed submission still uses a deliberate double-tap. When a workflow needs proof of a semantic response, configure `Wait for Agent` or `Join Agents` with **Output contains**; idle-only completion observes silence, not success.
 - **Terminal Layout Shifts**: Xterm dimensions may occasionally desync with the internal PTY dimensions if the window is resized very rapidly while a process is initializing.
 
@@ -341,6 +358,9 @@ npm run check
 
 # Run a quick Electron startup/shutdown smoke test
 npm run smoke
+
+# Open the normal UI against disposable test data for visual QA
+npm run visual
 
 # Run both suites: main-process unit tests + the headless renderer self-test
 npm test

@@ -135,6 +135,10 @@ async function startVisit(journal, runId, overrides = {}) {
   });
 }
 
+async function listRuns(journal, options = undefined) {
+  return (await journal.listRuns(options)).runs;
+}
+
 function onlyJournalFile(dir) {
   const files = fs.readdirSync(dir).filter(file => file.endsWith('.json'));
   assert.equal(files.length, 1);
@@ -554,7 +558,7 @@ test('failed startRun restores terminal payloads evicted by its snapshot allocat
     'terminal body must survive'
   );
   assert.equal((await startRun(journal)).id, first.id, 'operation proofs are restored too');
-  assert.deepEqual((await journal.listRuns()).map(run => run.id), [first.id]);
+  assert.deepEqual((await listRuns(journal)).map(run => run.id), [first.id]);
 });
 
 test('failed storeResult restores terminal payloads evicted by its body allocation', async () => {
@@ -1125,7 +1129,8 @@ test('completed run requires terminal block visits and active runs alone are und
   assert.ok(completed.finishedAt);
   assert.equal(await journal.deleteRun({ runId: run.id, opId: 'op-delete' }), true);
   assert.equal(await journal.deleteRun({ runId: run.id, opId: 'op-delete' }), false);
-  assert.deepEqual(fs.readdirSync(dir), []);
+  assert.deepEqual(fs.readdirSync(dir).filter(file => file.endsWith('.json')), []);
+  assert.deepEqual(await journal.listRuns(), { runs: [], nextCursor: null, total: 0 });
 });
 
 test('recoverInterrupted atomically terminals active runs and is idempotent', async () => {
@@ -1283,7 +1288,7 @@ test('list/get skip corrupt and future files while omitting ciphertext and bodie
     ciphertext: 'should-not-matter',
   });
 
-  const listed = await journal.listRuns();
+  const listed = await listRuns(journal);
   assert.equal(listed.length, 1);
   assert.equal(listed[0].id, run.id);
   assert.equal(Object.hasOwn(listed[0].snapshot, 'ciphertext'), false);
@@ -1301,6 +1306,206 @@ test('list/get skip corrupt and future files while omitting ciphertext and bodie
   assert.ok(errors.some(([file]) => file === `${futureId}.json`));
 });
 
+test('metadata index serves stable cursor pages and contains public summaries only', async () => {
+  const { journal, dir } = makeJournal();
+  const created = [];
+  for (let index = 0; index < 5; index += 1) {
+    const run = await journal.startRun({
+      workflow: workflow({ id: `wf-page-${index}`, name: `Page ${index}` }),
+      trigger: { kind: 'manual' },
+      opId: `page-start-${index}`,
+    });
+    await journal.finishRun({
+      runId: run.id,
+      status: RUN_STATUS.COMPLETED,
+      opId: `page-finish-${index}`,
+    });
+    created.push(run);
+  }
+
+  const first = await journal.listRuns({ limit: 2 });
+  assert.deepEqual(first.runs.map(run => run.id), [created[4].id, created[3].id]);
+  assert.equal(first.total, 5);
+  assert.match(first.nextCursor, /^[A-Za-z0-9_-]+$/);
+
+  const newest = await journal.startRun({
+    workflow: workflow({ id: 'wf-page-new', name: 'Newest' }),
+    trigger: { kind: 'manual' },
+    opId: 'page-start-new',
+  });
+  await journal.finishRun({
+    runId: newest.id,
+    status: RUN_STATUS.COMPLETED,
+    opId: 'page-finish-new',
+  });
+
+  const second = await journal.listRuns({ limit: 2, cursor: first.nextCursor });
+  assert.deepEqual(second.runs.map(run => run.id), [created[2].id, created[1].id]);
+  assert.equal(second.total, 6, 'newer inserts do not shift an issued cursor');
+  assert.ok(second.nextCursor);
+  const third = await journal.listRuns({ limit: 2, cursor: second.nextCursor });
+  assert.deepEqual(third.runs.map(run => run.id), [created[0].id]);
+  assert.equal(third.nextCursor, null);
+
+  const indexFile = path.join(dir, '.index', 'runs-v1.json');
+  const indexText = fs.readFileSync(indexFile, 'utf8');
+  assert.equal(indexText.includes('PRIVATE WORKFLOW BODY'), false);
+  assert.equal(indexText.includes('ciphertext'), false);
+  assert.equal(indexText.includes('operations'), false);
+  assert.equal(indexText.includes(dir), false);
+  assert.equal(JSON.parse(indexText).runs.length, 6);
+
+  const reopened = makeJournal({ dir }).journal;
+  const durablePage = await reopened.listRuns({ limit: 1 });
+  assert.equal(durablePage.runs[0].id, newest.id);
+  assert.equal(durablePage.total, 6);
+  await assert.rejects(
+    reopened.listRuns({ cursor: 'not-a-real-cursor' }),
+    error => error instanceof RunJournalError && error.code === 'invalid-input'
+  );
+});
+
+test('a corrupt metadata index is reported and rebuilt from source records', async () => {
+  const reports = [];
+  const { journal, dir } = makeJournal();
+  const run = await startRun(journal);
+  await journal.listRuns({ limit: 1 });
+  const indexFile = path.join(dir, '.index', 'runs-v1.json');
+  fs.writeFileSync(indexFile, '{broken', 'utf8');
+
+  const reopened = makeJournal({
+    dir,
+    onError: (file, error) => reports.push([path.basename(file), error.name]),
+  }).journal;
+  const page = await reopened.listRuns({ limit: 1 });
+  assert.equal(page.runs[0].id, run.id);
+  assert.equal(page.total, 1);
+  assert.deepEqual(reports, [['runs-v1.json', 'SyntaxError']]);
+  assert.equal(JSON.parse(fs.readFileSync(indexFile, 'utf8')).runs.length, 1);
+});
+
+test('active run events stay in the in-memory index until one terminal commit', async () => {
+  const { journal, dir } = makeJournal();
+  const baseline = await startRun(journal);
+  await journal.finishRun({
+    runId: baseline.id,
+    status: RUN_STATUS.COMPLETED,
+    opId: 'index-baseline-finish',
+  });
+  await journal.listRuns({ limit: 10 });
+  const indexFile = path.join(dir, '.index', 'runs-v1.json');
+  const dirtyFile = path.join(dir, '.index', 'dirty-v1.json');
+  const baselineIndex = fs.readFileSync(indexFile, 'utf8');
+
+  const active = await journal.startRun({
+    workflow: workflow({ id: 'wf-index-active', name: 'Index active' }),
+    trigger: { kind: 'manual' },
+    opId: 'index-active-start',
+  });
+  await startVisit(journal, active.id, { opId: 'index-active-visit' });
+  assert.equal(fs.existsSync(dirtyFile), true);
+  assert.equal(fs.readFileSync(indexFile, 'utf8'), baselineIndex);
+  const livePage = await journal.listRuns({ limit: 10 });
+  assert.equal(livePage.runs[0].id, active.id);
+  assert.equal(livePage.runs[0].status, RUN_STATUS.RUNNING);
+  assert.equal(fs.existsSync(dirtyFile), true, 'listing does not clean an active projection');
+
+  await journal.finishRun({
+    runId: active.id,
+    status: RUN_STATUS.CANCELLED,
+    opId: 'index-active-finish',
+  });
+  assert.equal(fs.existsSync(dirtyFile), false);
+  const durableIndex = JSON.parse(fs.readFileSync(indexFile, 'utf8'));
+  assert.equal(durableIndex.runs[0].id, active.id);
+  assert.equal(durableIndex.runs[0].status, RUN_STATUS.CANCELLED);
+});
+
+test('retention previews exact terminal candidates, rejects stale plans, and never prunes active runs', async () => {
+  let current = Date.parse('2026-01-01T00:00:00.000Z');
+  const now = () => new Date(current);
+  const { journal } = makeJournal({ now });
+  const terminal = [];
+  for (let index = 0; index < 3; index += 1) {
+    const run = await journal.startRun({
+      workflow: workflow({ id: `wf-retain-${index}`, name: `Retain ${index}` }),
+      trigger: { kind: 'manual' },
+      opId: `retain-start-${index}`,
+    });
+    await journal.finishRun({
+      runId: run.id,
+      status: RUN_STATUS.COMPLETED,
+      opId: `retain-finish-${index}`,
+    });
+    terminal.push(run);
+    current += 24 * 60 * 60 * 1000;
+  }
+
+  const stalePreview = await journal.pruneRuns({ maxRuns: 2, preview: true });
+  assert.equal(stalePreview.candidateCount, 1);
+  const inserted = await journal.startRun({
+    workflow: workflow({ id: 'wf-retain-new', name: 'Retain new' }),
+    trigger: { kind: 'manual' },
+    opId: 'retain-start-new',
+  });
+  await journal.finishRun({
+    runId: inserted.id,
+    status: RUN_STATUS.COMPLETED,
+    opId: 'retain-finish-new',
+  });
+  await assert.rejects(
+    journal.pruneRuns({
+      maxRuns: 2,
+      preview: false,
+      previewToken: stalePreview.previewToken,
+      opId: 'prune-stale',
+    }),
+    error => error instanceof RunJournalError && error.code === 'prune-preview-stale'
+  );
+  assert.equal((await journal.listRuns()).total, 4);
+
+  const countPreview = await journal.pruneRuns({ maxRuns: 2, preview: true });
+  assert.equal(countPreview.candidateCount, 2);
+  const applied = await journal.pruneRuns({
+    maxRuns: 2,
+    preview: false,
+    previewToken: countPreview.previewToken,
+    opId: 'prune-count',
+  });
+  assert.equal(applied.deletedCount, 2);
+  assert.deepEqual(
+    await journal.pruneRuns({
+      maxRuns: 2,
+      preview: false,
+      previewToken: countPreview.previewToken,
+      opId: 'prune-count',
+    }),
+    applied,
+    'same-process retry returns the committed result'
+  );
+
+  const active = await journal.startRun({
+    workflow: workflow({ id: 'wf-retain-active', name: 'Active' }),
+    trigger: { kind: 'manual' },
+    opId: 'retain-start-active',
+  });
+  current += 100 * 24 * 60 * 60 * 1000;
+  const agePreview = await journal.pruneRuns({ maxAgeDays: 30, preview: true });
+  assert.equal(agePreview.candidateCount, 2);
+  assert.equal(agePreview.activeCount, 1);
+  const ageApplied = await journal.pruneRuns({
+    maxAgeDays: 30,
+    preview: false,
+    cutoff: agePreview.cutoff,
+    previewToken: agePreview.previewToken,
+    opId: 'prune-age',
+  });
+  assert.equal(ageApplied.deletedCount, 2);
+  assert.equal((await journal.getRun(active.id)).status, RUN_STATUS.RUNNING);
+  const remaining = await journal.listRuns();
+  assert.deepEqual(remaining.runs.map(run => run.id), [active.id]);
+});
+
 test('oversized journal files are skipped before parsing and reports stay path-free', async () => {
   const errors = [];
   const dir = tmpDir();
@@ -1316,7 +1521,7 @@ test('oversized journal files are skipped before parsing and reports stay path-f
     }),
   });
 
-  assert.deepEqual(await journal.listRuns(), []);
+  assert.deepEqual(await listRuns(journal), []);
   assert.deepEqual(errors.map(error => [error.file, error.code]), [
     ['oversized.json', 'json-file-too-large'],
   ]);
@@ -1600,7 +1805,7 @@ test('exceeding operation capacity mid-run degrades to a truncated no-op journal
   assert.equal(finished.truncated.reason, 'operation-capacity');
   assert.equal(finished.events.at(-1).type, 'run.finished');
 
-  const summaries = await journal.listRuns();
+  const summaries = await listRuns(journal);
   assert.equal(summaries.length, 1);
   assert.equal(summaries[0].truncated.reason, 'operation-capacity');
   assert.equal(summaries[0].status, RUN_STATUS.COMPLETED);
@@ -1641,7 +1846,7 @@ test('a truncated run round-trips through listing, read, and crash recovery', as
   const { dir, run } = await journalTruncatedByRecordCapacity();
 
   const reopened = makeJournal({ dir }).journal;
-  const summaries = await reopened.listRuns();
+  const summaries = await listRuns(reopened);
   assert.equal(summaries.length, 1);
   assert.equal(summaries[0].id, run.id);
   assert.equal(summaries[0].truncated.reason, 'record-capacity');
@@ -1656,7 +1861,7 @@ test('a truncated run round-trips through listing, read, and crash recovery', as
   assert.equal(recovered[0].blocks[0].status, BLOCK_STATUS.INTERRUPTED);
   assert.equal(recovered[0].blocks[0].reasonCode, 'process-recovery');
 
-  const listed = await reopened.listRuns();
+  const listed = await listRuns(reopened);
   assert.equal(listed[0].status, RUN_STATUS.INTERRUPTED);
   assert.equal(listed[0].truncated.reason, 'record-capacity');
 });

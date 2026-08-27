@@ -12,6 +12,7 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
+    "visual": "electron . --visual-test",
     "smoke": "electron . --smoke-test",
     "test": "npm run test:unit && npm run test:app",
     "test:unit": "node --test \"tests/**/*.test.js\"",

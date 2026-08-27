@@ -1,7 +1,7 @@
 # Static field guide
 
 `docs/index.html` is the zero-build, zero-backend product guide for Agent
-Orchestrator. The v0.4 guide covers assurance-aware account launch, true
+Orchestrator. The current guide covers assurance-aware account launch, true
 fan-out-before-join team stages, explicit result handoff, the durable Run
 Journal, immutable run snapshots, non-destructive scheduled execution, and
 versioned workflow loading. It is intentionally plain HTML, CSS, and
@@ -28,8 +28,11 @@ with a fixed trailing shell exit; opening the same account manually still
 leaves you at its interactive shell. Generated result contracts and handoffs
 use a separate main-process input capability: shell profiles, manual tabs, and
 composite custom commands cannot receive them. Retained journal records are
-individually size-bounded, but listing and recovery still scan the retained
-history; a paginated metadata index is deferred to the resume milestone.
+individually size-bounded and remain the source of truth. Listing uses stable
+cursor pages from a rebuildable public-metadata index; preview-first count/age
+retention is never automatic and never selects active runs. Startup recovery
+still validates source records because an unknowable active run must fail
+containment closed.
 
 Open `docs/index.html` in a browser to review it. Run `npm run check` to validate
 its local references, anchor targets, security boundary, and JavaScript syntax.

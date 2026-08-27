@@ -216,11 +216,38 @@
           <div class="sched-empty">Choose a run to inspect its timeline and explicit results.</div>
         </div>
       </div>
-      <div class="modal-footer">
-        <span class="modal-hint">
-          Raw terminal history is not journaled. Only explicit bounded results are stored locally.
-        </span>
-        <button class="btn btn-secondary btn-sm" id="btn-refresh-runs">🔄 Refresh</button>
+      <div class="modal-footer run-journal-footer">
+        <div class="run-retention-controls" aria-label="Run Journal retention">
+          <label>
+            <span>Keep newest</span>
+            <select id="runs-retain-count">
+              <option value="">No count limit</option>
+              <option value="100">100 terminal runs</option>
+              <option value="500" selected>500 terminal runs</option>
+              <option value="1000">1,000 terminal runs</option>
+              <option value="5000">5,000 terminal runs</option>
+            </select>
+          </label>
+          <label>
+            <span>Remove older than</span>
+            <select id="runs-retain-age">
+              <option value="">Never by age</option>
+              <option value="30">30 days</option>
+              <option value="90" selected>90 days</option>
+              <option value="365">1 year</option>
+            </select>
+          </label>
+          <button class="btn btn-danger btn-sm" id="btn-prune-runs">Preview prune…</button>
+        </div>
+        <div class="run-journal-footer-meta">
+          <div class="run-journal-footer-copy">
+            <span class="modal-hint">Raw terminal history is never journaled.</span>
+            <span class="modal-hint" id="runs-retention-status" aria-live="polite">
+              Nothing is pruned automatically. Active runs are always kept.
+            </span>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="btn-refresh-runs">🔄 Refresh</button>
+        </div>
       </div>
     </div>
   </div>

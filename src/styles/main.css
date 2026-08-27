@@ -1558,6 +1558,62 @@ html, body {
 .run-journal-list { padding: var(--sp-2); }
 .run-journal-detail { padding: var(--sp-4); }
 
+.run-list-page {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-1) var(--sp-1);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.run-journal-footer {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.run-retention-controls,
+.run-journal-footer-meta {
+  display: flex;
+  align-items: end;
+  gap: var(--sp-2);
+}
+
+.run-retention-controls label {
+  display: grid;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.run-retention-controls select {
+  min-width: 150px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: var(--font-size-xs);
+}
+
+.run-retention-controls select:focus {
+  outline: none;
+  border-color: var(--accent-cyan);
+}
+
+.run-journal-footer-meta {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.run-journal-footer-copy {
+  display: grid;
+  gap: 3px;
+}
+
 .run-row {
   width: 100%;
   display: flex;
@@ -1730,6 +1786,8 @@ html, body {
   }
   .run-journal-list { max-height: 180px; }
   .run-journal-detail { overflow: visible; }
+  .run-retention-controls { align-items: stretch; flex-direction: column; }
+  .run-retention-controls select { width: 100%; }
 }
 
 /* Unsaved-changes indicator next to the workflow name. */

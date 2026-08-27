@@ -95,6 +95,17 @@ const MAX_OPERATION_CIPHERTEXT_BYTES = 4096;
 // invariant prevents either malformed files or schema-valid metadata growth
 // from creating an unbounded allocation or a write-once/read-never record.
 const MAX_RUN_RECORD_BYTES = 64 * 1024 * 1024;
+// The metadata index is a rebuildable cache, never the source of truth. It is
+// deliberately separate from run records so a page can be served without
+// parsing every protected record again.
+const RUN_INDEX_SCHEMA_VERSION = 1;
+const RUN_INDEX_DIRECTORY = '.index';
+const RUN_INDEX_FILE = 'runs-v1.json';
+const RUN_INDEX_DIRTY_FILE = 'dirty-v1.json';
+const MAX_RUN_INDEX_BYTES = 128 * 1024 * 1024;
+const MAX_RUN_INDEX_ENTRIES = 250_000;
+const MAX_RETENTION_RUNS = 1_000_000;
+const MAX_RETENTION_AGE_DAYS = 36_500;
 const MAX_BLOCK_VISITS = 10_000;
 const MAX_RESULTS = 4096;
 const MAX_OPERATIONS = 25_000;
@@ -112,6 +123,8 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3
 const PUBLIC_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const OP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$/;
 const SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+const CURSOR_PATTERN = /^[A-Za-z0-9_-]{1,512}$/;
+const PREVIEW_TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const ISO_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const ASSURANCE_VALUES = new Set(['L1-routed', 'L2-env', 'L0-native']);
 const RUN_STATUS_VALUES = new Set(Object.values(RUN_STATUS));
@@ -863,6 +876,214 @@ function runSummary(run) {
   };
 }
 
+const RUN_SUMMARY_KEYS = new Set([
+  'schemaVersion',
+  'id',
+  'revision',
+  'eventSeq',
+  'status',
+  'startedAt',
+  'updatedAt',
+  'finishedAt',
+  'workflow',
+  'trigger',
+  'snapshot',
+  'truncated',
+  'blockVisitCount',
+  'resultCount',
+  'resultBytes',
+]);
+
+function compareRunSummaries(left, right) {
+  const byStart = right.startedAt.localeCompare(left.startedAt);
+  return byStart || right.id.localeCompare(left.id);
+}
+
+function assertRunSummary(summary) {
+  asObject(summary, 'run summary');
+  assertOnlyKeys(summary, RUN_SUMMARY_KEYS, 'run summary');
+  if (summary.schemaVersion !== SCHEMA_VERSION) {
+    throw new RunJournalError('Run index contains an unsupported summary', 'corrupt-index');
+  }
+  asRunId(summary.id, 'run summary id');
+  asPositiveInt(summary.revision, 'run summary revision');
+  asPositiveInt(summary.eventSeq, 'run summary event sequence');
+  if (!RUN_STATUS_VALUES.has(summary.status)) {
+    throw new RunJournalError('Run index contains an invalid status', 'corrupt-index');
+  }
+  if (
+    !isIsoTimestamp(summary.startedAt)
+    || !isIsoTimestamp(summary.updatedAt)
+    || (summary.finishedAt !== null && !isIsoTimestamp(summary.finishedAt))
+  ) {
+    throw new RunJournalError('Run index contains an invalid timestamp', 'corrupt-index');
+  }
+  if (summary.status === RUN_STATUS.RUNNING && summary.finishedAt !== null) {
+    throw new RunJournalError('Run index marks an active run as finished', 'corrupt-index');
+  }
+  if (RUN_TERMINAL_VALUES.has(summary.status) && summary.finishedAt === null) {
+    throw new RunJournalError('Run index omits a terminal timestamp', 'corrupt-index');
+  }
+
+  asObject(summary.workflow, 'run summary workflow');
+  assertOnlyKeys(
+    summary.workflow,
+    new Set(['id', 'name', 'formatVersion', 'blockCount']),
+    'run summary workflow'
+  );
+  asPublicId(summary.workflow.id, 'run summary workflow id');
+  asText(summary.workflow.name, 'run summary workflow name', {
+    maxBytes: 512,
+    trim: true,
+  });
+  asNonNegativeInt(
+    summary.workflow.formatVersion,
+    'run summary workflow format version',
+    { max: 1_000_000 }
+  );
+  asNonNegativeInt(
+    summary.workflow.blockCount,
+    'run summary workflow block count',
+    { max: MAX_BLOCK_VISITS }
+  );
+  const normalizedTrigger = normalizeTrigger(summary.trigger);
+  if (stableJson(normalizedTrigger) !== stableJson(summary.trigger)) {
+    throw new RunJournalError('Run index trigger is not canonical', 'corrupt-index');
+  }
+
+  asObject(summary.snapshot, 'run summary snapshot');
+  assertOnlyKeys(
+    summary.snapshot,
+    new Set(['storage', 'byteLength']),
+    'run summary snapshot'
+  );
+  if (!Object.values(STORAGE).includes(summary.snapshot.storage)) {
+    throw new RunJournalError('Run index snapshot storage is invalid', 'corrupt-index');
+  }
+  asNonNegativeInt(
+    summary.snapshot.byteLength,
+    'run summary snapshot byte length',
+    { max: MAX_WORKFLOW_BYTES }
+  );
+
+  if (summary.truncated !== null) {
+    asObject(summary.truncated, 'run summary truncation');
+    assertOnlyKeys(
+      summary.truncated,
+      new Set(['reason', 'at']),
+      'run summary truncation'
+    );
+    asSlug(summary.truncated.reason, 'run summary truncation reason');
+    if (!isIsoTimestamp(summary.truncated.at)) {
+      throw new RunJournalError('Run index truncation timestamp is invalid', 'corrupt-index');
+    }
+  }
+
+  asNonNegativeInt(
+    summary.blockVisitCount,
+    'run summary block visit count',
+    { max: MAX_BLOCK_VISITS }
+  );
+  asNonNegativeInt(
+    summary.resultCount,
+    'run summary result count',
+    { max: MAX_RESULTS }
+  );
+  asNonNegativeInt(
+    summary.resultBytes,
+    'run summary result bytes',
+    { max: MAX_RUN_RESULT_BYTES }
+  );
+}
+
+function assertRunIndex(index) {
+  asObject(index, 'run index');
+  assertOnlyKeys(index, new Set(['schemaVersion', 'runs']), 'run index');
+  if (index.schemaVersion !== RUN_INDEX_SCHEMA_VERSION) {
+    throw new RunJournalError('Run index schema is unsupported', 'corrupt-index');
+  }
+  if (!Array.isArray(index.runs) || index.runs.length > MAX_RUN_INDEX_ENTRIES) {
+    throw new RunJournalError('Run index entry count is invalid', 'corrupt-index');
+  }
+  const ids = new Set();
+  for (let position = 0; position < index.runs.length; position += 1) {
+    const summary = index.runs[position];
+    assertRunSummary(summary);
+    if (ids.has(summary.id)) {
+      throw new RunJournalError('Run index repeats a run id', 'corrupt-index');
+    }
+    ids.add(summary.id);
+    if (
+      position > 0
+      && compareRunSummaries(index.runs[position - 1], summary) > 0
+    ) {
+      throw new RunJournalError('Run index order is invalid', 'corrupt-index');
+    }
+  }
+}
+
+function makeRunIndex(runs) {
+  return makeSummaryIndex(runs.map(run => runSummary(run)));
+}
+
+function makeSummaryIndex(summaries) {
+  const index = {
+    schemaVersion: RUN_INDEX_SCHEMA_VERSION,
+    runs: summaries.map(summary => clonePublic(summary)).sort(compareRunSummaries),
+  };
+  assertRunIndex(index);
+  return index;
+}
+
+function encodeRunCursor(summary) {
+  return Buffer.from(JSON.stringify({
+    version: 1,
+    startedAt: summary.startedAt,
+    id: summary.id,
+  }), 'utf8').toString('base64url');
+}
+
+function decodeRunCursor(value) {
+  const encoded = asText(value, 'cursor', {
+    maxBytes: 512,
+    trim: true,
+    pattern: CURSOR_PATTERN,
+  });
+  let cursor;
+  try {
+    cursor = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+  } catch (_error) {
+    throw new RunJournalError('cursor is invalid', 'invalid-input');
+  }
+  try {
+    asObject(cursor, 'cursor');
+    assertOnlyKeys(cursor, new Set(['version', 'startedAt', 'id']), 'cursor');
+    if (cursor.version !== 1 || !isIsoTimestamp(cursor.startedAt)) {
+      throw new RunJournalError('cursor is invalid', 'invalid-input');
+    }
+    cursor.id = asRunId(cursor.id, 'cursor id');
+    if (encodeRunCursor(cursor) !== encoded) {
+      throw new RunJournalError('cursor is invalid', 'invalid-input');
+    }
+    return cursor;
+  } catch (error) {
+    if (error instanceof RunJournalError && error.code === 'invalid-input') throw error;
+    throw new RunJournalError('cursor is invalid', 'invalid-input');
+  }
+}
+
+function pageStartAfterCursor(runs, cursor) {
+  if (!cursor) return 0;
+  let low = 0;
+  let high = runs.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (compareRunSummaries(runs[middle], cursor) <= 0) low = middle + 1;
+    else high = middle;
+  }
+  return low;
+}
+
 function assertStoredLane(lane, what) {
   const normalized = normalizeLaneDescriptors([lane]);
   const keys = Object.keys(lane).sort();
@@ -1355,6 +1576,9 @@ class RunJournal {
     });
     this._locks = new Map();
     this._deleted = new Map();
+    this._pruned = new Map();
+    this._index = null;
+    this._indexEntries = new Map();
   }
 
   async startRun(input) {
@@ -1778,14 +2002,174 @@ class RunJournal {
     const raw = options === undefined || options === null
       ? {}
       : asObject(options, 'listRuns options');
-    assertOnlyKeys(raw, new Set(['limit']), 'listRuns options');
+    assertOnlyKeys(raw, new Set(['limit', 'cursor']), 'listRuns options');
     const limit = raw.limit === undefined
       ? 100
       : asPositiveInt(raw.limit, 'limit', { max: 1000 });
-    return this._loadAllRuns()
-      .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
-      .slice(0, limit)
-      .map(runSummary);
+    const cursor = raw.cursor === undefined || raw.cursor === null || raw.cursor === ''
+      ? null
+      : decodeRunCursor(raw.cursor);
+    const index = this._ensureIndex();
+    const start = pageStartAfterCursor(index.runs, cursor);
+    const page = index.runs.slice(start, start + limit);
+    return {
+      runs: page.map(summary => clonePublic(summary)),
+      nextCursor: start + page.length < index.runs.length && page.length > 0
+        ? encodeRunCursor(page.at(-1))
+        : null,
+      total: index.runs.length,
+    };
+  }
+
+  async pruneRuns(input) {
+    const raw = input === undefined || input === null
+      ? {}
+      : asObject(input, 'pruneRuns payload');
+    assertOnlyKeys(
+      raw,
+      new Set([
+        'maxRuns',
+        'maxAgeDays',
+        'preview',
+        'cutoff',
+        'previewToken',
+        'opId',
+      ]),
+      'pruneRuns payload'
+    );
+    const maxRuns = raw.maxRuns === undefined || raw.maxRuns === null
+      ? null
+      : asPositiveInt(raw.maxRuns, 'maxRuns', { max: MAX_RETENTION_RUNS });
+    const maxAgeDays = raw.maxAgeDays === undefined || raw.maxAgeDays === null
+      ? null
+      : asPositiveInt(raw.maxAgeDays, 'maxAgeDays', { max: MAX_RETENTION_AGE_DAYS });
+    if (maxRuns === null && maxAgeDays === null) {
+      throw new RunJournalError(
+        'At least one retention limit is required',
+        'invalid-input'
+      );
+    }
+    const preview = raw.preview === undefined ? true : raw.preview;
+    if (typeof preview !== 'boolean') {
+      throw new RunJournalError('preview must be a boolean', 'invalid-input');
+    }
+
+    let cutoff = null;
+    if (maxAgeDays !== null) {
+      if (preview) {
+        const evaluatedAt = this._timestamp();
+        cutoff = new Date(
+          Date.parse(evaluatedAt) - maxAgeDays * 24 * 60 * 60 * 1000
+        ).toISOString();
+      } else {
+        if (!isIsoTimestamp(raw.cutoff)) {
+          throw new RunJournalError(
+            'A valid preview cutoff is required to prune by age',
+            'invalid-input'
+          );
+        }
+        cutoff = raw.cutoff;
+      }
+    } else if (raw.cutoff !== undefined && raw.cutoff !== null) {
+      throw new RunJournalError(
+        'cutoff is only valid with maxAgeDays',
+        'invalid-input'
+      );
+    }
+
+    const policy = { maxRuns, maxAgeDays, cutoff };
+    const index = this._ensureIndex();
+    const plan = this._retentionPlan(index, policy);
+    const previewToken = this._retentionPreviewToken(policy, plan.candidates);
+    if (preview) {
+      return {
+        preview: true,
+        candidateCount: plan.candidates.length,
+        terminalCount: plan.terminalCount,
+        activeCount: plan.activeCount,
+        total: index.runs.length,
+        cutoff,
+        previewToken,
+      };
+    }
+
+    const suppliedToken = asText(raw.previewToken, 'previewToken', {
+      maxBytes: 64,
+      trim: true,
+      pattern: PREVIEW_TOKEN_PATTERN,
+    });
+    const opId = asOpId(raw.opId);
+    const fingerprint = operationFingerprint('prune-runs', {
+      policy,
+      previewToken: suppliedToken,
+    });
+    const replay = this._pruned.get(opId);
+    if (replay) {
+      if (replay.fingerprint !== fingerprint) {
+        throw new RunJournalError(
+          'Operation id was reused with a different retention plan',
+          'op-conflict'
+        );
+      }
+      return clonePublic(replay.result);
+    }
+    if (suppliedToken !== previewToken) {
+      throw new RunJournalError(
+        'Run history changed after the retention preview; preview again',
+        'prune-preview-stale'
+      );
+    }
+
+    // Validate every source record before deleting the first one. Terminal
+    // records are immutable, and this synchronous commit leaves no event-loop
+    // gap between validation and deletion.
+    const records = [];
+    for (const summary of plan.candidates) {
+      const run = this._readRun(summary.id, { throwOnError: true });
+      if (
+        !run
+        || !RUN_TERMINAL_VALUES.has(run.status)
+        || run.revision !== summary.revision
+      ) {
+        throw new RunJournalError(
+          'Run history changed after the retention preview; preview again',
+          'prune-preview-stale'
+        );
+      }
+      records.push(run);
+    }
+
+    this._markIndexDirty();
+    const deletedIds = new Set();
+    try {
+      for (const run of records) {
+        this.deleteRecord(this._filePath(run.id));
+        deletedIds.add(run.id);
+        this.memory.deletePrefix(`workflow:${run.id}`);
+        this.memory.deletePrefix(`result:${run.id}:`);
+        this.memory.deletePrefix(`operation:${run.id}:`);
+        this._rememberDeletion(run.id, { opId, fingerprint });
+      }
+    } catch (_error) {
+      this._clearIndex();
+      throw new RunJournalError(
+        'Run Journal retention could not delete every selected record; preview again',
+        'storage-delete-failed'
+      );
+    }
+
+    const nextIndex = makeSummaryIndex(
+      index.runs.filter(summary => !deletedIds.has(summary.id))
+    );
+    this._persistIndex(nextIndex);
+    const result = {
+      preview: false,
+      deletedCount: deletedIds.size,
+      remainingCount: nextIndex.runs.length,
+      previewToken,
+    };
+    this._rememberPrune(opId, { fingerprint, result });
+    return clonePublic(result);
   }
 
   async getRun(input) {
@@ -1862,6 +2246,11 @@ class RunJournal {
   async recoverInterrupted() {
     const recovered = [];
     let failureCount = 0;
+    // Recovery already has to validate every durable record to contain an
+    // unknown active run. Reuse that one sweep to refresh the derived index,
+    // rather than making the first Runs view pay a second full scan.
+    this._markIndexDirty({ required: false });
+    this._clearIndex();
     // A record rejected by the initial scan could itself be a durable active
     // run. Recover every valid candidate we can, then fail containment closed
     // if any record's disposition remained unknowable.
@@ -1870,16 +2259,22 @@ class RunJournal {
         failureCount += 1;
       },
     });
+    const summaries = new Map(
+      candidates.map(candidate => [candidate.id, runSummary(candidate)])
+    );
     for (const candidate of candidates) {
       if (candidate.status !== RUN_STATUS.RUNNING) continue;
       try {
-        const changed = await this._withLock(`run:${candidate.id}`, async () => {
+        const outcome = await this._withLock(`run:${candidate.id}`, async () => {
           // The initial scan established that this was a valid active record.
           // A missing file no longer represents active durable state, but any
           // other re-read failure leaves its disposition unknown and must fail
           // renderer-loss containment closed.
           const run = this._readRun(candidate.id, { throwOnError: true });
-          if (!run || run.status !== RUN_STATUS.RUNNING) return null;
+          if (!run) return { missing: true };
+          if (run.status !== RUN_STATUS.RUNNING) {
+            return { summary: runSummary(run), recovered: null };
+          }
           const at = this._timestamp();
           let closedVisitCount = 0;
           for (const visit of run.blocks) {
@@ -1895,9 +2290,11 @@ class RunJournal {
           this._advanceRevision(run);
           appendEvent(run, 'run.interrupted', at, { closedVisitCount });
           this._writeRun(run);
-          return publicRun(run);
+          return { summary: runSummary(run), recovered: publicRun(run) };
         });
-        if (changed) recovered.push(changed);
+        if (outcome?.missing) summaries.delete(candidate.id);
+        if (outcome?.summary) summaries.set(candidate.id, outcome.summary);
+        if (outcome?.recovered) recovered.push(outcome.recovered);
       } catch (error) {
         failureCount += 1;
         this._report(`${candidate.id}.json`, error);
@@ -1909,6 +2306,7 @@ class RunJournal {
         'recovery-failed'
       );
     }
+    this._persistIndex(makeSummaryIndex([...summaries.values()]));
     return recovered;
   }
 
@@ -1936,9 +2334,12 @@ class RunJournal {
       if (run.status === RUN_STATUS.RUNNING) {
         throw new RunJournalError('An active run cannot be deleted', 'active-run');
       }
+      const index = this._prepareIndexMutation();
+      this._markIndexDirty();
       try {
         this.deleteRecord(this._filePath(runId));
       } catch (error) {
+        this._clearIndex();
         if (error?.code === 'ENOENT') return false;
         throw new RunJournalError(
           'Run Journal record could not be deleted',
@@ -1949,6 +2350,13 @@ class RunJournal {
       this.memory.deletePrefix(`result:${runId}:`);
       this.memory.deletePrefix(`operation:${runId}:`);
       this._rememberDeletion(runId, { opId, fingerprint });
+      if (index) {
+        this._persistIndex(makeSummaryIndex(
+          index.runs.filter(summary => summary.id !== runId)
+        ));
+      } else {
+        this._clearIndex();
+      }
       return true;
     }));
   }
@@ -2265,6 +2673,181 @@ class RunJournal {
     return path.join(this.dir, `${runId}.json`);
   }
 
+  _indexDirectoryPath() {
+    return path.join(this.dir, RUN_INDEX_DIRECTORY);
+  }
+
+  _indexFilePath() {
+    return path.join(this._indexDirectoryPath(), RUN_INDEX_FILE);
+  }
+
+  _indexDirtyPath() {
+    return path.join(this._indexDirectoryPath(), RUN_INDEX_DIRTY_FILE);
+  }
+
+  _indexReportFile(file = RUN_INDEX_FILE) {
+    return path.join(RUN_INDEX_DIRECTORY, file);
+  }
+
+  _readStoredIndex() {
+    if (fs.existsSync(this._indexDirtyPath())) return null;
+    try {
+      const index = readJsonStrict(this._indexFilePath(), {
+        maxFileBytes: MAX_RUN_INDEX_BYTES,
+      });
+      assertRunIndex(index);
+      return index;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') this._report(this._indexReportFile(), error);
+      return null;
+    }
+  }
+
+  _prepareIndexMutation() {
+    if (this._index) return this._index;
+    const stored = this._readStoredIndex();
+    if (stored) this._adoptIndex(stored);
+    return stored;
+  }
+
+  _adoptIndex(index) {
+    this._index = index;
+    this._indexEntries = new Map(index.runs.map(summary => [summary.id, summary]));
+    return index;
+  }
+
+  _clearIndex() {
+    this._index = null;
+    this._indexEntries.clear();
+  }
+
+  _upsertIndexSummary(index, summary) {
+    const next = clonePublic(summary);
+    assertRunSummary(next);
+    const existing = this._indexEntries.get(next.id);
+    if (existing) {
+      if (existing.startedAt !== next.startedAt) {
+        throw new RunJournalError(
+          'Run index cannot reorder an existing run',
+          'corrupt-index'
+        );
+      }
+      for (const key of RUN_SUMMARY_KEYS) existing[key] = next[key];
+      return index;
+    }
+
+    let low = 0;
+    let high = index.runs.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (compareRunSummaries(index.runs[middle], next) <= 0) low = middle + 1;
+      else high = middle;
+    }
+    index.runs.splice(low, 0, next);
+    this._indexEntries.set(next.id, next);
+    return index;
+  }
+
+  _markIndexDirty({ required = true } = {}) {
+    try {
+      writeJsonAtomic(this._indexDirtyPath(), {
+        schemaVersion: RUN_INDEX_SCHEMA_VERSION,
+        dirty: true,
+      });
+      return true;
+    } catch (error) {
+      this._report(this._indexReportFile(RUN_INDEX_DIRTY_FILE), error);
+      if (!required) return false;
+      throw new RunJournalError(
+        'Run Journal metadata index could not be prepared',
+        'storage-write-failed'
+      );
+    }
+  }
+
+  _persistIndex(index) {
+    this._adoptIndex(index);
+    try {
+      assertRunIndex(index);
+      if (Buffer.byteLength(JSON.stringify(index, null, 2), 'utf8') > MAX_RUN_INDEX_BYTES) {
+        throw new RunJournalError(
+          'Run Journal metadata index exceeds its rebuildable cache limit',
+          'index-capacity'
+        );
+      }
+      writeJsonAtomic(this._indexFilePath(), index);
+      try {
+        fs.unlinkSync(this._indexDirtyPath());
+      } catch (error) {
+        if (error?.code !== 'ENOENT') {
+          this._report(this._indexReportFile(RUN_INDEX_DIRTY_FILE), error);
+        }
+      }
+      return true;
+    } catch (error) {
+      // A cache failure never rewinds a successfully committed run record.
+      // Keep the valid in-memory projection and leave a durable dirty marker
+      // so the next process rebuilds from source records.
+      this._report(this._indexReportFile(), error);
+      this._markIndexDirty({ required: false });
+      return false;
+    }
+  }
+
+  _rebuildIndex() {
+    let recordErrors = 0;
+    const runs = this._loadAllRuns({
+      onRecordError: () => {
+        recordErrors += 1;
+      },
+    });
+    const index = makeRunIndex(runs);
+    this._adoptIndex(index);
+    if (recordErrors === 0) this._persistIndex(index);
+    else this._markIndexDirty({ required: false });
+    return index;
+  }
+
+  _ensureIndex() {
+    if (this._index) return this._index;
+    const stored = this._readStoredIndex();
+    if (stored) {
+      this._adoptIndex(stored);
+      return stored;
+    }
+    return this._rebuildIndex();
+  }
+
+  _retentionPlan(index, { maxRuns, maxAgeDays, cutoff }) {
+    const terminal = index.runs.filter(summary => RUN_TERMINAL_VALUES.has(summary.status));
+    const beyondCount = maxRuns === null
+      ? new Set()
+      : new Set(terminal.slice(maxRuns).map(summary => summary.id));
+    const candidates = terminal.filter(summary => (
+      beyondCount.has(summary.id)
+      || (
+        maxAgeDays !== null
+        && summary.finishedAt.localeCompare(cutoff) < 0
+      )
+    ));
+    return {
+      candidates,
+      terminalCount: terminal.length,
+      activeCount: index.runs.length - terminal.length,
+    };
+  }
+
+  _retentionPreviewToken(policy, candidates) {
+    return sha256(stableJson({
+      version: 1,
+      policy,
+      candidates: candidates.map(summary => ({
+        id: summary.id,
+        revision: summary.revision,
+      })),
+    }, 'retention preview'));
+  }
+
   _workflowMemoryKey(runId) {
     return `workflow:${runId}`;
   }
@@ -2314,15 +2897,33 @@ class RunJournal {
         'record-capacity'
       );
     }
+    const index = this._prepareIndexMutation();
+    this._markIndexDirty();
     try {
       this.writeRecord(this._filePath(run.id), run);
     } catch (_error) {
+      this._clearIndex();
       // Node filesystem errors include their absolute target path. Keep that
       // machine-local path out of renderer-visible IPC rejection messages.
       throw new RunJournalError(
         'Run Journal record could not be written',
         'storage-write-failed'
       );
+    }
+    if (index) {
+      try {
+        const nextIndex = this._upsertIndexSummary(index, runSummary(run));
+        // Active runs may change on every block event. Keep their current
+        // summary in memory while the durable dirty marker forces a rebuild
+        // after a crash; one terminal commit writes and cleans the full index.
+        if (RUN_TERMINAL_VALUES.has(run.status)) this._persistIndex(nextIndex);
+      } catch (error) {
+        this._clearIndex();
+        this._report(this._indexReportFile(), error);
+        this._markIndexDirty({ required: false });
+      }
+    } else {
+      this._clearIndex();
     }
   }
 
@@ -2403,6 +3004,17 @@ class RunJournal {
     this._deleted.set(runId, tombstone);
     while (this._deleted.size > 1024) {
       this._deleted.delete(this._deleted.keys().next().value);
+    }
+  }
+
+  _rememberPrune(opId, entry) {
+    this._pruned.delete(opId);
+    this._pruned.set(opId, {
+      fingerprint: entry.fingerprint,
+      result: clonePublic(entry.result),
+    });
+    while (this._pruned.size > 128) {
+      this._pruned.delete(this._pruned.keys().next().value);
     }
   }
 }

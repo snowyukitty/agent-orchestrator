@@ -155,6 +155,14 @@ function testRunJournalViewState(eq) {
     state.isCurrentDetailRequest(detailB, 'run-b'),
   ], [false, true, false]);
 
+  const pagedDetail = state.beginDetailRequest('run-page');
+  const pagedList = state.beginListRequest({ preserveDetail: true });
+  eq('run-journal-pagination-preserves-detail', [
+    state.isCurrentListRequest(pagedList),
+    state.isCurrentDetailRequest(pagedDetail, 'run-page'),
+    state.selectedRunId,
+  ], [true, true, 'run-page']);
+
   const detailC = state.beginDetailRequest('run-c');
   state.invalidateAll();
   state.clearSelectionIf('run-b');

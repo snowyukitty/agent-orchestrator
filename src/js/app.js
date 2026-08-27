@@ -46,6 +46,8 @@ class App {
     this._workflowSourceFile = null;     // basename when the editor owns a stored workflow
     this._runStartPending = false;       // closes the journal-start TOCTOU window
     this._runJournalItems = [];
+    this._runJournalNextCursor = null;
+    this._runJournalTotal = 0;
     this._runJournalView = new RunJournalViewState();
 
     // Renderer regressions are pure module tests. Do not initialize timers,
@@ -207,11 +209,19 @@ class App {
     document.getElementById('btn-refresh-runs')?.addEventListener('click', () => {
       this._refreshRunJournal();
     });
+    document.getElementById('btn-prune-runs')?.addEventListener('click', () => {
+      this._pruneRunJournal();
+    });
     modal?.addEventListener('click', (event) => {
       if (event.target === modal) close();
     });
 
     document.getElementById('runs-list')?.addEventListener('click', (event) => {
+      const loadMore = event.target.closest('[data-load-more-runs]');
+      if (loadMore) {
+        this._refreshRunJournal({ append: true });
+        return;
+      }
       const row = event.target.closest('[data-run-id]');
       if (row) this._openRunJournalEntry(row.dataset.runId);
     });
@@ -242,22 +252,49 @@ class App {
     });
   }
 
-  async _refreshRunJournal() {
+  async _refreshRunJournal({ append = false } = {}) {
     const list = document.getElementById('runs-list');
     const detail = document.getElementById('run-detail');
     if (!list) return;
-    const request = this._runJournalView.beginListRequest();
+    if (append && !this._runJournalNextCursor) return;
+    const request = this._runJournalView.beginListRequest({ preserveDetail: append });
     // A refresh establishes a new list snapshot. Detail responses belonging
     // to the prior snapshot must not mutate the pane after this point.
-    list.innerHTML = '<div class="sched-empty">Loading run history…</div>';
+    if (!append) {
+      list.innerHTML = '<div class="sched-empty">Loading run history…</div>';
+    } else {
+      const loadMore = list.querySelector('[data-load-more-runs]');
+      if (loadMore) {
+        loadMore.disabled = true;
+        loadMore.textContent = 'Loading…';
+      }
+    }
 
     try {
-      const response = await window.api.listRunJournal({ limit: 100 });
+      const response = await window.api.listRunJournal({
+        limit: 50,
+        ...(append ? { cursor: this._runJournalNextCursor } : {}),
+      });
       if (!this._runJournalView.isCurrentListRequest(request)) return;
       const runs = Array.isArray(response) ? response : (response?.runs || []);
-      this._runJournalItems = runs;
-      if (runs.length === 0) {
+      if (append) {
+        const merged = new Map(this._runJournalItems.map(run => [run.id, run]));
+        for (const run of runs) merged.set(run.id, run);
+        this._runJournalItems = [...merged.values()];
+      } else {
+        this._runJournalItems = runs;
+      }
+      this._runJournalNextCursor = Array.isArray(response)
+        ? null
+        : (response?.nextCursor || null);
+      this._runJournalTotal = Number.isSafeInteger(response?.total)
+        ? response.total
+        : this._runJournalItems.length;
+
+      if (this._runJournalItems.length === 0) {
         this._runJournalView.clearSelection();
+        this._runJournalNextCursor = null;
+        this._runJournalTotal = 0;
         list.innerHTML = '<div class="sched-empty">No recorded runs yet.</div>';
         if (detail) {
           detail.innerHTML = '<div class="sched-empty">A run appears here as soon as its immutable snapshot is accepted.</div>';
@@ -265,7 +302,33 @@ class App {
         return;
       }
 
-      list.innerHTML = runs.map(run => {
+      this._renderRunJournalList();
+      if (append) return;
+
+      const selectedStillExists = this._runJournalItems.some(
+        run => run.id === this._runJournalView.selectedRunId
+      );
+      await this._openRunJournalEntry(
+        selectedStillExists
+          ? this._runJournalView.selectedRunId
+          : this._runJournalItems[0].id
+      );
+    } catch (error) {
+      if (!this._runJournalView.isCurrentListRequest(request)) return;
+      if (append && this._runJournalItems.length > 0) {
+        this._renderRunJournalList();
+        this._termLog(`❌ Could not load more runs: ${error.message}`, 'stderr');
+        return;
+      }
+      list.innerHTML = `<div class="sched-empty">Run Journal unavailable.<br>${this._esc(error.message)}</div>`;
+      if (detail) detail.innerHTML = '<div class="sched-empty">No run detail is available.</div>';
+    }
+  }
+
+  _renderRunJournalList() {
+    const list = document.getElementById('runs-list');
+    if (!list) return;
+    const rows = this._runJournalItems.map(run => {
         const selected = run.id === this._runJournalView.selectedRunId ? ' selected' : '';
         const name = run.workflow?.name || 'Untitled workflow';
         const when = this._formatJournalTime(run.startedAt);
@@ -282,17 +345,64 @@ class App {
             <span class="run-status status-${this._esc(run.status)}">${this._esc(run.status)}</span>
           </button>`;
       }).join('');
+    const loaded = this._runJournalItems.length;
+    const total = Math.max(loaded, this._runJournalTotal);
+    const pager = `
+      <div class="run-list-page">
+        <span>${this._esc(String(loaded))} of ${this._esc(String(total))}</span>
+        ${this._runJournalNextCursor ? `
+          <button class="btn btn-secondary btn-sm" type="button" data-load-more-runs>
+            Load more
+          </button>` : ''}
+      </div>`;
+    list.innerHTML = `${rows}${pager}`;
+  }
 
-      const selectedStillExists = runs.some(
-        run => run.id === this._runJournalView.selectedRunId
-      );
-      await this._openRunJournalEntry(
-        selectedStillExists ? this._runJournalView.selectedRunId : runs[0].id
-      );
+  async _pruneRunJournal() {
+    const button = document.getElementById('btn-prune-runs');
+    const status = document.getElementById('runs-retention-status');
+    const countValue = document.getElementById('runs-retain-count')?.value || '';
+    const ageValue = document.getElementById('runs-retain-age')?.value || '';
+    const policy = {
+      ...(countValue ? { maxRuns: Number(countValue) } : {}),
+      ...(ageValue ? { maxAgeDays: Number(ageValue) } : {}),
+    };
+    if (!Object.keys(policy).length) {
+      if (status) status.textContent = 'Choose at least one retention limit.';
+      return;
+    }
+    if (button) button.disabled = true;
+    if (status) status.textContent = 'Checking terminal runs…';
+    try {
+      const preview = await window.api.pruneRunJournal({ ...policy, preview: true });
+      if (!preview?.candidateCount) {
+        if (status) status.textContent = 'Nothing matches this policy.';
+        return;
+      }
+      const noun = preview.candidateCount === 1 ? 'run' : 'runs';
+      if (!confirm(
+        `Delete ${preview.candidateCount} terminal ${noun}? Active runs are always kept. This cannot be undone.`
+      )) {
+        if (status) status.textContent = 'Pruning cancelled.';
+        return;
+      }
+      const result = await window.api.pruneRunJournal({
+        ...policy,
+        preview: false,
+        cutoff: preview.cutoff,
+        previewToken: preview.previewToken,
+        opId: this._operationId('journal-prune'),
+      });
+      this._runJournalView.invalidateAll();
+      this._runJournalView.clearSelection();
+      if (status) status.textContent = `Deleted ${result.deletedCount} terminal ${noun}.`;
+      this._termLog(`🧹 Pruned ${result.deletedCount} terminal Run Journal ${noun}.`, 'system');
+      await this._refreshRunJournal();
     } catch (error) {
-      if (!this._runJournalView.isCurrentListRequest(request)) return;
-      list.innerHTML = `<div class="sched-empty">Run Journal unavailable.<br>${this._esc(error.message)}</div>`;
-      if (detail) detail.innerHTML = '<div class="sched-empty">No run detail is available.</div>';
+      if (status) status.textContent = `Prune unavailable: ${error.message}`;
+      this._termLog(`❌ Could not prune run history: ${error.message}`, 'stderr');
+    } finally {
+      if (button) button.disabled = false;
     }
   }
 

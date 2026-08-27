@@ -102,6 +102,7 @@ const api = {
   getRunJournal: (params) => invokeTrusted('journal:get', params),
   getRunResult: (params) => invokeTrusted('journal:result-get', params),
   deleteRunJournal: (params) => invokeTrusted('journal:delete', params),
+  pruneRunJournal: (params) => invokeTrusted('journal:prune', params),
 
   // File/Directory dialogs
   selectDirectory: () => invokeTrusted('select-directory'),

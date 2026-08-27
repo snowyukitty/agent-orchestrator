@@ -46,11 +46,14 @@ const {
 // or its single-instance lock. Test modes never touch production AppData.
 const isSmokeTest = process.argv.includes('--smoke-test');
 const isSelfTest = process.argv.includes('--self-test');
+const isVisualTest = process.argv.includes('--visual-test');
 app.setName('Agent Orchestrator');
 const userDataState = prepareUserData({
   appDataRoot: app.getPath('appData'),
   tempRoot: app.getPath('temp'),
-  testMode: isSmokeTest || isSelfTest,
+  // Visual QA uses the normal renderer while remaining unable to read or
+  // mutate production settings, workflows, local profiles, or Run Journal files.
+  testMode: isSmokeTest || isSelfTest || isVisualTest,
 });
 app.setPath('userData', userDataState.path);
 const sessionDataPath = path.join(userDataState.path, 'session');
@@ -99,6 +102,7 @@ let sleepTimer = null;
 let sleepTarget = null; // epoch ms when hibernate fires (null = none armed)
 let sessions = null;    // SessionRegistry, created once the app is ready
 let runJournal = null;  // RunJournal, created once safeStorage is available
+let testDataCleanupScheduled = false;
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 const isDev = process.argv.includes('--dev');
 let selfTestTimer = null;
@@ -474,6 +478,14 @@ function createWindow() {
   mainWindow.on('close', (e) => {
     persistWindowBounds();
     if (!app.isQuitting) {
+      // The disposable visual-QA mode has no reason to linger in the tray;
+      // closing it should exercise the same sequenced cleanup as tray Quit.
+      if (isVisualTest) {
+        e.preventDefault();
+        app.isQuitting = true;
+        app.quit();
+        return;
+      }
       e.preventDefault();
       mainWindow.hide();
       console.log('[Main] Window hidden to tray');
@@ -699,10 +711,40 @@ function cleanupNonProcessState() {
 }
 
 function cleanupForQuit() {
-  if (!cleanupNonProcessState()) return;
-  killAllActiveProcesses('shutdown');
+  const firstCleanup = cleanupNonProcessState();
+  if (firstCleanup) killAllActiveProcesses('shutdown');
+  // before-quit normally performs non-process cleanup first. Temporary test
+  // data still belongs to will-quit even when that earlier cleanup was not the
+  // first call here; rmSync(force) makes this retry-safe.
   if (userDataState.temporary) {
-    try { fs.rmSync(userDataState.path, { recursive: true, force: true }); } catch (_error) { /* best effort */ }
+    try { fs.rmSync(userDataState.path, { recursive: true, force: true }); } catch (_error) { /* retry below */ }
+    if (fs.existsSync(userDataState.path) && !testDataCleanupScheduled) {
+      testDataCleanupScheduled = true;
+      try {
+        const helper = spawn(
+          process.execPath,
+          [
+            path.join(__dirname, 'src', 'main', 'cleanup-test-user-data.js'),
+            userDataState.path,
+            String(process.pid),
+          ],
+          {
+            detached: true,
+            stdio: 'ignore',
+            windowsHide: true,
+            env: {
+              ELECTRON_RUN_AS_NODE: '1',
+              SystemRoot: process.env.SystemRoot,
+              TEMP: process.env.TEMP,
+              TMP: process.env.TMP,
+            },
+          }
+        );
+        helper.unref();
+      } catch (_error) {
+        console.warn('[Storage] temporary test-data cleanup helper could not start');
+      }
+    }
   }
 }
 
@@ -1130,6 +1172,14 @@ handleTrusted('journal:delete', (event, payload, rendererEpoch) => {
   return rendererContainment.runJournal(
     rendererEpoch,
     () => requireRunJournal().deleteRun(input)
+  );
+});
+
+handleTrusted('journal:prune', (event, payload, rendererEpoch) => {
+  const input = asPlainObject(payload, 'journal:prune payload');
+  return rendererContainment.runJournal(
+    rendererEpoch,
+    () => requireRunJournal().pruneRuns(input)
   );
 });
 

@@ -40,6 +40,8 @@ testable:
   launch specifications;
 - `sessions.js` owns PTY creation, bounded output activity, process-tree
   termination, and public session metadata;
+- `run-journal.js` owns protected run records, the rebuildable public-metadata
+  index, stable cursor pages, and preview-first terminal-run retention;
 - `store.js` provides atomic JSON persistence;
 - `settings.js` normalizes machine-local preferences;
 - `user-data.js` performs the one-time singular identity migration;
@@ -88,7 +90,9 @@ App-owned data lives under `%APPDATA%/agent-orchestrator`:
 
 - `agents.json` for local, non-secret profiles;
 - `settings.json` for UI and window preferences;
-- `runs.json` when run metadata exists;
+- `run-journal/*.json` for one bounded protected record per run;
+- `run-journal/.index/` for rebuildable public summaries and its crash-dirty
+  marker (never ciphertext or result bodies);
 - `workflows/*.json` for saved workflows.
 
 On the first singular build, valid app-owned JSON is copied from the historical

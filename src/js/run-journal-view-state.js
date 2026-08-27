@@ -13,8 +13,8 @@ export class RunJournalViewState {
     this._detailGeneration = 0;
   }
 
-  beginListRequest() {
-    this._detailGeneration += 1;
+  beginListRequest({ preserveDetail = false } = {}) {
+    if (!preserveDetail) this._detailGeneration += 1;
     this._listGeneration += 1;
     return this._listGeneration;
   }
