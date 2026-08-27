@@ -6,6 +6,8 @@ Several agents can run at once — one session per account — with a tab per
 session, concurrent prompt broadcasts, and a signal-aware team barrier for
 continuing only after every prompted workflow session is ready.
 
+[![Agent Orchestrator key art: one routed workflow fans out across three agent lanes, converges at a join, and enters a protected journal boundary.](docs/assets/agent-orchestrator-key-art.png)](https://snowyukitty.github.io/agent-orchestrator/)
+
 ## Project Status
 
 **Version**: 0.4.0 · **Platform**: Windows x64 · **Runtime**: Electron 43
@@ -86,7 +88,7 @@ broadcast.
 
 ### Release Notes
 
-#### Unreleased (Indexed History + Retention + Resume Evidence)
+#### Unreleased (Indexed History + Deep Resume Preflight)
 
 - **Cursor-paged run history**: **📖 Runs** reads a rebuildable public-metadata
   index and loads 50 entries at a time. Newer runs do not shift an issued
@@ -98,10 +100,21 @@ broadcast.
   dirty marker makes an interrupted index update rebuild from those records;
   corrupt indexes are reported and replaced without exposing result bodies,
   ciphertext, or machine-local paths.
-- **Resume evidence, without replay**: interrupted-run detail now distinguishes
-  blocked evidence, ambiguous outcomes needing a decision, and a recorded
-  boundary. It names the reason and never offers execution; the accepted
-  design keeps deep preflight and child-run creation fail-closed.
+- **Protected resume preflight, without replay**: interrupted-run detail first
+  applies the cheap metadata gate, then offers an explicit local inspection.
+  Main binds the request to the source revision, decrypts the captured snapshot,
+  reuses the editor's exact versioned validator, proves the ordered visit trace
+  (including nested-loop iteration paths), verifies protected result bindings,
+  classifies reconstructable runtime state, and re-resolves referenced profiles.
+  The renderer receives only redacted stage facts and never a prompt, command,
+  path, profile ID, block ID, or execution capability.
+- **Current-format evidence fixed at the contract boundary**: workflow format
+  compatibility now belongs to the shared deep validator. The metadata gate no
+  longer hard-codes v1 and incorrectly blocks the v2 documents the editor writes.
+- **One-shot social key art**: the field guide and README now share a verified
+  1731×909 browser-generated visual, with exact prompt and integrity sidecars.
+  It depicts the same route → fan-out → join → protected-journal story the app
+  actually implements; no video candidate crossed its human review gate.
 
 #### v0.4.0 (Durable Run Journal + Result Handoff + Singular Identity)
 - **One canonical name everywhere**: repository, npm package, checkout, AppData, documentation, and build artifact now use `agent-orchestrator` / **Agent Orchestrator**.
@@ -262,8 +275,11 @@ broadcast.
   are fetched and decrypted only on request. No-encryption environments fall
   back to bounded memory, never plaintext files. A rebuildable metadata index
   serves stable cursor pages without copying ciphertext or result bodies.
-  Interrupted-run detail derives a metadata-only evidence assessment and keeps
-  resume execution explicitly unavailable.
+  Interrupted-run detail derives a metadata-only evidence assessment; an
+  explicit deep preflight can then validate protected snapshot/result bytes,
+  prove the control prefix, classify runtime reconstruction, and re-resolve
+  profiles while returning only redacted facts. Resume execution remains
+  explicitly unavailable.
 - **Explicit Journal Retention**: **📖 Runs** can preview and apply a count
   limit, an age limit, or both to terminal runs. Active runs are never selected,
   history is never pruned automatically, and a changed preview must be reviewed

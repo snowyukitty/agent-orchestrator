@@ -82,8 +82,11 @@ to the current session, one agent's sessions, or everything at once.
   inspectable in-app under **📖 Runs**. History loads in stable cursor pages.
   Retention by terminal-run count and/or age is previewed before confirmation;
   it never runs automatically and never deletes an active run. Interrupted-run
-  detail reports whether evidence is blocked, ambiguous, or a recorded boundary;
-  this is inspection only, not automatic resume. See the
+  detail reports whether evidence is blocked, ambiguous, or a recorded boundary.
+  When the cheap gate passes, **Inspect protected evidence** asks main to decrypt
+  the captured snapshot locally, prove its control-flow prefix, verify protected
+  results, classify runtime reconstruction, and re-resolve profiles. Only
+  redacted facts return to the Runs view, and no workflow is executed. See the
   [resume design](resume-design.md).
 - Settings: `%APPDATA%/agent-orchestrator/settings.json`.
 

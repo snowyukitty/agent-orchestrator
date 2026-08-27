@@ -1102,7 +1102,8 @@ handleTrusted('get-app-version', async () => app.getVersion());
 // ── IPC: Run Journal ─────────────────────────────────────────
 // Metadata is public to the local renderer. Workflow snapshots and explicit
 // result bodies stay encrypted at rest (or memory-only when safeStorage is
-// unavailable); a body is decrypted only by journal:result-get.
+// unavailable). Plaintext is decrypted only for an explicit result reveal or
+// a resume preflight, and a preflight returns redacted facts rather than bodies.
 function requireRunJournal() {
   if (!runJournal) throw new Error('Run Journal is not ready');
   return runJournal;
@@ -1162,6 +1163,31 @@ handleTrusted('journal:get', (event, payload, rendererEpoch) => {
     rendererEpoch,
     () => requireRunJournal().getRun(input)
   );
+});
+
+handleTrusted('journal:resume-preflight', (event, payload, rendererEpoch) => {
+  const input = asPlainObject(payload, 'journal:resume-preflight payload');
+  return rendererContainment.runJournal(rendererEpoch, async () => {
+    const localProfiles = new Map(getLocalProfiles().map(profile => [profile.id, profile]));
+    let routedAuthority = null;
+    const resolveProfile = async (profileId) => {
+      const local = localProfiles.get(profileId);
+      if (local) return agentProfiles.describeProfile(local);
+      if (!routedAuthority) routedAuthority = getRoutedProfiles({ force: true });
+      const routed = await routedAuthority;
+      if (routed.error) throw new Error('Routed account authority is unavailable');
+      if (routed.source !== entrypointPath()) {
+        throw new Error('Routed account authority changed during preflight');
+      }
+      return agentProfiles.describeProfile(
+        routed.profiles.find(profile => profile.id === profileId) || null
+      );
+    };
+    return requireRunJournal().preflightResume(input, {
+      resolveProfile,
+      isDirectory,
+    });
+  });
 });
 
 handleTrusted('journal:result-get', (event, payload, rendererEpoch) => {

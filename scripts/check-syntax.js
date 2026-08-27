@@ -29,7 +29,10 @@ function walk(dir, out) {
     if (entry.isDirectory()) {
       if (SKIP_DIRS.has(entry.name)) continue;
       walk(path.join(dir, entry.name), out);
-    } else if (entry.isFile() && entry.name.endsWith('.js')) {
+    } else if (
+      entry.isFile()
+      && (entry.name.endsWith('.js') || entry.name.endsWith('.mjs'))
+    ) {
       out.push(path.join(dir, entry.name));
     }
   }

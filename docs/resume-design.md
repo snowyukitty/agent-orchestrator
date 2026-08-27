@@ -1,7 +1,7 @@
 # Interrupted-run resume design
 
-Status: accepted design; metadata evidence gate implemented; execution not
-implemented.
+Status: accepted design; metadata gate and protected deep-inspection preflight
+implemented; confirmation and execution not implemented.
 
 ## Decision
 
@@ -16,10 +16,11 @@ completed an external side effect immediately before the journal lost the
 chance to record completion. Retrying that visit automatically could submit a
 prompt twice, run a command twice, or arm hibernate twice.
 
-The current build therefore adds only a conservative, metadata-only evidence
-assessment. **📖 Runs** can explain why an interrupted record is blocked, needs
-a decision, or contains a recorded boundary. It deliberately exposes no
-Resume button and always reports `executionAvailable: false`.
+The current build therefore starts with a conservative, metadata-only evidence
+assessment. When that gate is not blocked, **📖 Runs** exposes **Inspect
+protected evidence**: an explicit, revision-bound main-process preflight that
+decrypts locally and returns redacted facts. It deliberately exposes no Resume
+button and always reports `executionAvailable: false`.
 
 ## Non-negotiable invariants
 
@@ -58,16 +59,39 @@ source of truth.
 | `review-required` | Evidence is durable, but a visit/result has an ambiguous or non-complete outcome. | unavailable |
 | `recorded-boundary` | The cheap gate found a durable, untruncated visit boundary. Deep preflight has not run. | unavailable |
 
-The blocker set currently includes an unsupported journal/workflow version,
-memory-only workflow snapshot, journal truncation, a visit without a block
-index, a memory-only result body, and structurally invalid evidence. An
+The blocker set currently includes an unsupported journal version, memory-only
+workflow snapshot, journal truncation, a visit without a block index, a
+memory-only result body, and structurally invalid evidence. Workflow format
+compatibility belongs to the shared versioned loader in deep preflight rather
+than a duplicated metadata allowlist. An
 interrupted visit, a failed/cancelled prior visit, or a partial result requires
 review. Reasons are stable machine-readable codes with renderer-owned copy.
 
-`recorded-boundary` is intentionally narrower than “resumable.” It does not
-prove that protected bytes can still be decrypted, that the loop cursor can be
-reconstructed, that a prior team stage can be rebuilt, or that referenced
-profiles still resolve.
+`recorded-boundary` is intentionally narrower than “resumable.” It means the
+cheap gate has enough durable metadata to offer protected inspection. Until the
+user runs that inspection it does not prove that protected bytes can still be
+decrypted, that the loop cursor can be reconstructed, that a prior team stage
+can be rebuilt, or that referenced profiles still resolve.
+
+## Deep-inspection states shipped now
+
+`src/main/resume-preflight.js` is the second gate. It runs only after an
+explicit renderer request and re-reads the source under its journal lock. The
+request must name the exact displayed revision; a stale request fails before
+decryption.
+
+| State | Meaning | Execution |
+|---|---|---|
+| `blocked` | A protected snapshot/result, legal trace, runtime recipe, directory, or current profile check failed. | unavailable |
+| `decision-required` | The trace is valid, but its final visit or result evidence remains non-complete or ambiguous. | unavailable |
+| `boundary-verified` | All implemented inspection stages passed and visits remain. This is evidence, not authority. | unavailable |
+| `no-remaining-work` | The legal visit prefix already reaches workflow end. | unavailable |
+
+The report returns stage states and counts plus a redacted boundary/next visit:
+block index, block type, and loop iteration numbers. It does not return block
+IDs, profile IDs, paths, prompts, commands, result bodies, raw validator
+messages, or session data. The snapshot and result plaintext exist only within
+the main-process call.
 
 ## Why ordered visits are necessary but insufficient
 
@@ -137,6 +161,21 @@ If the source is deleted, its revision changes, a profile changes, decryption
 availability changes, or the preview expires, confirmation fails and a new
 preflight is required.
 
+### Current implementation boundary
+
+| Step | Current build |
+|---|---|
+| Source lock + revision binding | Implemented; stale requests stop before decryption. |
+| Metadata gate | Implemented; blocked evidence is returned without decrypting. |
+| Snapshot protection/integrity | Implemented; context, canonical bytes, byte length, and public metadata are checked. |
+| Versioned workflow validation | Implemented by the same Node-compatible ESM loader used by the renderer; current v2 and migratable v1 identities are covered. |
+| Control cursor proof | Implemented by reproducing `WorkflowEngine._drive` visit addresses through nested loops under the same one-million-step limit. |
+| Result bindings | Every protected body is decrypted and length-checked internally; every future handoff must have the latest verified complete producer result. |
+| Runtime reconstruction | Conservative classification implemented. Directory state and session recipes can be derived; a pending team stage or an opaque prior session dependency blocks. Protected checkpoints and actual session creation remain pending. |
+| Profile authority | Every explicit referenced profile is resolved again by main. Missing profiles and observable assurance changes block. Historical full-identity fingerprints do not exist in journal v1; the report counts profiles without a baseline instead of pretending it proved identity continuity. |
+| Redacted preview | Implemented as five stage cards plus boundary/next visit. No confirmation token is issued. |
+| Confirmation, lineage, execution | Not implemented. `executionAvailable` is false in every report. |
+
 ## Journal evolution
 
 The executable phase should introduce a deliberate journal schema migration,
@@ -157,12 +196,15 @@ as workflow and result bodies. No plaintext fallback is added.
 
 ## UX contract
 
-The Runs detail card is evidence, not a call to action:
+The Runs detail card is evidence, not an execution call to action:
 
 - **Evidence blocked** names every cheap-gate reason.
 - **Decision required** explains that an external effect may already have
   happened.
-- **Boundary recorded** says exactly which deeper checks remain undone.
+- **Boundary recorded** offers **Inspect protected evidence** and names which
+  deeper checks have not run.
+- **Boundary verified** means the implemented protected checks passed; it still
+  offers no retry/skip choice and no execution action.
 - every state explicitly says resume execution is unavailable in this build.
 
 The future Resume action appears only after deep preflight succeeds. Its

@@ -2,12 +2,18 @@
 // Validate the static guide without adding a build system or DOM dependency.
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 
 const ROOT = path.join(__dirname, '..');
 const DOCS = path.join(ROOT, 'docs');
 const HTML_FILE = path.join(DOCS, 'index.html');
 const SCRIPT_FILE = path.join(DOCS, 'app.js');
 const STYLE_FILE = path.join(DOCS, 'styles.css');
+const KEY_ART_FILE = path.join(DOCS, 'assets', 'agent-orchestrator-key-art.png');
+const KEY_ART_METADATA_FILE = `${KEY_ART_FILE}.metadata.json`;
+const KEY_ART_PROMPT_FILE = `${KEY_ART_FILE}.prompt.txt`;
+const KEY_ART_NEGATIVE_FILE = `${KEY_ART_FILE}.negative.txt`;
+const CANONICAL_URL = 'https://snowyukitty.github.io/agent-orchestrator/';
 
 const failures = [];
 
@@ -24,6 +30,12 @@ function fail(message) {
   failures.push(message);
 }
 
+function readProvenanceText(file) {
+  // The stager writes text sidecars as conventional newline-terminated files;
+  // metadata retains the exact submitted value without that file terminator.
+  return fs.readFileSync(file, 'utf8').replace(/\r?\n$/, '');
+}
+
 const html = read(HTML_FILE);
 const script = read(SCRIPT_FILE);
 const styles = read(STYLE_FILE);
@@ -32,6 +44,10 @@ const requiredFiles = [
   path.join(DOCS, '.nojekyll'),
   path.join(DOCS, 'README.md'),
   path.join(DOCS, 'assets', 'icon.png'),
+  KEY_ART_FILE,
+  KEY_ART_METADATA_FILE,
+  KEY_ART_PROMPT_FILE,
+  KEY_ART_NEGATIVE_FILE,
 ];
 for (const file of requiredFiles) {
   if (!fs.existsSync(file)) fail(`missing: ${path.relative(ROOT, file)}`);
@@ -45,6 +61,40 @@ if (!/<html\s+lang="en"/i.test(html)) {
 }
 if (!/class="skip-link"/.test(html)) {
   fail('docs/index.html must retain a keyboard skip link');
+}
+if (!html.includes(`<link rel="canonical" href="${CANONICAL_URL}">`)) {
+  fail('docs/index.html must retain its exact canonical URL');
+}
+
+try {
+  const metadata = JSON.parse(fs.readFileSync(KEY_ART_METADATA_FILE, 'utf8'));
+  const imageHash = crypto
+    .createHash('sha256')
+    .update(fs.readFileSync(KEY_ART_FILE))
+    .digest('hex');
+  if (metadata?.status !== 'completed' || metadata?.route !== 'interactive-browser-control') {
+    fail('key art metadata must describe one completed interactive-browser result');
+  }
+  if (metadata?.result?.fileName !== path.basename(KEY_ART_FILE)) {
+    fail('key art metadata filename does not match the staged asset');
+  }
+  if (metadata?.result?.sha256 !== imageHash) {
+    fail('key art SHA-256 does not match its metadata sidecar');
+  }
+  if (readProvenanceText(KEY_ART_PROMPT_FILE) !== metadata?.prompt) {
+    fail('key art prompt sidecar does not match metadata');
+  }
+  if (readProvenanceText(KEY_ART_NEGATIVE_FILE) !== metadata?.negative_prompt) {
+    fail('key art negative-prompt sidecar does not match metadata');
+  }
+  if (
+    !html.includes(`<meta property="og:image:width" content="${metadata?.result?.width}">`)
+    || !html.includes(`<meta property="og:image:height" content="${metadata?.result?.height}">`)
+  ) {
+    fail('key art social metadata dimensions do not match the verified asset');
+  }
+} catch (_error) {
+  fail('key art or its provenance sidecars are unreadable');
 }
 
 const networkPatterns = [
@@ -77,7 +127,7 @@ for (const reference of references) {
     if (target && !ids.has(target)) fail(`missing anchor target: ${reference}`);
     continue;
   }
-  if (/^https:\/\/github\.com\//.test(reference)) continue;
+  if (/^https:\/\/github\.com\//.test(reference) || reference === CANONICAL_URL) continue;
   if (/^[a-z][a-z\d+.-]*:/i.test(reference)) {
     fail(`unsupported external reference: ${reference}`);
     continue;

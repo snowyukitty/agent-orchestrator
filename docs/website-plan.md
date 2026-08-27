@@ -42,7 +42,8 @@ Three pillars, in the order visitors should meet them:
   concurrently, then `Join Agents` progress `2 / 3 ready` → `3 / 3`.
 - **Assurance table**: L1 routed / L2 env / L0 native, verbatim from README.
 - **Run journal**: screenshot of the 📖 Runs view; one paragraph on immutable
-  snapshots and interrupted-run evidence.
+  snapshots, the explicit protected preflight, and why verified evidence still
+  does not enable replay.
 - **Footer**: GitHub, security policy, no analytics statement.
 
 ## Media assets to produce first (blockers for the build)
@@ -52,7 +53,7 @@ Three pillars, in the order visitors should meet them:
 | Hero loop (10–20 s, no audio) | HyperFrames (`snowy-hyperframes` pipeline) | storyboard: schedule fires → sessions open → join completes |
 | 5-hour-window explainer (60–90 s, narrated) | HyperFrames + Edge-TTS | the flagship promo video; also embedded in README via Release asset |
 | Fan-out/join clip | Screen capture of the real app | authenticity beats composition here |
-| Key art / social card | grok:a image gen or `/web-img` | 1200×630 OG image, block-editor motif |
+| Key art / social card | `/web-img` | shipped in the field guide: verified 1731×909 (40:21) route → fan-out → join → protected-journal motif, with prompt/integrity sidecars |
 | Optional cinematic teaser | Google Flow (`web-flow` skill) | costs real credits; only with explicit go-ahead |
 
 ## Technical shape
@@ -63,9 +64,10 @@ Three pillars, in the order visitors should meet them:
   `cloudflare-pages` skill); project name `agent-orchestrator`, production
   branch `main`, site source in a new `site/` directory so `docs/` stays the
   GitHub Pages root.
-- Videos are the only heavy assets: host them as GitHub Release assets and
-  reference by URL, keeping the Pages bundle tiny; provide poster images so
-  the page works with videos blocked.
+- Keep videos out of the Pages bundle: host reviewed renders as GitHub Release
+  assets and reference them by URL. The verified 1.6 MB key art is the one
+  bundled social image; provide lightweight poster images so the page still
+  works with videos blocked.
 - Reuse the field guide's design tokens (`docs/styles.css` palette) so the
   two surfaces read as one product.
 

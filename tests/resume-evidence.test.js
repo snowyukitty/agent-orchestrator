@@ -38,6 +38,7 @@ test('non-interrupted runs are outside the resume evidence contract', () => {
 
 test('durable untruncated metadata records a boundary without enabling execution', () => {
   const result = assessResumeEvidence(interruptedRun({
+    workflow: { formatVersion: 2 },
     blocks: [
       { blockIndex: 0, status: 'completed' },
       { blockIndex: 1, status: 'completed' },
@@ -51,7 +52,7 @@ test('durable untruncated metadata records a boundary without enabling execution
   assert.equal(result.uncertainVisitCount, 0);
 });
 
-test('lossy or unsupported metadata fails the evidence gate closed', () => {
+test('lossy or malformed metadata fails the evidence gate closed', () => {
   const result = assessResumeEvidence(interruptedRun({
     schemaVersion: 2,
     workflow: { formatVersion: 2 },
@@ -64,7 +65,6 @@ test('lossy or unsupported metadata fails the evidence gate closed', () => {
   assert.equal(result.state, RESUME_EVIDENCE_STATE.BLOCKED);
   assert.deepEqual(result.reasonCodes, [
     RESUME_EVIDENCE_REASON.JOURNAL_SCHEMA_UNSUPPORTED,
-    RESUME_EVIDENCE_REASON.WORKFLOW_FORMAT_UNSUPPORTED,
     RESUME_EVIDENCE_REASON.SNAPSHOT_NOT_DURABLE,
     RESUME_EVIDENCE_REASON.JOURNAL_TRUNCATED,
     RESUME_EVIDENCE_REASON.VISIT_ADDRESS_INCOMPLETE,

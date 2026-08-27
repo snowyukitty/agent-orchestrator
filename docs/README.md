@@ -17,9 +17,12 @@ JavaScript:
 The recipe composer always places every role-specific send before one shared
 `Join Agents` barrier. Its simulation demonstrates stage readiness. Result
 handoff is a separate explicit mode: only bounded, framed results are kept,
-while raw terminal history remains ephemeral. Interrupted records now receive
-a conservative metadata-only evidence assessment, but even a recorded boundary
-is not an executable plan; the guide does not claim automatic resume or general
+while raw terminal history remains ephemeral. Interrupted records first receive
+a conservative metadata-only evidence assessment. An explicit protected
+preflight can then decrypt and validate the captured snapshot in main, prove
+the nested-loop visit prefix, verify result bindings, classify runtime state,
+and re-resolve current account authority. Its report is redacted and still
+never enables execution; the guide does not claim automatic resume or general
 DAG execution. The accepted safety contract lives in
 [`resume-design.md`](resume-design.md). Framing preserves boundaries; it does
 not neutralize indirect prompt injection. Results derived from untrusted
@@ -35,6 +38,12 @@ cursor pages from a rebuildable public-metadata index; preview-first count/age
 retention is never automatic and never selects active runs. Startup recovery
 still validates source records because an unknowable active run must fail
 containment closed.
+
+`assets/agent-orchestrator-key-art.png` is the field guide's social preview
+image and the README hero. It was generated once through the signed-in browser
+workflow, visually inspected, then staged by `$web-img` with PNG integrity,
+dimension, prompt, and SHA-256 sidecars. The verified source is 1731×909; it is
+not presented as an app screenshot.
 
 Open `docs/index.html` in a browser to review it. Run `npm run check` to validate
 its local references, anchor targets, security boundary, and JavaScript syntax.

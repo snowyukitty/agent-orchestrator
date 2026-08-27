@@ -45,6 +45,9 @@ testable:
 - `resume-evidence.js` classifies whether interrupted-run metadata is blocked,
   needs a decision, or contains a recorded boundary; it never authorizes
   execution;
+- `resume-preflight.js` performs explicit, revision-bound protected inspection:
+  shared workflow validation, deterministic visit-prefix proof, result/runtime
+  checks, and a redacted report whose execution capability is always false;
 - `store.js` provides atomic JSON persistence;
 - `settings.js` normalizes machine-local preferences;
 - `user-data.js` performs the one-time singular identity migration;
@@ -116,10 +119,29 @@ the metadata gate found a durable, untruncated boundary; it is not a resume
 capability. Interrupted visits require a human decision because their external
 effects may have completed before the crash.
 
-The accepted [resume design](resume-design.md) requires a future main-owned
-decrypt/validation preflight, deterministic control-state reconstruction,
-profile re-resolution, a stale-safe confirmation token, and a new child run.
-The current build exposes no execution path.
+After that cheap gate passes, the user may explicitly run a main-owned deep
+preflight. Main re-reads the record under its run lock and binds the request to
+the displayed revision before decrypting anything. It verifies the protected
+snapshot's context, canonical bytes, and public metadata; loads it through the
+same versioned ESM validator used by the renderer; reproduces the engine's
+ordered control visits through nested loops; decrypts every protected result;
+classifies working-directory, session-recipe, opaque-runtime, and pending-team
+state; and resolves current profiles through main-process authority. Current
+format v2 and migratable v1 snapshots share this one validator, so the cheap
+metadata gate no longer carries a second format allowlist.
+
+Only counts, stage states, block type/index, and loop iteration numbers cross
+IPC. Workflow names aside from the already-public run summary, block IDs,
+profile IDs, paths, prompts, commands, result bodies, and validator errors stay
+inside main. A missing directory/profile/result, changed assurance, illegal
+visit prefix, pending team stage, or opaque session dependency blocks the
+report. An interrupted effect remains an explicit decision boundary.
+
+The accepted [resume design](resume-design.md) still requires a protected
+runtime checkpoint where trace proof is insufficient, full profile-identity
+fingerprints, a stale-safe confirmation token, immutable child-run lineage, and
+the crash/no-double-effect matrix before execution can ship. The current build
+exposes no execution path.
 
 ## Verification layers
 

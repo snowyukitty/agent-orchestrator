@@ -26,7 +26,10 @@ import {
   loadWorkflowDocument,
 } from './workflow-document.js';
 import { RunJournalViewState } from './run-journal-view-state.js';
-import { describeResumeEvidence } from './resume-evidence-view.js';
+import {
+  describeResumeEvidence,
+  describeResumePreflight,
+} from './resume-evidence-view.js';
 
 class App {
   constructor() {
@@ -231,6 +234,11 @@ class App {
       const resultButton = event.target.closest('[data-result-id]');
       if (resultButton) {
         await this._revealRunResult(resultButton.dataset.runId, resultButton.dataset.resultId);
+        return;
+      }
+      const preflightButton = event.target.closest('[data-resume-preflight]');
+      if (preflightButton) {
+        await this._inspectRunResume(preflightButton);
         return;
       }
       const deleteButton = event.target.closest('[data-delete-run]');
@@ -470,7 +478,17 @@ class App {
             · ${this._esc(String(resumeEvidence.durableResultCount))} durable result(s)
             · ${this._esc(String(resumeEvidence.unavailableResultCount))} unavailable
           </small>
-          <b>Resume execution is not available in this build.</b>
+          ${resumeEvidence.tone !== 'blocked' ? `
+          <div class="run-resume-preflight-slot"
+            data-preflight-slot="${this._esc(run.id)}">
+            <button class="btn btn-secondary btn-sm" type="button"
+              data-resume-preflight="${this._esc(run.id)}"
+              data-source-revision="${this._esc(String(run.revision))}">
+              Inspect protected evidence
+            </button>
+            <small>Decrypts locally in main and returns redacted facts only.</small>
+          </div>` : ''}
+          <b>Inspection never executes or retries a workflow.</b>
         </section>` : ''}
         <section class="run-detail-section">
           <h4>Block visits <span>${visits.length}</span></h4>
@@ -536,6 +554,57 @@ class App {
     } catch (error) {
       body.textContent = `Result unavailable: ${error.message}`;
     }
+  }
+
+  async _inspectRunResume(button) {
+    const runId = button?.dataset?.resumePreflight;
+    const sourceRevision = Number(button?.dataset?.sourceRevision);
+    const slot = button?.closest('[data-preflight-slot]');
+    if (!runId || !Number.isSafeInteger(sourceRevision) || !slot) return;
+
+    button.disabled = true;
+    button.textContent = 'Inspecting protected evidence…';
+    try {
+      const report = await window.api.preflightRunResume({ runId, sourceRevision });
+      if (!slot.isConnected || this._runJournalView.selectedRunId !== runId) return;
+      slot.innerHTML = this._renderResumePreflight(report);
+    } catch (error) {
+      if (!slot.isConnected || this._runJournalView.selectedRunId !== runId) return;
+      slot.innerHTML = `
+        <div class="run-preflight-error">
+          Preflight unavailable: ${this._esc(error.message)}
+        </div>`;
+    }
+  }
+
+  _renderResumePreflight(report) {
+    const preflight = describeResumePreflight(report);
+    if (!preflight) return '<div class="run-preflight-error">Preflight is not applicable.</div>';
+    return `
+      <section class="run-resume-preflight resume-preflight-${this._esc(preflight.tone)}">
+        <div class="run-resume-head">
+          <span>Deep preflight · source r${this._esc(String(preflight.sourceRevision))}</span>
+          <strong>${this._esc(preflight.label)}</strong>
+        </div>
+        <p>${this._esc(preflight.summary)}</p>
+        <div class="run-preflight-stages">
+          ${preflight.stages.map(item => `
+          <div class="run-preflight-stage stage-${this._esc(item.state)}">
+            <span>
+              <strong>${this._esc(item.label)}</strong>
+              <small>${this._esc(item.detail)}</small>
+            </span>
+            <b>${this._esc(item.stateLabel)}</b>
+          </div>`).join('')}
+        </div>
+        ${preflight.boundary ? `<p><strong>Decision boundary:</strong> ${this._esc(preflight.boundary)}</p>` : ''}
+        ${preflight.next ? `<p><strong>Next proven visit:</strong> ${this._esc(preflight.next)}</p>` : ''}
+        ${preflight.reasons.length ? `
+        <ul>
+          ${preflight.reasons.map(reason => `<li>${this._esc(reason)}</li>`).join('')}
+        </ul>` : ''}
+        <b>Resume execution remains unavailable; no effect was emitted.</b>
+      </section>`;
   }
 
   _formatJournalTime(value) {

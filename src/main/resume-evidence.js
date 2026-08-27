@@ -9,7 +9,6 @@
 
 const RESUME_EVIDENCE_VERSION = 1;
 const SUPPORTED_JOURNAL_SCHEMA_VERSION = 1;
-const SUPPORTED_WORKFLOW_FORMAT_VERSIONS = new Set([1]);
 
 const RESUME_EVIDENCE_STATE = Object.freeze({
   NOT_APPLICABLE: 'not-applicable',
@@ -104,8 +103,11 @@ function assessResumeEvidence(run) {
   if (run.schemaVersion !== SUPPORTED_JOURNAL_SCHEMA_VERSION) {
     addReason(blockers, RESUME_EVIDENCE_REASON.JOURNAL_SCHEMA_UNSUPPORTED);
   }
-  if (!SUPPORTED_WORKFLOW_FORMAT_VERSIONS.has(run.workflow?.formatVersion)) {
-    addReason(blockers, RESUME_EVIDENCE_REASON.WORKFLOW_FORMAT_UNSUPPORTED);
+  // Workflow compatibility belongs to the deep preflight's shared versioned
+  // loader. Hard-coding renderer versions into this cheap metadata gate once
+  // caused current v2 runs to be rejected as though only v1 existed.
+  if (!Number.isSafeInteger(run.workflow?.formatVersion) || run.workflow.formatVersion < 0) {
+    addReason(blockers, RESUME_EVIDENCE_REASON.EVIDENCE_INVALID);
   }
   if (run.snapshot?.storage !== 'encrypted') {
     addReason(blockers, RESUME_EVIDENCE_REASON.SNAPSHOT_NOT_DURABLE);

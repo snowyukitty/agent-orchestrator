@@ -100,6 +100,7 @@ const api = {
   finishRunJournal: (params) => invokeTrusted('journal:finish', params),
   listRunJournal: (params) => invokeTrusted('journal:list', params || {}),
   getRunJournal: (params) => invokeTrusted('journal:get', params),
+  preflightRunResume: (params) => invokeTrusted('journal:resume-preflight', params),
   getRunResult: (params) => invokeTrusted('journal:result-get', params),
   deleteRunJournal: (params) => invokeTrusted('journal:delete', params),
   pruneRunJournal: (params) => invokeTrusted('journal:prune', params),

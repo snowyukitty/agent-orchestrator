@@ -67,7 +67,10 @@ import {
   utf8ByteLength,
 } from './result-handoff.js';
 import { RunJournalViewState } from './run-journal-view-state.js';
-import { describeResumeEvidence } from './resume-evidence-view.js';
+import {
+  describeResumeEvidence,
+  describeResumePreflight,
+} from './resume-evidence-view.js';
 
 /**
  * Run every case and return a result summary.
@@ -86,6 +89,8 @@ export async function runSelfTest() {
   try {
     ok('preload-exposes-dedicated-structured-input',
       typeof window.api?.sendStructuredInput === 'function');
+    ok('preload-exposes-explicit-resume-preflight',
+      typeof window.api?.preflightRunResume === 'function');
     await testLoops(eq);
     await testTemplates(eq);
     testHandoffWarning(ok);
@@ -142,6 +147,65 @@ function testResumeEvidenceView(eq) {
   ], [1, true]);
   eq('resume-evidence-hides-non-interrupted-runs',
     describeResumeEvidence({ state: 'not-applicable' }), null);
+
+  const preflight = describeResumePreflight({
+    state: 'boundary-verified',
+    reasonCodes: [],
+    source: { revision: 9 },
+    snapshot: {
+      state: 'verified',
+      sourceFormatVersion: 1,
+      currentFormatVersion: 2,
+      migrated: true,
+      blockCount: 6,
+    },
+    trace: {
+      state: 'verified',
+      completedVisitCount: 4,
+      uncertainVisitCount: 0,
+      remainingVisitCount: 2,
+      boundary: null,
+      next: {
+        blockIndex: 3,
+        blockType: 'agentJoin',
+        iterationPath: [{ iteration: 2, total: 3 }],
+      },
+    },
+    results: {
+      state: 'verified',
+      verifiedCount: 1,
+      requiredCount: 1,
+      availableRequiredCount: 1,
+    },
+    runtime: {
+      state: 'verified',
+      workingDirectoryReconstructed: true,
+      sessionRecipeCount: 2,
+      pendingTeamStage: false,
+      opaqueInteractionCount: 0,
+    },
+    profiles: {
+      state: 'verified',
+      referencedCount: 2,
+      resolvedCount: 2,
+      missingCount: 0,
+      assuranceChangedCount: 0,
+      baselineMissingCount: 1,
+    },
+  });
+  eq('resume-preflight-view-is-redacted-and-specific', [
+    preflight.label,
+    preflight.tone,
+    preflight.next,
+    preflight.stages.length,
+    preflight.executionAvailable,
+  ], [
+    'Boundary verified',
+    'verified',
+    'Step 4 · agentJoin · loop 2/3',
+    5,
+    false,
+  ]);
 }
 
 function testHandoffWarning(ok) {

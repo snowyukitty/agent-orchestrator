@@ -12,6 +12,22 @@
     content="A practical field guide to routing accounts, fanning prompts across CLI agents, capturing explicit results, and handing bounded bundles to later stages."
   >
   <meta name="theme-color" content="#07111f">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Agent Orchestrator — Run many agents. Join when ready.">
+  <meta
+    property="og:description"
+    content="A practical field guide to fail-closed account routing, concurrent agent stages, explicit result handoff, and protected run evidence."
+  >
+  <meta property="og:url" content="https://snowyukitty.github.io/agent-orchestrator/">
+  <meta property="og:image" content="https://snowyukitty.github.io/agent-orchestrator/assets/agent-orchestrator-key-art.png">
+  <meta property="og:image:width" content="1731">
+  <meta property="og:image:height" content="909">
+  <meta property="og:image:alt" content="A routed workflow fans out across three agent lanes, converges at a join, and enters a protected journal boundary.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Agent Orchestrator — Run many agents. Join when ready.">
+  <meta name="twitter:description" content="Assurance-aware CLI agent workflows with concurrent stages and protected run evidence.">
+  <meta name="twitter:image" content="https://snowyukitty.github.io/agent-orchestrator/assets/agent-orchestrator-key-art.png">
+  <link rel="canonical" href="https://snowyukitty.github.io/agent-orchestrator/">
   <title>Agent Orchestrator — Field Guide</title>
   <link rel="icon" href="assets/icon.png">
   <link rel="stylesheet" href="styles.css">
@@ -479,20 +495,25 @@
         </article>
         <article>
           <span class="integrity-mark">03</span>
-          <h3>Durable run evidence</h3>
-          <p>Run Journal records main-owned status and block visits. Interrupted-run detail names blocked evidence, ambiguous outcomes, or a recorded boundary—without offering replay. Stable cursor pages use a rebuildable public-metadata index; count/age retention is previewed and never selects active runs. Snapshots and explicit result bodies stay protected separately, while raw terminal history is never copied into it.</p>
+          <h3>Protected resume preflight</h3>
+          <p>Run Journal records main-owned status and block visits. After its cheap evidence gate, an explicit local preflight can decrypt the captured snapshot, prove nested-loop visit order, verify protected results, classify runtime reconstruction, and re-resolve accounts. Only redacted facts return to the Runs view; no replay action exists. Stable cursor pages and preview-first retention stay metadata-only.</p>
         </article>
       </div>
 
       <div class="integrity-note">
         <span aria-hidden="true">≠</span>
         <p>
-          The journal is durable evidence, not an automatic resume point. Even
-          “boundary recorded” means only that the metadata gate found durable,
-          untruncated evidence; snapshot decryption, control-state
-          reconstruction, runtime rebuilding, and profile re-resolution have
-          not run. An interrupted block may already have produced an external
-          effect, so it is never retried automatically.
+          The journal is durable evidence, not an automatic resume point.
+          “Boundary recorded” means the cheap metadata gate found durable,
+          untruncated evidence and may offer <strong>Inspect protected
+          evidence</strong>. That explicit inspection is bound to the displayed
+          source revision and runs only in main: it checks protected bytes with
+          the same versioned workflow validator, proves the exact visit prefix,
+          verifies result bindings, classifies runtime state, and resolves
+          current profile authority. The report omits paths, prompts, commands,
+          profile IDs, block IDs, and result bodies. “Boundary verified” still
+          is not permission to execute. An interrupted block may already have
+          produced an external effect, so it is never retried automatically.
           Explicit bounded results can feed a later Send block; arbitrary PTY
           history cannot, and workflows remain ordered programs rather than a
           general DAG. Protected journal files stay until you explicitly delete

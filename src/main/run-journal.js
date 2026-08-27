@@ -17,6 +17,7 @@ const {
   writeJsonAtomic,
 } = require('./store');
 const { assessResumeEvidence } = require('./resume-evidence');
+const { inspectResumeRun } = require('./resume-preflight');
 
 const SCHEMA_VERSION = 1;
 const ENCRYPTED_ENVELOPE_VERSION = 1;
@@ -2186,6 +2187,43 @@ class RunJournal {
     return run ? publicRun(run) : null;
   }
 
+  /**
+   * Explicit, revision-bound inspection of one interrupted run. Protected
+   * bodies stay inside main; inspectResumeRun returns counts, stage states,
+   * and redacted control addresses only. No session or execution is created.
+   */
+  async preflightResume(input, {
+    resolveProfile = null,
+    isDirectory = null,
+  } = {}) {
+    const raw = asObject(input, 'preflightResume payload');
+    assertOnlyKeys(
+      raw,
+      new Set(['runId', 'sourceRevision']),
+      'preflightResume payload'
+    );
+    const runId = asRunId(raw.runId);
+    const sourceRevision = asPositiveInt(raw.sourceRevision, 'sourceRevision');
+
+    return this._withLock(`run:${runId}`, async () => {
+      const run = this._readRun(runId);
+      if (!run) throw new RunJournalError('Run was not found', 'not-found');
+      if (run.revision !== sourceRevision) {
+        throw new RunJournalError(
+          'The source run changed; reload it before inspecting resume evidence',
+          'stale-source'
+        );
+      }
+      return inspectResumeRun({
+        run,
+        readWorkflow: () => this._readWorkflowSnapshot(run),
+        readResult: result => this._readResultBody(run, result),
+        resolveProfile,
+        isDirectory,
+      });
+    });
+  }
+
   async getResult(input) {
     const raw = asObject(input, 'getResult payload');
     assertOnlyKeys(raw, new Set(['runId', 'resultId']), 'getResult payload');
@@ -2196,10 +2234,65 @@ class RunJournal {
     const result = run.results.find(entry => entry.id === resultId);
     if (!result) return null;
 
+    const body = await this._readResultBody(run, result);
+    return { ...publicResult(result), body };
+  }
+
+  async _readWorkflowSnapshot(run) {
+    if (run.snapshot.storage === STORAGE.MEMORY) {
+      throw new RunJournalError('Workflow snapshot is unavailable', 'body-unavailable');
+    }
+    if (!await this._encryptionAvailable({ decrypt: true })) {
+      throw new RunJournalError(
+        'Encrypted workflow snapshot is unavailable on this system',
+        'body-unavailable'
+      );
+    }
+
+    let body;
+    try {
+      const context = { kind: 'workflow', runId: run.id };
+      const decrypted = await this.encryption.decrypt(
+        run.snapshot.ciphertext,
+        context
+      );
+      body = decodeEncryptedEnvelope(decrypted, context);
+    } catch (_error) {
+      throw new RunJournalError(
+        'Encrypted workflow snapshot could not be decrypted',
+        'decrypt-failed'
+      );
+    }
+    if (typeof body !== 'string' || utf8ByteLength(body) !== run.snapshot.byteLength) {
+      throw new RunJournalError(
+        'Workflow snapshot failed its integrity check',
+        'integrity-failed'
+      );
+    }
+
+    try {
+      const workflow = JSON.parse(body);
+      const normalized = normalizeWorkflowSnapshot(workflow);
+      if (
+        normalized.plaintext !== body
+        || stableJson(normalized.metadata) !== stableJson(run.workflow)
+      ) {
+        throw new Error('snapshot metadata mismatch');
+      }
+      return workflow;
+    } catch (_error) {
+      throw new RunJournalError(
+        'Workflow snapshot failed its integrity check',
+        'integrity-failed'
+      );
+    }
+  }
+
+  async _readResultBody(run, result) {
     let body;
     if (result.storage === STORAGE.MEMORY) {
       body = await this._withLock('memory', async () => {
-        const stored = this.memory.get(this._resultMemoryKey(runId, resultId));
+        const stored = this.memory.get(this._resultMemoryKey(run.id, result.id));
         if (stored === undefined) {
           throw new RunJournalError(
             'Result body is unavailable',
@@ -2216,7 +2309,7 @@ class RunJournal {
         );
       }
       try {
-        const context = { kind: 'result', runId, resultId };
+        const context = { kind: 'result', runId: run.id, resultId: result.id };
         const decrypted = await this.encryption.decrypt(
           result.ciphertext,
           context
@@ -2242,7 +2335,7 @@ class RunJournal {
         'integrity-failed'
       );
     }
-    return { ...publicResult(result), body };
+    return body;
   }
 
   async recoverInterrupted() {

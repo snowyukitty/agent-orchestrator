@@ -13,20 +13,25 @@ purpose — items land when they are verified, not when a calendar says so.
 - **Journal scale and retention** — stable cursor pages now read a rebuildable
   public-metadata index; count/age pruning is preview-first, user-confirmed,
   and excludes active runs (implemented on `main`, unreleased).
-- **Resume safety contract** — interrupted-run detail now distinguishes blocked
-  evidence, human-review boundaries, and cleanly recorded boundaries without
-  exposing an execution action. The accepted design specifies a main-owned
-  deep preflight and child-run lineage (implemented on `main`, unreleased).
+- **Protected resume preflight** — interrupted-run detail now advances from a
+  cheap metadata gate to an explicit, revision-bound main-process inspection.
+  It decrypts and validates the captured snapshot, proves nested-loop visit
+  order, verifies protected results, classifies safe runtime reconstruction,
+  and re-resolves profiles while returning only redacted facts. Execution is
+  still absent (implemented on `main`, unreleased).
 - **Promo media** — two HyperFrames explainers (product overview, 5-hour
   window) and a 30 s cinematic hero b-roll exist as candidates behind their
-  human review gates; they attach to the README and website once reviewed.
+  human review gates; they attach to the README and website once reviewed. A
+  one-shot verified key art image now fronts the README and social metadata.
 
 ## Next (v0.5)
 
-- **Resume preflight** — decrypt and validate the captured snapshot, prove the
-  control cursor, rebuild only safe runtime state, re-resolve profiles, and
-  issue a stale-safe confirmation preview. Execution stays gated until the
-  [resume design](resume-design.md)'s crash and no-double-effect matrix passes.
+- **Resume confirmation contract** — evolve the journal with protected runtime
+  checkpoints and full profile-identity fingerprints, then add immutable child
+  lineage plus a short-lived confirmation token bound to the source revision,
+  verified facts, and an explicit `abort` / `skip` / `retry` disposition.
+  Execution stays gated until the [resume design](resume-design.md)'s crash and
+  no-double-effect matrix passes.
 - **Licensing decision** — the repository is public but carries no license,
   which legally means "all rights reserved" and blocks adoption. Choosing one
   (MIT/Apache-2.0 vs. something protective) is an owner decision.
