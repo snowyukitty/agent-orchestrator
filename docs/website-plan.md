@@ -1,9 +1,19 @@
 # Website plan — `agent-orchestrator.pages.dev` (future work)
 
-Status: **design only, deliberately not built yet.** The GitHub-hosted field
-guide (`docs/index.html`, served by GitHub Pages) stays the primary product
-page; the Cloudflare Pages site is a secondary marketing mirror we build when
-the promo assets exist.
+Status: **v1 live as a mirror; the dedicated landing page below is future
+work.** The GitHub Pages field guide is the primary product page, live at
+<https://snowyukitty.github.io/agent-orchestrator/>. The same `docs/` artifact
+is mirrored on Cloudflare Pages at
+<https://agent-orchestrator-855.pages.dev/> (the bare `agent-orchestrator`
+pages.dev subdomain was already taken globally; renaming or attaching a custom
+domain is an open decision). The dedicated marketing landing (v2) below waits
+for the promo video assets.
+
+Deploy command for the mirror (established portfolio flow):
+
+```bash
+wrangler pages deploy docs --project-name=agent-orchestrator --branch=main
+```
 
 ## Positioning
 

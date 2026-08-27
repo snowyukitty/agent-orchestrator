@@ -272,11 +272,12 @@ class App {
         const durability = run.snapshot?.storage === 'memory'
           ? ' · memory only'
           : '';
+        const truncated = run.truncated ? ' · journal truncated' : '';
         return `
           <button class="run-row${selected}" type="button" data-run-id="${this._esc(run.id)}">
             <span class="run-row-main">
               <strong>${this._esc(name)}</strong>
-              <small>${this._esc(when)}${this._esc(durability)}</small>
+              <small>${this._esc(when)}${this._esc(durability)}${this._esc(truncated)}</small>
             </span>
             <span class="run-status status-${this._esc(run.status)}">${this._esc(run.status)}</span>
           </button>`;
@@ -332,6 +333,12 @@ class App {
           </div>
           <span class="run-status status-${this._esc(run.status)}">${this._esc(run.status)}</span>
         </div>
+        ${run.truncated ? `
+        <div class="run-truncated-note">
+          ⚠ Journal truncated (${this._esc(run.truncated.reason || 'capacity')}).
+          The run kept executing, but later block visits and results were not
+          recorded; open visits at truncation closed as interrupted.
+        </div>` : ''}
         <section class="run-detail-section">
           <h4>Block visits <span>${visits.length}</span></h4>
           ${visits.length ? visits.map((visit, index) => `

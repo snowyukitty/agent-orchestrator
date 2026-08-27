@@ -14,8 +14,9 @@ Project references:
 
 - [Getting started](docs/getting-started.md)
 - [Architecture and safety model](docs/architecture.md)
-- [Interactive field guide](docs/README.md)
+- **[Interactive field guide — live](https://snowyukitty.github.io/agent-orchestrator/)** ([source](docs/README.md))
 - [Getting two usage windows out of one morning](docs/five-hour-window.md)
+- [Roadmap](docs/roadmap.md)
 - [Website plan (future)](docs/website-plan.md)
 - [Security policy](SECURITY.md)
 - [Contribution and verification guide](CONTRIBUTING.md)
@@ -33,11 +34,15 @@ burn rate and pre-warming several accounts at once with a single
 
 ## Field guide
 
-The [`docs/`](docs/README.md) field guide turns the account model, first-run
-recovery path, team-stage recipe, signal-aware joining, workflow integrity, and
-privacy boundaries into a responsive, interactive walkthrough. It is plain
-HTML, CSS, and JavaScript: no build step, backend, analytics, remote runtime
-assets, or account data access. Open `docs/index.html` directly in a browser.
+The field guide turns the account model, first-run recovery path, team-stage
+recipe, signal-aware joining, workflow integrity, and privacy boundaries into
+a responsive, interactive walkthrough. It is plain HTML, CSS, and JavaScript:
+no build step, backend, analytics, remote runtime assets, or account data
+access.
+
+Read it live at **<https://snowyukitty.github.io/agent-orchestrator/>**
+(mirrored at <https://agent-orchestrator-855.pages.dev/>), or open
+[`docs/index.html`](docs/README.md) directly in a browser.
 
 ## Multi-account agent control
 

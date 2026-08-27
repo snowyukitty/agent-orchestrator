@@ -1620,6 +1620,15 @@ html, body {
 .run-status.status-cancelled,
 .run-status.status-stopped { color: var(--accent-yellow); }
 
+.run-truncated-note {
+  margin: var(--sp-2) 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--accent-yellow);
+  border-radius: 6px;
+  color: var(--accent-yellow);
+  font-size: var(--font-size-xs);
+}
+
 .run-detail-head,
 .run-result-summary,
 .run-visit {
