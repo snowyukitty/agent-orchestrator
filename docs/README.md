@@ -17,11 +17,13 @@ JavaScript:
 The recipe composer always places every role-specific send before one shared
 `Join Agents` barrier. Its simulation demonstrates stage readiness. Result
 handoff is a separate explicit mode: only bounded, framed results are kept,
-while raw terminal history remains ephemeral. The journal records evidence for
-a future resume design, but the guide does not claim automatic resume or
-general DAG execution. Framing preserves boundaries; it does not neutralize
-indirect prompt injection. Results derived from untrusted sources still require
-restricted downstream tools or human review before a sensitive stage. For
+while raw terminal history remains ephemeral. Interrupted records now receive
+a conservative metadata-only evidence assessment, but even a recorded boundary
+is not an executable plan; the guide does not claim automatic resume or general
+DAG execution. The accepted safety contract lives in
+[`resume-design.md`](resume-design.md). Framing preserves boundaries; it does
+not neutralize indirect prompt injection. Results derived from untrusted
+sources still require restricted downstream tools or human review before a sensitive stage. For
 routed Codex accounts, an Agent Session workflow block waits for the
 account-shell readiness signal and invokes the session-local `codex` wrapper
 with a fixed trailing shell exit; opening the same account manually still

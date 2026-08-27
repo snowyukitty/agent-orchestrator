@@ -181,6 +181,8 @@ test('encrypted run persists one atomic file with public metadata and no plainte
   assert.equal(Object.hasOwn(run.snapshot, 'ciphertext'), false);
   assert.equal(Object.hasOwn(run.snapshot, 'hash'), false);
   assert.equal(Object.hasOwn(run, 'operations'), false);
+  assert.equal(run.resumeEvidence.state, 'not-applicable');
+  assert.equal(run.resumeEvidence.executionAvailable, false);
 
   const file = onlyJournalFile(dir);
   assert.equal(path.basename(file), `${run.id}.json`);
@@ -1155,6 +1157,9 @@ test('recoverInterrupted atomically terminals active runs and is idempotent', as
   assert.equal(recovered[0].blocks[0].status, BLOCK_STATUS.INTERRUPTED);
   assert.equal(recovered[0].blocks[0].reasonCode, 'process-recovery');
   assert.equal(recovered[0].events.at(-1).type, 'run.interrupted');
+  assert.equal(recovered[0].resumeEvidence.state, 'review-required');
+  assert.deepEqual(recovered[0].resumeEvidence.reasonCodes, ['visit-outcome-uncertain']);
+  assert.equal(recovered[0].resumeEvidence.executionAvailable, false);
   assert.deepEqual(await journal.recoverInterrupted(), []);
   assert.equal((await journal.getRun(finished.id)).status, RUN_STATUS.COMPLETED);
 });

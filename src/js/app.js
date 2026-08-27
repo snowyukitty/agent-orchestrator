@@ -26,6 +26,7 @@ import {
   loadWorkflowDocument,
 } from './workflow-document.js';
 import { RunJournalViewState } from './run-journal-view-state.js';
+import { describeResumeEvidence } from './resume-evidence-view.js';
 
 class App {
   constructor() {
@@ -433,6 +434,9 @@ class App {
       const finished = run.finishedAt
         ? ` → ${this._formatJournalTime(run.finishedAt)}`
         : '';
+      const resumeEvidence = run.status === 'interrupted'
+        ? describeResumeEvidence(run.resumeEvidence)
+        : null;
 
       detail.innerHTML = `
         <div class="run-detail-head">
@@ -449,6 +453,25 @@ class App {
           The run kept executing, but later block visits and results were not
           recorded; open visits at truncation closed as interrupted.
         </div>` : ''}
+        ${resumeEvidence ? `
+        <section class="run-resume-evidence resume-evidence-${resumeEvidence.tone}">
+          <div class="run-resume-head">
+            <span>Resume evidence</span>
+            <strong>${this._esc(resumeEvidence.label)}</strong>
+          </div>
+          <p>${this._esc(resumeEvidence.summary)}</p>
+          ${resumeEvidence.reasons.length ? `
+          <ul>
+            ${resumeEvidence.reasons.map(reason => `<li>${this._esc(reason)}</li>`).join('')}
+          </ul>` : ''}
+          <small>
+            ${this._esc(String(resumeEvidence.completedVisitCount))} completed visit(s)
+            · ${this._esc(String(resumeEvidence.uncertainVisitCount))} uncertain
+            · ${this._esc(String(resumeEvidence.durableResultCount))} durable result(s)
+            · ${this._esc(String(resumeEvidence.unavailableResultCount))} unavailable
+          </small>
+          <b>Resume execution is not available in this build.</b>
+        </section>` : ''}
         <section class="run-detail-section">
           <h4>Block visits <span>${visits.length}</span></h4>
           ${visits.length ? visits.map((visit, index) => `

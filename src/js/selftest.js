@@ -67,6 +67,7 @@ import {
   utf8ByteLength,
 } from './result-handoff.js';
 import { RunJournalViewState } from './run-journal-view-state.js';
+import { describeResumeEvidence } from './resume-evidence-view.js';
 
 /**
  * Run every case and return a result summary.
@@ -89,6 +90,7 @@ export async function runSelfTest() {
     await testTemplates(eq);
     testHandoffWarning(ok);
     testRunJournalViewState(eq);
+    testResumeEvidenceView(eq);
     await testResultHandoff(eq, ok);
     await testRunJournalBridge(eq, ok);
     await testAbortSpawnRaces(eq, ok);
@@ -109,6 +111,37 @@ export async function runSelfTest() {
     failures,
     details: passed ? 'all engine self-tests passed' : failures.join('; '),
   };
+}
+
+function testResumeEvidenceView(eq) {
+  const recorded = describeResumeEvidence({
+    state: 'recorded-boundary',
+    reasonCodes: [],
+    completedVisitCount: 4,
+    uncertainVisitCount: 0,
+    durableResultCount: 2,
+    unavailableResultCount: 0,
+    executionAvailable: false,
+  });
+  eq('resume-evidence-recorded-boundary-copy', [
+    recorded.label,
+    recorded.tone,
+    recorded.completedVisitCount,
+    recorded.executionAvailable,
+  ], ['Boundary recorded', 'recorded', 4, false]);
+
+  const review = describeResumeEvidence({
+    state: 'review-required',
+    reasonCodes: ['visit-outcome-uncertain', 'visit-outcome-uncertain'],
+    completedVisitCount: 1,
+    uncertainVisitCount: 1,
+  });
+  eq('resume-evidence-reasons-are-human-and-deduplicated', [
+    review.reasons.length,
+    review.reasons[0].includes('external effects may have happened'),
+  ], [1, true]);
+  eq('resume-evidence-hides-non-interrupted-runs',
+    describeResumeEvidence({ state: 'not-applicable' }), null);
 }
 
 function testHandoffWarning(ok) {

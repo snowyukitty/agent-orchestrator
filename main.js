@@ -27,6 +27,7 @@ const { prepareUserData } = require('./src/main/user-data');
 const { RoutedDiscoveryCache } = require('./src/main/routed-cache');
 const { ShutdownCoordinator } = require('./src/main/shutdown');
 const { RunJournal } = require('./src/main/run-journal');
+const { seedVisualRunJournal } = require('./src/main/visual-fixtures');
 const {
   RendererDocumentLifecycle,
   RendererContainmentCoordinator,
@@ -616,6 +617,10 @@ if (!gotSingleInstanceLock) {
         const interrupted = await runJournal.recoverInterrupted();
         if (interrupted.length) {
           console.log(`[Journal] recovered ${interrupted.length} interrupted run(s)`);
+        }
+        if (isVisualTest) {
+          const fixture = await seedVisualRunJournal(runJournal);
+          console.log(`[Journal] prepared ${fixture.recoveredCount} visual resume scenario(s)`);
         }
       } catch (error) {
         const code = typeof error?.code === 'string' ? error.code : 'recovery-error';

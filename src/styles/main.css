@@ -1685,6 +1685,53 @@ html, body {
   font-size: var(--font-size-xs);
 }
 
+.run-resume-evidence {
+  display: grid;
+  gap: var(--sp-2);
+  margin: var(--sp-3) 0;
+  padding: var(--sp-3);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  background: var(--surface-glass);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.run-resume-evidence.resume-evidence-recorded { color: var(--accent-cyan); }
+.run-resume-evidence.resume-evidence-review { color: var(--accent-yellow); }
+.run-resume-evidence.resume-evidence-blocked { color: var(--accent-red); }
+
+.run-resume-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+}
+
+.run-resume-head span {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.run-resume-evidence p,
+.run-resume-evidence li,
+.run-resume-evidence small {
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.run-resume-evidence ul {
+  display: grid;
+  gap: 4px;
+  padding-left: var(--sp-4);
+}
+
+.run-resume-evidence small { color: var(--text-muted); }
+.run-resume-evidence > b { font-weight: 600; }
+
 .run-detail-head,
 .run-result-summary,
 .run-visit {

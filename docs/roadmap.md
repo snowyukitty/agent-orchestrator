@@ -13,15 +13,20 @@ purpose — items land when they are verified, not when a calendar says so.
 - **Journal scale and retention** — stable cursor pages now read a rebuildable
   public-metadata index; count/age pruning is preview-first, user-confirmed,
   and excludes active runs (implemented on `main`, unreleased).
+- **Resume safety contract** — interrupted-run detail now distinguishes blocked
+  evidence, human-review boundaries, and cleanly recorded boundaries without
+  exposing an execution action. The accepted design specifies a main-owned
+  deep preflight and child-run lineage (implemented on `main`, unreleased).
 - **Promo media** — two HyperFrames explainers (product overview, 5-hour
   window) and a 30 s cinematic hero b-roll exist as candidates behind their
   human review gates; they attach to the README and website once reviewed.
 
 ## Next (v0.5)
 
-- **Resume design** — the journal already records immutable snapshots and
-  ordered visits with terminal states; v0.5 designs (not necessarily ships)
-  restart-from-evidence for interrupted runs.
+- **Resume preflight** — decrypt and validate the captured snapshot, prove the
+  control cursor, rebuild only safe runtime state, re-resolve profiles, and
+  issue a stale-safe confirmation preview. Execution stays gated until the
+  [resume design](resume-design.md)'s crash and no-double-effect matrix passes.
 - **Licensing decision** — the repository is public but carries no license,
   which legally means "all rights reserved" and blocks adoption. Choosing one
   (MIT/Apache-2.0 vs. something protective) is an owner decision.

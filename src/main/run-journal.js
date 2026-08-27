@@ -16,6 +16,7 @@ const {
   readJsonStrict,
   writeJsonAtomic,
 } = require('./store');
+const { assessResumeEvidence } = require('./resume-evidence');
 
 const SCHEMA_VERSION = 1;
 const ENCRYPTED_ENVELOPE_VERSION = 1;
@@ -850,6 +851,7 @@ function publicRun(run) {
     blocks: run.blocks.map(publicBlock),
     results: run.results.map(publicResult),
     events: run.events.map(publicEvent),
+    resumeEvidence: assessResumeEvidence(run),
   };
 }
 

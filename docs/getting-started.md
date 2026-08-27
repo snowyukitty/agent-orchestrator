@@ -81,7 +81,10 @@ to the current session, one agent's sessions, or everything at once.
 - Run journal: encrypted with the OS keychain via Electron `safeStorage`,
   inspectable in-app under **📖 Runs**. History loads in stable cursor pages.
   Retention by terminal-run count and/or age is previewed before confirmation;
-  it never runs automatically and never deletes an active run.
+  it never runs automatically and never deletes an active run. Interrupted-run
+  detail reports whether evidence is blocked, ambiguous, or a recorded boundary;
+  this is inspection only, not automatic resume. See the
+  [resume design](resume-design.md).
 - Settings: `%APPDATA%/agent-orchestrator/settings.json`.
 
 No telemetry, no analytics, no network calls of its own — the only processes

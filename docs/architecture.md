@@ -42,6 +42,9 @@ testable:
   termination, and public session metadata;
 - `run-journal.js` owns protected run records, the rebuildable public-metadata
   index, stable cursor pages, and preview-first terminal-run retention;
+- `resume-evidence.js` classifies whether interrupted-run metadata is blocked,
+  needs a decision, or contains a recorded boundary; it never authorizes
+  execution;
 - `store.js` provides atomic JSON persistence;
 - `settings.js` normalizes machine-local preferences;
 - `user-data.js` performs the one-time singular identity migration;
@@ -103,6 +106,20 @@ for rollback.
 
 Smoke and self-test modes use temporary user data and cannot touch production
 settings or workflows.
+
+## Interrupted-run evidence
+
+Crash recovery changes active runs and visits to terminal `interrupted` states.
+The public detail projection adds a derived resume-evidence assessment without
+decrypting the workflow or result bodies. `recorded-boundary` means only that
+the metadata gate found a durable, untruncated boundary; it is not a resume
+capability. Interrupted visits require a human decision because their external
+effects may have completed before the crash.
+
+The accepted [resume design](resume-design.md) requires a future main-owned
+decrypt/validation preflight, deterministic control-state reconstruction,
+profile re-resolution, a stale-safe confirmation token, and a new child run.
+The current build exposes no execution path.
 
 ## Verification layers
 

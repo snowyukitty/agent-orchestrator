@@ -14,6 +14,7 @@ Project references:
 
 - [Getting started](docs/getting-started.md)
 - [Architecture and safety model](docs/architecture.md)
+- [Interrupted-run resume design](docs/resume-design.md)
 - **[Interactive field guide — live](https://snowyukitty.github.io/agent-orchestrator/)** ([source](docs/README.md))
 - [Getting two usage windows out of one morning](docs/five-hour-window.md)
 - [Roadmap](docs/roadmap.md)
@@ -85,7 +86,7 @@ broadcast.
 
 ### Release Notes
 
-#### Unreleased (Indexed Run History + Explicit Retention)
+#### Unreleased (Indexed History + Retention + Resume Evidence)
 
 - **Cursor-paged run history**: **📖 Runs** reads a rebuildable public-metadata
   index and loads 50 entries at a time. Newer runs do not shift an issued
@@ -97,6 +98,10 @@ broadcast.
   dirty marker makes an interrupted index update rebuild from those records;
   corrupt indexes are reported and replaced without exposing result bodies,
   ciphertext, or machine-local paths.
+- **Resume evidence, without replay**: interrupted-run detail now distinguishes
+  blocked evidence, ambiguous outcomes needing a decision, and a recorded
+  boundary. It names the reason and never offers execution; the accepted
+  design keeps deep preflight and child-run creation fail-closed.
 
 #### v0.4.0 (Durable Run Journal + Result Handoff + Singular Identity)
 - **One canonical name everywhere**: repository, npm package, checkout, AppData, documentation, and build artifact now use `agent-orchestrator` / **Agent Orchestrator**.
@@ -257,6 +262,8 @@ broadcast.
   are fetched and decrypted only on request. No-encryption environments fall
   back to bounded memory, never plaintext files. A rebuildable metadata index
   serves stable cursor pages without copying ciphertext or result bodies.
+  Interrupted-run detail derives a metadata-only evidence assessment and keeps
+  resume execution explicitly unavailable.
 - **Explicit Journal Retention**: **📖 Runs** can preview and apply a count
   limit, an age limit, or both to terminal runs. Active runs are never selected,
   history is never pruned automatically, and a changed preview must be reviewed
@@ -332,9 +339,12 @@ broadcast.
   content as hostile; restrict downstream tools or require human review before
   a sensitive stage. v0.4 does not enforce an agent-native data channel.
 - **Journal evidence is not automatic resume**: interrupted runs and their
-  completed visits are durable enough to inform a future resume design, but
-  v0.4 does not restart them. Workflows remain ordered block programs with
-  structured Loop / End Loop pairs, not a general-purpose DAG.
+  completed visits now receive a deterministic metadata assessment: blocked,
+  review required, or recorded boundary. Even a recorded boundary is not an
+  executable plan; snapshot decryption, control-state reconstruction, runtime
+  rebuilding, and profile re-resolution remain future preflight work. See the
+  [accepted design](docs/resume-design.md). Workflows remain ordered block
+  programs with structured Loop / End Loop pairs, not a general-purpose DAG.
 - **Journal retention is explicit**: encrypted journal files are never pruned
   automatically. Individual deletion remains available, while preview-first
   retention can match terminal runs by count and/or age; active runs are always
@@ -359,7 +369,7 @@ npm run check
 # Run a quick Electron startup/shutdown smoke test
 npm run smoke
 
-# Open the normal UI against disposable test data for visual QA
+# Open the normal UI with disposable resume-evidence scenarios for visual QA
 npm run visual
 
 # Run both suites: main-process unit tests + the headless renderer self-test
