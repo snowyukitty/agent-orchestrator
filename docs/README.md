@@ -58,5 +58,7 @@ its local references, anchor targets, security boundary, and JavaScript syntax.
 For the maintainer-facing process model, routing boundary, persistence rules,
 and verification layers, see [`architecture.md`](architecture.md).
 
-GitHub Pages is not enabled by this directory. Enabling or changing a public
-publication surface remains an explicit repository-owner action.
+GitHub Pages publishes this directory at
+<https://snowyukitty.github.io/agent-orchestrator/>, and the same static
+artifact is mirrored at <https://agent-orchestrator-855.pages.dev/>. Changing
+either publication surface remains an explicit repository-owner action.
