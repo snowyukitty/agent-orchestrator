@@ -7,7 +7,8 @@ is mirrored on Cloudflare Pages at
 <https://agent-orchestrator-855.pages.dev/> (the bare `agent-orchestrator`
 pages.dev subdomain was already taken globally; renaming or attaching a custom
 domain is an open decision). The dedicated marketing landing (v2) below waits
-for the promo video assets.
+for human approval and Release publication of the promo video assets; the
+English masters and trilingual sidecars themselves are generated.
 
 Deploy command for the mirror (established portfolio flow):
 
@@ -51,7 +52,8 @@ Three pillars, in the order visitors should meet them:
 | Asset | Tool | Notes |
 |---|---|---|
 | Hero loop (10–20 s, no audio) | HyperFrames (`snowy-hyperframes` pipeline) | storyboard: schedule fires → sessions open → join completes |
-| 5-hour-window explainer (60–90 s, narrated) | HyperFrames + Edge-TTS | the flagship promo video; also embedded in README via Release asset |
+| Product overview (89.7 s, narrated) | HyperFrames + Edge-TTS | clean English master; English/default + Japanese + Traditional Chinese SRT/VTT; human gate pending |
+| 5-hour-window explainer (87.8 s, narrated) | HyperFrames + Edge-TTS | same trilingual contract; flagship promo candidate; human gate pending |
 | Fan-out/join clip | Screen capture of the real app | authenticity beats composition here |
 | Key art / social card | `/web-img` | shipped in the field guide: verified 1731×909 (40:21) route → fan-out → join → protected-journal motif, with prompt/integrity sidecars |
 | Optional cinematic teaser | Google Flow (`web-flow` skill) | costs real credits; only with explicit go-ahead |
@@ -68,11 +70,15 @@ Three pillars, in the order visitors should meet them:
   assets and reference them by URL. The verified 1.6 MB key art is the one
   bundled social image; provide lightweight poster images so the page still
   works with videos blocked.
+- Use one clean English MP4 with native `<track kind="subtitles">` children:
+  English is `default`, with Japanese (`ja`) and Traditional Chinese
+  (`zh-Hant`) selectable. Publish matching SRT files as download assets, retain
+  WebVTT for browsers, and never imply a language passed because another did.
+  Do not bake English captions into the only video master.
 - Reuse the field guide's design tokens (`docs/styles.css` palette) so the
   two surfaces read as one product.
 
 ## Explicitly out of scope for v1
 
-Downloads/installers hosting, telemetry, a blog, localized copy (English
-first; Traditional Chinese and Japanese only if the product itself localizes),
-and any dynamic backend.
+Downloads/installers hosting, telemetry, a blog, localized page chrome (English
+first; translated video sidecars are already in scope), and any dynamic backend.

@@ -194,6 +194,51 @@ session output, and account homes stay out of public checkpoint metadata.
 Checkpoint protection uses the same context-bound encrypted envelope pattern
 as workflow and result bodies. No plaintext fallback is added.
 
+### Confirmation receipt contract (next implementation)
+
+The confirmation boundary is now specified tightly enough to implement without
+inventing authority in the renderer. A successful deep preflight may create one
+short-lived, main-memory receipt with these bindings:
+
+- source run ID and exact journal revision;
+- hash of the validated workflow snapshot and protected control checkpoint;
+- hash of the proven visit prefix, result bindings, and redacted plan facts;
+- current profile-resolution fingerprint, including assurance level;
+- the allowed boundary dispositions (`skip` or `retry`) when a human decision
+  is required; an unambiguous between-block boundary allows only `continue`;
+- renderer document epoch, creation/expiry time, and a cryptographically random
+  one-time token.
+
+The renderer receives only the opaque token, expiry, allowed dispositions, and
+the already-redacted preview. It cannot alter a snapshot hash, block address,
+profile identity, or session recipe. A confirmation request contains the token,
+source run ID, displayed revision, and one allowed disposition; all other facts
+come from the main-memory receipt.
+
+Main handles confirmation under the journal's source/creation lock:
+
+1. Reject an absent, expired, previously consumed, or wrong-document token.
+2. Re-read the source and require the same revision and protected-envelope
+   hashes; re-resolve every profile and require the same fingerprint.
+3. Recompute the plan fingerprint from protected evidence and compare it in
+   constant time. Any mismatch destroys the receipt and requires a new
+   preflight.
+4. Validate the requested disposition against the receipt. Uncertainty defaults
+   to `abort`; omission is never treated as `skip` or `retry`.
+5. Reserve a unique operation ID and atomically persist a new child journal
+   record with `rootRunId`, `parentRunId`, `attempt`, source revision, chosen
+   disposition, and protected checkpoint before admitting any session or
+   external effect.
+6. Consume the token exactly once. If later session construction or execution
+   fails, the child run records that failure; the same token cannot be retried.
+
+Renderer navigation, app shutdown, source deletion, revision change, profile
+change, and expiry invalidate receipts. Receipts are never restored after a
+restart and never enter the public index, logs, exports, or journal ciphertext.
+Token consumption and child creation must be crash-tested around every durable
+write: a crash may leave no child or one truthful non-running child, never an
+unrecorded execution and never two children with the same operation ID.
+
 ## UX contract
 
 The Runs detail card is evidence, not an execution call to action:

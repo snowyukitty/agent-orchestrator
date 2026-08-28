@@ -115,6 +115,12 @@ broadcast.
   1731×909 browser-generated visual, with exact prompt and integrity sidecars.
   It depicts the same route → fan-out → join → protected-journal story the app
   actually implements; no video candidate crossed its human review gate.
+- **Trilingual promo masters, still gated**: the product overview and five-hour
+  explainer were rebuilt as clean English spoken masters with selectable
+  English (default), Japanese, and Traditional Chinese SRT/VTT tracks. Their
+  offline HyperFrames kits now review every language against the same measured
+  cue timing. Both remain local, unrendered, and unpublished until a human
+  passes pronunciation, pacing, readability, and every subtitle track.
 
 #### v0.4.0 (Durable Run Journal + Result Handoff + Singular Identity)
 - **One canonical name everywhere**: repository, npm package, checkout, AppData, documentation, and build artifact now use `agent-orchestrator` / **Agent Orchestrator**.

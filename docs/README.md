@@ -45,6 +45,13 @@ workflow, visually inspected, then staged by `$web-img` with PNG integrity,
 dimension, prompt, and SHA-256 sidecars. The verified source is 1731×909; it is
 not presented as an app screenshot.
 
+Two local HyperFrames candidates now use one clean English spoken master with
+selectable English, Japanese, and Traditional Chinese SRT/VTT tracks. Their
+human gates remain pending, so this field guide intentionally embeds neither a
+video nor a placeholder Release URL. After approval, the reviewed MP4 belongs
+in GitHub Releases and the guide should reference all three WebVTT sidecars
+with native `<track>` elements; the key art remains the fallback poster.
+
 Open `docs/index.html` in a browser to review it. Run `npm run check` to validate
 its local references, anchor targets, security boundary, and JavaScript syntax.
 

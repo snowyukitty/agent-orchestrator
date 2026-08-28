@@ -19,10 +19,13 @@ purpose — items land when they are verified, not when a calendar says so.
   order, verifies protected results, classifies safe runtime reconstruction,
   and re-resolves profiles while returning only redacted facts. Execution is
   still absent (implemented on `main`, unreleased).
-- **Promo media** — two HyperFrames explainers (product overview, 5-hour
-  window) and a 30 s cinematic hero b-roll exist as candidates behind their
-  human review gates; they attach to the README and website once reviewed. A
-  one-shot verified key art image now fronts the README and social metadata.
+- **Promo media** — the two HyperFrames explainers are now clean English spoken
+  masters (89.7 s overview, 87.8 s five-hour window) with selectable English,
+  Japanese, and Traditional Chinese SRT/VTT tracks sharing measured cue IDs and
+  timestamps. Their new offline kits gate every language; both remain
+  unrendered and unpublished pending human review. A separate 30 s cinematic
+  hero b-roll is also still a gated candidate. The one-shot verified key art
+  already fronts the README and social metadata.
 
 ## Next (v0.5)
 
@@ -30,6 +33,9 @@ purpose — items land when they are verified, not when a calendar says so.
   checkpoints and full profile-identity fingerprints, then add immutable child
   lineage plus a short-lived confirmation token bound to the source revision,
   verified facts, and an explicit `abort` / `skip` / `retry` disposition.
+  The main-memory receipt lifecycle, renderer boundary, atomic child creation,
+  invalidation rules, and crash outcome are now specified in the
+  [resume design](resume-design.md); implementation remains pending.
   Execution stays gated until the [resume design](resume-design.md)'s crash and
   no-double-effect matrix passes.
 - **Licensing decision** — the repository is public but carries no license,
