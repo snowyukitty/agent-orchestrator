@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "source": "Agent Orchestrator isolated visual fixture",
+  "disclosure": "Real renderer UI with inert fixture state; no PTY or agent was launched, and no account or production data was read.",
+  "viewport": {
+    "width": 1600,
+    "height": 1000
+  },
+  "frames": [
+    {
+      "file": "01-workflow-editor.png",
+      "label": "Parallel workflow in the real editor",
+      "width": 1600,
+      "height": 1000,
+      "sha256": "27ab5f7a1e175fea8ccda96265debb474ef953eaa6ae8e74d9022b6446d9be03"
+    },
+    {
+      "file": "02-join-and-handoff.png",
+      "label": "Join completion and explicit result handoff",
+      "width": 1600,
+      "height": 1000,
+      "sha256": "d3977697336db473448befb0a4ff8e9612318f4413ea2c7a91e3a10bca0a8590"
+    },
+    {
+      "file": "03-run-journal.png",
+      "label": "Protected Run Journal evidence",
+      "width": 1600,
+      "height": 1000,
+      "sha256": "f26b7531f34d8790812f223bb5f22569f2c38319ec2d45d8a92e0624b8a3d38f"
+    }
+  ]
+}

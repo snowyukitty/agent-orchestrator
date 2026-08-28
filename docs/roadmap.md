@@ -19,13 +19,15 @@ purpose — items land when they are verified, not when a calendar says so.
   order, verifies protected results, classifies safe runtime reconstruction,
   and re-resolves profiles while returning only redacted facts. Execution is
   still absent (implemented on `main`, unreleased).
-- **Promo media** — the two HyperFrames explainers are now clean English spoken
-  masters (89.7 s overview, 87.8 s five-hour window) with selectable English,
-  Japanese, and Traditional Chinese SRT/VTT tracks sharing measured cue IDs and
-  timestamps. Their new offline kits gate every language; both remain
-  unrendered and unpublished pending human review. A separate 30 s cinematic
-  hero b-roll is also still a gated candidate. The one-shot verified key art
-  already fronts the README and social metadata.
+- **Promo media** — a deterministic capture mode now turns the real renderer
+  into three hashed, disclosed 1600×1000 product-proof frames without launching
+  an account, agent, or PTY or reading production data. They drive a new 50.6 s
+  functional hero: editor → Join barrier → explicit handoff → protected Run
+  Journal. Its English narration and English/default, Japanese, and Traditional
+  Chinese SRT/VTT tracks share one measured cue timeline. The owner rejected
+  the former 30 s generic-office candidate on 2026-08-29; it is superseded, not
+  a publication candidate. The new hero and the 89.7 s overview / 87.8 s
+  five-hour explainer remain unrendered and unpublished pending human review.
 
 ## Next (v0.5)
 
@@ -47,7 +49,8 @@ purpose — items land when they are verified, not when a calendar says so.
 ## Later
 
 - **Website v2** — the dedicated marketing landing described in
-  [website-plan.md](website-plan.md), unblocked by the promo media above.
+  [website-plan.md](website-plan.md). Its proof-first content is designed; the
+  final video embed still waits for review and Release publication.
 - **More routed agents** — Claude Code / Grok / Gemini under managed (L1)
   routing is an ai-agent-entrypoint decision this app would consume, never
   implement itself.

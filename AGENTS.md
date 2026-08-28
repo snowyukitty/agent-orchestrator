@@ -69,6 +69,7 @@ src/main/            Main-process modules, CommonJS, unit-tested with node --tes
   settings.js          persisted preferences
   store.js             atomic JSON read/write
   validate.js          IPC payload validation
+  promo-capture.js     inert real-renderer capture fixture + hashed receipts
 src/js/              Renderer, ES modules, tested by the Electron self-test
   app.js               wiring: editor, toolbar, scheduler, workflow storage
   sessions.js          SessionManager: one xterm per session, tabs, quick-send

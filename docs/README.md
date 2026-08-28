@@ -45,12 +45,21 @@ workflow, visually inspected, then staged by `$web-img` with PNG integrity,
 dimension, prompt, and SHA-256 sidecars. The verified source is 1731×909; it is
 not presented as an app screenshot.
 
-Two local HyperFrames candidates now use one clean English spoken master with
-selectable English, Japanese, and Traditional Chinese SRT/VTT tracks. Their
-human gates remain pending, so this field guide intentionally embeds neither a
-video nor a placeholder Release URL. After approval, the reviewed MP4 belongs
-in GitHub Releases and the guide should reference all three WebVTT sidecars
-with native `<track>` elements; the key art remains the fallback poster.
+The `assets/promo/` frames are different: they are deterministic captures of
+the real renderer using an inert fixture. The capture launches no account,
+agent, or PTY and reads no production data. `assets/promo/manifest.json`
+records exact dimensions and hashes, and `npm run check` verifies those receipts
+against both the PNGs and their field-guide references. The creative and
+publication boundary lives in [`promo-creative-brief.md`](promo-creative-brief.md).
+
+Three local HyperFrames candidates now use one clean English spoken master per
+film with selectable English, Japanese, and Traditional Chinese SRT/VTT tracks:
+the 89.7 s overview, 87.8 s five-hour explainer, and 50.6 s proof-first
+functional hero. Their human gates remain pending, so this field guide embeds
+the authentic stills but neither a video nor a placeholder Release URL. After
+approval, the reviewed clean MP4 belongs in GitHub Releases and the guide should
+reference all three WebVTT sidecars with native `<track>` elements; key art
+remains the fallback poster.
 
 Open `docs/index.html` in a browser to review it. Run `npm run check` to validate
 its local references, anchor targets, security boundary, and JavaScript syntax.

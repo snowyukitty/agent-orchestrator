@@ -13,6 +13,13 @@ const KEY_ART_FILE = path.join(DOCS, 'assets', 'agent-orchestrator-key-art.png')
 const KEY_ART_METADATA_FILE = `${KEY_ART_FILE}.metadata.json`;
 const KEY_ART_PROMPT_FILE = `${KEY_ART_FILE}.prompt.txt`;
 const KEY_ART_NEGATIVE_FILE = `${KEY_ART_FILE}.negative.txt`;
+const PROMO_DIR = path.join(DOCS, 'assets', 'promo');
+const PROMO_MANIFEST_FILE = path.join(PROMO_DIR, 'manifest.json');
+const PROMO_FRAME_NAMES = [
+  '01-workflow-editor.png',
+  '02-join-and-handoff.png',
+  '03-run-journal.png',
+];
 const CANONICAL_URL = 'https://snowyukitty.github.io/agent-orchestrator/';
 
 const failures = [];
@@ -36,6 +43,14 @@ function readProvenanceText(file) {
   return fs.readFileSync(file, 'utf8').replace(/\r?\n$/, '');
 }
 
+function pngSize(file) {
+  const bytes = fs.readFileSync(file);
+  if (bytes.length < 24 || bytes.toString('ascii', 1, 4) !== 'PNG') {
+    throw new Error('not a PNG');
+  }
+  return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+}
+
 const html = read(HTML_FILE);
 const script = read(SCRIPT_FILE);
 const styles = read(STYLE_FILE);
@@ -48,6 +63,8 @@ const requiredFiles = [
   KEY_ART_METADATA_FILE,
   KEY_ART_PROMPT_FILE,
   KEY_ART_NEGATIVE_FILE,
+  PROMO_MANIFEST_FILE,
+  ...PROMO_FRAME_NAMES.map((name) => path.join(PROMO_DIR, name)),
 ];
 for (const file of requiredFiles) {
   if (!fs.existsSync(file)) fail(`missing: ${path.relative(ROOT, file)}`);
@@ -95,6 +112,47 @@ try {
   }
 } catch (_error) {
   fail('key art or its provenance sidecars are unreadable');
+}
+
+try {
+  const manifest = JSON.parse(fs.readFileSync(PROMO_MANIFEST_FILE, 'utf8'));
+  if (
+    manifest?.viewport?.width !== 1600
+    || manifest?.viewport?.height !== 1000
+    || !/inert fixture/i.test(manifest?.disclosure || '')
+    || !/no PTY or agent was launched/i.test(manifest?.disclosure || '')
+    || !/no account or production data was read/i.test(manifest?.disclosure || '')
+  ) {
+    fail('promo capture manifest must retain its exact viewport and inert-data disclosure');
+  }
+  if (
+    !Array.isArray(manifest?.frames)
+    || manifest.frames.length !== PROMO_FRAME_NAMES.length
+    || manifest.frames.some((frame, index) => frame.file !== PROMO_FRAME_NAMES[index])
+  ) {
+    fail('promo capture manifest must name the three canonical frames in order');
+  } else {
+    for (const frame of manifest.frames) {
+      const file = path.join(PROMO_DIR, frame.file);
+      const bytes = fs.readFileSync(file);
+      const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+      const dimensions = pngSize(file);
+      if (frame.sha256 !== digest) fail(`promo frame SHA-256 mismatch: ${frame.file}`);
+      if (
+        frame.width !== dimensions.width
+        || frame.height !== dimensions.height
+        || dimensions.width !== 1600
+        || dimensions.height !== 1000
+      ) {
+        fail(`promo frame dimensions must be exactly 1600x1000: ${frame.file}`);
+      }
+      if (!html.includes(`src="assets/promo/${frame.file}"`)) {
+        fail(`field guide does not present promo frame: ${frame.file}`);
+      }
+    }
+  }
+} catch (_error) {
+  fail('promo capture manifest or frame provenance is unreadable');
 }
 
 const networkPatterns = [

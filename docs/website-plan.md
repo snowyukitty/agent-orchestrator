@@ -1,7 +1,7 @@
 # Website plan — `agent-orchestrator.pages.dev` (future work)
 
-Status: **v1 live as a mirror; the dedicated landing page below is future
-work.** The GitHub Pages field guide is the primary product page, live at
+Status: **v1 live as a mirror with authentic product proof; the dedicated
+landing page below is future work.** The GitHub Pages field guide is the primary product page, live at
 <https://snowyukitty.github.io/agent-orchestrator/>. The same `docs/` artifact
 is mirrored on Cloudflare Pages at
 <https://agent-orchestrator-855.pages.dev/> (the bare `agent-orchestrator`
@@ -51,12 +51,13 @@ Three pillars, in the order visitors should meet them:
 
 | Asset | Tool | Notes |
 |---|---|---|
-| Hero loop (10–20 s, no audio) | HyperFrames (`snowy-hyperframes` pipeline) | storyboard: schedule fires → sessions open → join completes |
+| Functional hero (50.6 s, narrated) | HyperFrames (`snowy-hyperframes` pipeline) | real editor → 2/3 barrier → 3/3 explicit handoff → protected journal; English voice + en/ja/zh-Hant sidecars; human gate pending |
+| Product-proof stills | `npm run promo:capture` | shipped in field guide; deterministic 1600×1000 real-renderer fixture captures with disclosure and hashed manifest |
 | Product overview (89.7 s, narrated) | HyperFrames + Edge-TTS | clean English master; English/default + Japanese + Traditional Chinese SRT/VTT; human gate pending |
 | 5-hour-window explainer (87.8 s, narrated) | HyperFrames + Edge-TTS | same trilingual contract; flagship promo candidate; human gate pending |
 | Fan-out/join clip | Screen capture of the real app | authenticity beats composition here |
 | Key art / social card | `/web-img` | shipped in the field guide: verified 1731×909 (40:21) route → fan-out → join → protected-journal motif, with prompt/integrity sidecars |
-| Optional cinematic teaser | Google Flow (`web-flow` skill) | costs real credits; only with explicit go-ahead |
+| Optional cinematic punctuation | Google Flow (`web-flow` skill) | never substitutes for product proof; costs real credits and needs explicit go-ahead |
 
 ## Technical shape
 

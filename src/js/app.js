@@ -33,7 +33,9 @@ import {
 
 class App {
   constructor() {
-    this._isSelfTest = new URLSearchParams(location.search).get('selftest') === '1';
+    const query = new URLSearchParams(location.search);
+    this._isSelfTest = query.get('selftest') === '1';
+    this._isPromoCapture = query.get('promoCapture') === '1';
     this._defaultDirectory = '.';
     /** @type {{ id: string, name: string, defaultDirectory: string, blocks: Array }} */
     this.workflow = this._normalizeWorkflow({
@@ -63,7 +65,7 @@ class App {
 
     this._init();
     this._loadDemoWorkflow();
-    this._loadDefaultDirectory();
+    if (!this._isPromoCapture) this._loadDefaultDirectory();
   }
 
   // ── Self-Test (headless regression) ────────────────────────
@@ -806,6 +808,11 @@ class App {
    * plus this app's own env-only profiles. Starting one opens a session tab.
    */
   _initAgents() {
+    if (this._isPromoCapture) {
+      const badge = document.getElementById('agents-badge');
+      if (badge) badge.textContent = '0';
+      return;
+    }
     this.agents = new AgentsUI({
       onLog: (msg, type) => this._termLog(msg, type),
       onStartSession: async (profileId) => {
@@ -1648,8 +1655,10 @@ class App {
 
     this._initQuickSend();
 
-    // Start a plain shell so the terminal is interactive on load.
-    this._spawnDefaultShell();
+    // Start a plain shell so the terminal is interactive on load. Authentic
+    // promo capture is deliberately inert: it renders the real components
+    // without launching a PTY or reading any account source.
+    if (!this._isPromoCapture) this._spawnDefaultShell();
   }
 
   /** The active session's xterm. Engine and toolbar read cols/rows from this. */

@@ -552,6 +552,69 @@ code {
   font: 700 10px var(--font-mono);
 }
 
+.product-proof {
+  padding-block: 28px 84px;
+}
+
+.proof-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(300px, 0.75fr);
+  gap: clamp(28px, 5vw, 72px);
+  align-items: end;
+  margin-bottom: 28px;
+}
+
+.proof-heading h2 {
+  max-width: 760px;
+  margin: 0;
+  font-size: clamp(30px, 3.6vw, 46px);
+  letter-spacing: -0.04em;
+  line-height: 1.08;
+}
+
+.proof-heading > p {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 14px;
+}
+
+.proof-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.proof-frame {
+  overflow: hidden;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(7, 17, 31, 0.78);
+  box-shadow: 0 24px 72px rgba(0, 0, 0, 0.24);
+}
+
+.proof-frame-wide {
+  grid-column: 1 / -1;
+}
+
+.proof-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-bottom: 1px solid var(--line);
+  background: #080b0e;
+}
+
+.proof-frame figcaption {
+  padding: 17px 20px 19px;
+  color: var(--text-soft);
+  font-size: 13px;
+}
+
+.proof-frame figcaption strong {
+  color: var(--text);
+}
+
 .principles {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -1712,10 +1775,16 @@ code {
     grid-column: 1 / -1;
   }
 
+  .proof-heading,
+  .proof-grid,
   .principles,
   .integrity-grid,
   .operations-grid {
     grid-template-columns: 1fr;
+  }
+
+  .proof-frame-wide {
+    grid-column: auto;
   }
 
   .principles article {

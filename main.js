@@ -29,6 +29,10 @@ const { ShutdownCoordinator } = require('./src/main/shutdown');
 const { RunJournal } = require('./src/main/run-journal');
 const { seedVisualRunJournal } = require('./src/main/visual-fixtures');
 const {
+  capturePromoFrames,
+  parsePromoCaptureOptions,
+} = require('./src/main/promo-capture');
+const {
   RendererDocumentLifecycle,
   RendererContainmentCoordinator,
   isReloadAccelerator,
@@ -48,13 +52,20 @@ const {
 const isSmokeTest = process.argv.includes('--smoke-test');
 const isSelfTest = process.argv.includes('--self-test');
 const isVisualTest = process.argv.includes('--visual-test');
+const promoCapture = parsePromoCaptureOptions(process.argv, __dirname);
+if (promoCapture) {
+  // Capture receipts are portable only when one CSS pixel maps to one output
+  // pixel. The switch is scoped to the disposable promo process and must be
+  // set before Electron creates a BrowserWindow.
+  app.commandLine.appendSwitch('force-device-scale-factor', '1');
+}
 app.setName('Agent Orchestrator');
 const userDataState = prepareUserData({
   appDataRoot: app.getPath('appData'),
   tempRoot: app.getPath('temp'),
   // Visual QA uses the normal renderer while remaining unable to read or
   // mutate production settings, workflows, local profiles, or Run Journal files.
-  testMode: isSmokeTest || isSelfTest || isVisualTest,
+  testMode: isSmokeTest || isSelfTest || isVisualTest || Boolean(promoCapture),
 });
 app.setPath('userData', userDataState.path);
 const sessionDataPath = path.join(userDataState.path, 'session');
@@ -367,9 +378,10 @@ function createWindow() {
   const bounds = stored.windowBounds;
 
   mainWindow = new BrowserWindow({
-    width: bounds?.width ?? 1440,
-    height: bounds?.height ?? 920,
-    ...(bounds && bounds.x !== undefined && bounds.y !== undefined
+    width: promoCapture?.width ?? bounds?.width ?? 1440,
+    height: promoCapture?.height ?? bounds?.height ?? 920,
+    useContentSize: Boolean(promoCapture),
+    ...(!promoCapture && bounds && bounds.x !== undefined && bounds.y !== undefined
       ? { x: bounds.x, y: bounds.y }
       : { center: true }),
     minWidth: 1000,
@@ -466,10 +478,16 @@ function createWindow() {
       if (isReloadAccelerator(input)) event.preventDefault();
     });
   }
-  mainWindow.loadFile(RENDERER_ENTRY_FILE, isSelfTest ? { query: { selftest: '1' } } : undefined);
+  mainWindow.loadFile(
+    RENDERER_ENTRY_FILE,
+    isSelfTest
+      ? { query: { selftest: '1' } }
+      : (promoCapture ? { query: { promoCapture: '1' } } : undefined)
+  );
 
   // Show window only after content is fully rendered
   mainWindow.once('ready-to-show', () => {
+    if (promoCapture) return;
     mainWindow.show();
     mainWindow.focus();
     console.log('[Main] Window shown and focused');
@@ -481,7 +499,7 @@ function createWindow() {
     if (!app.isQuitting) {
       // The disposable visual-QA mode has no reason to linger in the tray;
       // closing it should exercise the same sequenced cleanup as tray Quit.
-      if (isVisualTest) {
+      if (isVisualTest || promoCapture) {
         e.preventDefault();
         app.isQuitting = true;
         app.quit();
@@ -534,6 +552,21 @@ function createWindow() {
         console.error('[Main] Self-test timed out without a result');
         finishSelfTest(false);
       }, 15000);
+    }
+    if (promoCapture) {
+      console.log('[Main] Promo capture loaded; creating isolated product frames...');
+      capturePromoFrames(mainWindow, promoCapture)
+        .then((manifest) => {
+          console.log(`[Main] Promo capture PASSED — ${manifest.frames.length} frame(s)`);
+          app.isQuitting = true;
+          app.quit();
+        })
+        .catch((error) => {
+          console.error(`[Main] Promo capture failed: ${error.message}`);
+          app.exitCode = 1;
+          app.isQuitting = true;
+          app.quit();
+        });
     }
   });
 
@@ -618,7 +651,7 @@ if (!gotSingleInstanceLock) {
         if (interrupted.length) {
           console.log(`[Journal] recovered ${interrupted.length} interrupted run(s)`);
         }
-        if (isVisualTest) {
+        if (isVisualTest || promoCapture) {
           const fixture = await seedVisualRunJournal(runJournal);
           console.log(`[Journal] prepared ${fixture.recoveredCount} visual resume scenario(s)`);
         }
@@ -628,8 +661,10 @@ if (!gotSingleInstanceLock) {
       }
     }
     createWindow();
-    createTray();
-    startSchedulerHeartbeat();
+    if (!promoCapture) {
+      createTray();
+      startSchedulerHeartbeat();
+    }
   });
 }
 

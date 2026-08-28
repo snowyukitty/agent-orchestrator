@@ -19,6 +19,7 @@ Project references:
 - [Interrupted-run resume design](docs/resume-design.md)
 - **[Interactive field guide — live](https://snowyukitty.github.io/agent-orchestrator/)** ([source](docs/README.md))
 - [Getting two usage windows out of one morning](docs/five-hour-window.md)
+- [Product-proof promo standard](docs/promo-creative-brief.md)
 - [Roadmap](docs/roadmap.md)
 - [Website plan (future)](docs/website-plan.md)
 - [Security policy](SECURITY.md)
@@ -114,13 +115,19 @@ broadcast.
 - **One-shot social key art**: the field guide and README now share a verified
   1731×909 browser-generated visual, with exact prompt and integrity sidecars.
   It depicts the same route → fan-out → join → protected-journal story the app
-  actually implements; no video candidate crossed its human review gate.
-- **Trilingual promo masters, still gated**: the product overview and five-hour
-  explainer were rebuilt as clean English spoken masters with selectable
-  English (default), Japanese, and Traditional Chinese SRT/VTT tracks. Their
-  offline HyperFrames kits now review every language against the same measured
-  cue timing. Both remain local, unrendered, and unpublished until a human
-  passes pronunciation, pacing, readability, and every subtitle track.
+  actually implements.
+- **Authentic product capture**: `npm run promo:capture --
+  --promo-output=docs/assets/promo` now creates three deterministic 1600×1000
+  frames from the real renderer using an inert fixture. It starts no account,
+  agent, or PTY, reads no production data, stamps every frame with that
+  disclosure, and writes a hashed manifest checked by the documentation gate.
+- **Trilingual promo masters, still gated**: the product overview, five-hour
+  explainer, and new 50.6-second functional hero use clean English spoken
+  masters with selectable English (default), Japanese, and Traditional Chinese
+  SRT/VTT tracks. The functional hero replaces a rejected generic-office
+  candidate with editor → Join → explicit handoff → protected-journal proof.
+  All remain local, unrendered, and unpublished until a human passes
+  pronunciation, pacing, readability, and every subtitle track.
 
 #### v0.4.0 (Durable Run Journal + Result Handoff + Singular Identity)
 - **One canonical name everywhere**: repository, npm package, checkout, AppData, documentation, and build artifact now use `agent-orchestrator` / **Agent Orchestrator**.
