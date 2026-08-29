@@ -1763,8 +1763,15 @@ p {
 
   .step-rail li { grid-template-columns: 39px 1fr; gap: 15px; }
   .step-tag { grid-column: 2; justify-self: start; }
-  .assurance-tab { justify-content: center; }
-  .assurance-tab > span:last-child { display: none; }
+  .assurance-tab {
+    justify-content: center;
+    gap: 4px;
+    padding-inline: 4px;
+  }
+
+  .assurance-tab .level-dot { display: none; }
+  .assurance-tab > span:last-child { display: block; min-width: 0; }
+  .assurance-tab strong { font-size: 11px; white-space: nowrap; }
 
   .assurance-panel {
     grid-template-columns: 1fr;
