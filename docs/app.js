@@ -300,6 +300,43 @@
     sections.forEach((section) => observer.observe(section));
   }
 
+  function setupProofViewports() {
+    const viewports = Array.from(document.querySelectorAll('.proof-viewport'));
+    const records = viewports.map((viewport) => ({ viewport, userPositioned: false }));
+
+    function focusViewport(record) {
+      const { viewport } = record;
+      if (record.userPositioned || viewport.scrollWidth <= viewport.clientWidth + 1) return;
+      const focusRatio = Number.parseFloat(viewport.dataset.focusX) || 0.5;
+      const target = (viewport.scrollWidth * focusRatio) - (viewport.clientWidth / 2);
+      viewport.scrollLeft = Math.max(0, Math.min(target, viewport.scrollWidth - viewport.clientWidth));
+    }
+
+    records.forEach((record) => {
+      const { viewport } = record;
+      const image = viewport.querySelector('img');
+      const markPositioned = () => { record.userPositioned = true; };
+      const focusAfterLayout = () => window.requestAnimationFrame(() => focusViewport(record));
+
+      viewport.addEventListener('pointerdown', markPositioned, { passive: true });
+      viewport.addEventListener('wheel', markPositioned, { passive: true });
+      viewport.addEventListener('keydown', (event) => {
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') markPositioned();
+      });
+
+      if (image.complete) focusAfterLayout();
+      else image.addEventListener('load', focusAfterLayout, { once: true });
+    });
+
+    let resizeFrame = 0;
+    window.addEventListener('resize', () => {
+      window.cancelAnimationFrame(resizeFrame);
+      resizeFrame = window.requestAnimationFrame(() => {
+        records.forEach(focusViewport);
+      });
+    }, { passive: true });
+  }
+
   topologySelect.addEventListener('change', renderRecipe);
   markerInput.addEventListener('input', renderRecipe);
   idleInput.addEventListener('change', renderRecipe);
@@ -310,6 +347,7 @@
   setupAssuranceTabs();
   setupCopyButtons();
   setupSectionObserver();
+  setupProofViewports();
   renderRecipe();
   currentYear.textContent = String(new Date().getFullYear());
 })();
