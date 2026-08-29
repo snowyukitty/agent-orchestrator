@@ -14,7 +14,7 @@ The proof hierarchy is:
 
 1. real renderer state from a deterministic, disclosed fixture;
 2. a real live run captured with private data removed and owner approval;
-3. code-native diagrams or verified conceptual key art;
+3. code-native diagrams built from the shipped source;
 4. generated atmosphere used only as brief punctuation.
 
 Generic terminals, dark offices, empty monitors, synthetic dashboards, and
@@ -33,7 +33,7 @@ Chinese.
 | Wait | Join Agents at `2 / 3` | Downstream work stops until the stage is complete |
 | Handoff | Join at `3 / 3`, bundle attached | Results move explicitly, not through transcript scraping |
 | Evidence | Protected Run Journal | Interrupted work is inspectable but never auto-replayed |
-| Act | Verified conceptual key art + GitHub CTA | Try the public project |
+| Act | The editor frame again, under the GitHub CTA | Try the public project |
 
 The rejected `2026-08-27-agent-orchestrator-hero-30s-1088p.mp4` is not a
 publication candidate. Its generic office imagery did not explain any product
@@ -73,4 +73,4 @@ Review must pass product meaning, claim accuracy, narration, pacing, UI
 legibility, and all three subtitle tracks. Approval authorizes a render only.
 Creating a GitHub Release, uploading assets, or embedding a Release URL still
 requires explicit owner approval. Until then, the field guide uses the verified
-stills and key-art poster without a placeholder video.
+stills as its own poster art and carries no placeholder video.

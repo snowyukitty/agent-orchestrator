@@ -9,10 +9,6 @@ const DOCS = path.join(ROOT, 'docs');
 const HTML_FILE = path.join(DOCS, 'index.html');
 const SCRIPT_FILE = path.join(DOCS, 'app.js');
 const STYLE_FILE = path.join(DOCS, 'styles.css');
-const KEY_ART_FILE = path.join(DOCS, 'assets', 'agent-orchestrator-key-art.png');
-const KEY_ART_METADATA_FILE = `${KEY_ART_FILE}.metadata.json`;
-const KEY_ART_PROMPT_FILE = `${KEY_ART_FILE}.prompt.txt`;
-const KEY_ART_NEGATIVE_FILE = `${KEY_ART_FILE}.negative.txt`;
 const PROMO_DIR = path.join(DOCS, 'assets', 'promo');
 const PROMO_MANIFEST_FILE = path.join(PROMO_DIR, 'manifest.json');
 const PROMO_FRAME_NAMES = [
@@ -20,7 +16,11 @@ const PROMO_FRAME_NAMES = [
   '02-join-and-handoff.png',
   '03-run-journal.png',
 ];
+// The outward face is proof-first: the social card and the README hero are the
+// same authentic capture the field guide presents, never a conceptual render.
+const SOCIAL_FRAME_NAME = PROMO_FRAME_NAMES[0];
 const CANONICAL_URL = 'https://snowyukitty.github.io/agent-orchestrator/';
+const README_FILE = path.join(ROOT, 'README.md');
 
 const failures = [];
 
@@ -35,12 +35,6 @@ function read(file) {
 
 function fail(message) {
   failures.push(message);
-}
-
-function readProvenanceText(file) {
-  // The stager writes text sidecars as conventional newline-terminated files;
-  // metadata retains the exact submitted value without that file terminator.
-  return fs.readFileSync(file, 'utf8').replace(/\r?\n$/, '');
 }
 
 function pngSize(file) {
@@ -59,10 +53,6 @@ const requiredFiles = [
   path.join(DOCS, '.nojekyll'),
   path.join(DOCS, 'README.md'),
   path.join(DOCS, 'assets', 'icon.png'),
-  KEY_ART_FILE,
-  KEY_ART_METADATA_FILE,
-  KEY_ART_PROMPT_FILE,
-  KEY_ART_NEGATIVE_FILE,
   PROMO_MANIFEST_FILE,
   ...PROMO_FRAME_NAMES.map((name) => path.join(PROMO_DIR, name)),
 ];
@@ -81,37 +71,6 @@ if (!/class="skip-link"/.test(html)) {
 }
 if (!html.includes(`<link rel="canonical" href="${CANONICAL_URL}">`)) {
   fail('docs/index.html must retain its exact canonical URL');
-}
-
-try {
-  const metadata = JSON.parse(fs.readFileSync(KEY_ART_METADATA_FILE, 'utf8'));
-  const imageHash = crypto
-    .createHash('sha256')
-    .update(fs.readFileSync(KEY_ART_FILE))
-    .digest('hex');
-  if (metadata?.status !== 'completed' || metadata?.route !== 'interactive-browser-control') {
-    fail('key art metadata must describe one completed interactive-browser result');
-  }
-  if (metadata?.result?.fileName !== path.basename(KEY_ART_FILE)) {
-    fail('key art metadata filename does not match the staged asset');
-  }
-  if (metadata?.result?.sha256 !== imageHash) {
-    fail('key art SHA-256 does not match its metadata sidecar');
-  }
-  if (readProvenanceText(KEY_ART_PROMPT_FILE) !== metadata?.prompt) {
-    fail('key art prompt sidecar does not match metadata');
-  }
-  if (readProvenanceText(KEY_ART_NEGATIVE_FILE) !== metadata?.negative_prompt) {
-    fail('key art negative-prompt sidecar does not match metadata');
-  }
-  if (
-    !html.includes(`<meta property="og:image:width" content="${metadata?.result?.width}">`)
-    || !html.includes(`<meta property="og:image:height" content="${metadata?.result?.height}">`)
-  ) {
-    fail('key art social metadata dimensions do not match the verified asset');
-  }
-} catch (_error) {
-  fail('key art or its provenance sidecars are unreadable');
 }
 
 try {
@@ -149,6 +108,29 @@ try {
       if (!html.includes(`src="assets/promo/${frame.file}"`)) {
         fail(`field guide does not present promo frame: ${frame.file}`);
       }
+    }
+
+    const social = manifest.frames.find((frame) => frame.file === SOCIAL_FRAME_NAME);
+    const socialUrl = `${CANONICAL_URL}assets/promo/${SOCIAL_FRAME_NAME}`;
+    if (
+      !html.includes(`<meta property="og:image" content="${socialUrl}">`)
+      || !html.includes(`<meta name="twitter:image" content="${socialUrl}">`)
+    ) {
+      fail('social preview images must point at the authentic capture frame');
+    }
+    if (
+      !html.includes(`<meta property="og:image:width" content="${social?.width}">`)
+      || !html.includes(`<meta property="og:image:height" content="${social?.height}">`)
+    ) {
+      fail('social metadata dimensions do not match the verified capture frame');
+    }
+
+    const readme = read(README_FILE);
+    if (!readme.includes(`](docs/assets/promo/${SOCIAL_FRAME_NAME})`)) {
+      fail('README hero must be the authentic capture frame');
+    }
+    if (/agent-orchestrator-key-art/.test(`${readme}\n${html}`)) {
+      fail('the retired conceptual key art must not return to the outward face');
     }
   }
 } catch (_error) {

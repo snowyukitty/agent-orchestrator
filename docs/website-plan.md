@@ -56,7 +56,7 @@ Three pillars, in the order visitors should meet them:
 | Product overview (89.7 s, narrated) | HyperFrames + Edge-TTS | clean English master; English/default + Japanese + Traditional Chinese SRT/VTT; human gate pending |
 | 5-hour-window explainer (87.8 s, narrated) | HyperFrames + Edge-TTS | same trilingual contract; flagship promo candidate; human gate pending |
 | Fan-out/join clip | Screen capture of the real app | authenticity beats composition here |
-| Key art / social card | `/web-img` | shipped in the field guide: verified 1731×909 (40:21) route → fan-out → join → protected-journal motif, with prompt/integrity sidecars |
+| Social card / poster | `npm run promo:capture` | `01-workflow-editor.png` is the README hero, the `og:image`, and the video poster. The earlier AI-generated key art was retired on 2026-08-29: abstract, off-product, and weaker than a screenshot |
 | Optional cinematic punctuation | Google Flow (`web-flow` skill) | never substitutes for product proof; costs real credits and needs explicit go-ahead |
 
 ## Technical shape
@@ -68,9 +68,9 @@ Three pillars, in the order visitors should meet them:
   branch `main`, site source in a new `site/` directory so `docs/` stays the
   GitHub Pages root.
 - Keep videos out of the Pages bundle: host reviewed renders as GitHub Release
-  assets and reference them by URL. The verified 1.6 MB key art is the one
-  bundled social image; provide lightweight poster images so the page still
-  works with videos blocked.
+  assets and reference them by URL. The 1600×1000 capture frames are the
+  bundled social and poster images, so the page still reads correctly with
+  videos blocked.
 - Use one clean English MP4 with native `<track kind="subtitles">` children:
   English is `default`, with Japanese (`ja`) and Traditional Chinese
   (`zh-Hant`) selectable. Publish matching SRT files as download assets, retain
