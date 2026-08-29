@@ -15,10 +15,14 @@ does not have. Everything below is current for v0.4.0.
 - **Journal evidence is not automatic resume**: interrupted runs and their
   completed visits now receive a deterministic metadata assessment: blocked,
   review required, or recorded boundary. Even a recorded boundary is not an
-  executable plan; snapshot decryption, control-state reconstruction, runtime
-  rebuilding, and profile re-resolution remain future preflight work. See the
-  [accepted design](docs/resume-design.md). Workflows remain ordered block
-  programs with structured Loop / End Loop pairs, not a general-purpose DAG.
+  executable plan. Explicit protected inspection can decrypt and validate the
+  captured snapshot and results, prove the visit prefix, classify runtime
+  reconstruction, and re-resolve profiles. Journal v2 can persist protected
+  control checkpoints and reviewed boundary dispositions, but preflight does
+  not yet consume those checkpoints, issue confirmation receipts, create child
+  runs, or execute a resume. See the [accepted design](resume-design.md).
+  Workflows remain ordered block programs with structured Loop / End Loop
+  pairs, not a general-purpose DAG.
 - **Journal retention is explicit**: encrypted journal files are never pruned
   automatically. Individual deletion remains available, while preview-first
   retention can match terminal runs by count and/or age; active runs are always

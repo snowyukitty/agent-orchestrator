@@ -40,8 +40,10 @@ testable:
   launch specifications;
 - `sessions.js` owns PTY creation, bounded output activity, process-tree
   termination, and public session metadata;
-- `run-journal.js` owns protected run records, the rebuildable public-metadata
-  index, stable cursor pages, and preview-first terminal-run retention;
+- `run-journal.js` owns protected run records, deliberate schema migration,
+  public lineage and boundary-review facts, encrypted control checkpoints, the
+  rebuildable public-metadata index, stable cursor pages, and preview-first
+  terminal-run retention;
 - `resume-evidence.js` classifies whether interrupted-run metadata is blocked,
   needs a decision, or contains a recorded boundary; it never authorizes
   execution;
@@ -99,6 +101,8 @@ App-owned data lives under `%APPDATA%/agent-orchestrator`:
 - `run-journal/*.json` for one bounded protected record per run;
 - `run-journal/.index/` for rebuildable public summaries and its crash-dirty
   marker (never ciphertext or result bodies);
+- `run-journal/.migration/v1/` for rollback copies retained by the explicit,
+  idempotent v1-to-v2 journal migration;
 - `workflows/*.json` for saved workflows.
 
 On the first singular build, valid app-owned JSON is copied from the historical
@@ -113,6 +117,11 @@ settings or workflows.
 ## Interrupted-run evidence
 
 Crash recovery changes active runs and visits to terminal `interrupted` states.
+Migration and recovery are separate startup passes. A malformed or future
+record does not prevent valid v1 records from upgrading, but any record whose
+active/terminal disposition remains unknowable latches the existing containment
+gate: new journal mutations and session admission stay blocked until a complete
+recovery pass succeeds.
 The public detail projection adds a derived resume-evidence assessment without
 decrypting the workflow or result bodies. `recorded-boundary` means only that
 the metadata gate found a durable, untruncated boundary; it is not a resume
@@ -137,11 +146,17 @@ inside main. A missing directory/profile/result, changed assurance, illegal
 visit prefix, pending team stage, or opaque session dependency blocks the
 report. An interrupted effect remains an explicit decision boundary.
 
-The accepted [resume design](resume-design.md) still requires a protected
-runtime checkpoint where trace proof is insufficient, full profile-identity
-fingerprints, a stale-safe confirmation token, immutable child-run lineage, and
-the crash/no-double-effect matrix before execution can ship. The current build
-exposes no execution path.
+Journal v2 now has public root/parent/attempt identities, a narrow encrypted
+checkpoint format for control state that trace proof cannot establish, and an
+append-only `abort` / `skip` / `retry` review fact for uncertain visits. A
+source visit accepts that review fact once; recording it advances the source
+revision so an older protected inspection becomes stale, but the fact grants
+no execution authority. The
+deep preflight does not consume those checkpoints yet, and no code creates a
+child run. The accepted [resume design](resume-design.md) still requires full
+profile-identity fingerprints, a stale-safe confirmation receipt, child-run
+creation, and the crash/no-double-effect matrix before execution can ship. The
+current build exposes no execution path.
 
 ## Verification layers
 

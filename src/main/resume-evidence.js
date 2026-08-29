@@ -8,7 +8,7 @@
 // ============================================================
 
 const RESUME_EVIDENCE_VERSION = 1;
-const SUPPORTED_JOURNAL_SCHEMA_VERSION = 1;
+const SUPPORTED_JOURNAL_SCHEMA_VERSION = 2;
 
 const RESUME_EVIDENCE_STATE = Object.freeze({
   NOT_APPLICABLE: 'not-applicable',

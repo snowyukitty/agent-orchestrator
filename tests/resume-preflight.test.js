@@ -40,7 +40,7 @@ function visit(address, status = 'completed') {
 
 function interruptedRun(workflow, visits = [], results = []) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     id: '00000000-0000-4000-8000-000000000010',
     revision: 7,
     status: 'interrupted',

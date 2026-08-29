@@ -19,8 +19,10 @@ const {
 const { assessResumeEvidence } = require('./resume-evidence');
 const { inspectResumeRun } = require('./resume-preflight');
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+const LEGACY_SCHEMA_VERSION = 1;
 const ENCRYPTED_ENVELOPE_VERSION = 1;
+const CONTROL_CHECKPOINT_VERSION = 1;
 
 const RUN_STATUS = Object.freeze({
   RUNNING: 'running',
@@ -68,6 +70,11 @@ const STORAGE = Object.freeze({
   ENCRYPTED: 'encrypted',
   MEMORY: 'memory',
 });
+const BOUNDARY_DISPOSITION = Object.freeze({
+  ABORT: 'abort',
+  SKIP: 'skip',
+  RETRY: 'retry',
+});
 
 /** Renderer result protocol limits, exported so the IPC layer can agree. */
 const MAX_RESULT_BYTES_PER_LANE = 32 * 1024;
@@ -77,6 +84,7 @@ const MAX_RESULT_BYTES = 256 * 1024;
 /** Aggregate plaintext result bodies retained by one run. */
 const MAX_RUN_RESULT_BYTES = 1024 * 1024;
 const MAX_WORKFLOW_BYTES = 4 * 1024 * 1024;
+const MAX_CONTROL_CHECKPOINT_BYTES = 256 * 1024;
 
 const MAX_MEMORY_BYTES = 8 * 1024 * 1024;
 // One workflow body + every operation proof + every result body must fit when
@@ -92,6 +100,7 @@ const MAX_MEMORY_ENTRIES = 32 * 1024;
 const MAX_WORKFLOW_CIPHERTEXT_BYTES = 16 * 1024 * 1024;
 const MAX_RESULT_CIPHERTEXT_BYTES = 4 * 1024 * 1024;
 const MAX_OPERATION_CIPHERTEXT_BYTES = 4096;
+const MAX_CONTROL_CHECKPOINT_CIPHERTEXT_BYTES = 4 * 1024 * 1024;
 // A record is preflighted with the same pretty-printed representation used by
 // writeJsonAtomic, and every read stops after this many bytes. This shared
 // invariant prevents either malformed files or schema-valid metadata growth
@@ -100,10 +109,13 @@ const MAX_RUN_RECORD_BYTES = 64 * 1024 * 1024;
 // The metadata index is a rebuildable cache, never the source of truth. It is
 // deliberately separate from run records so a page can be served without
 // parsing every protected record again.
-const RUN_INDEX_SCHEMA_VERSION = 1;
+const RUN_INDEX_SCHEMA_VERSION = 2;
 const RUN_INDEX_DIRECTORY = '.index';
-const RUN_INDEX_FILE = 'runs-v1.json';
-const RUN_INDEX_DIRTY_FILE = 'dirty-v1.json';
+const RUN_INDEX_FILE = 'runs-v2.json';
+const RUN_INDEX_DIRTY_FILE = 'dirty-v2.json';
+const LEGACY_RUN_INDEX_FILES = Object.freeze(['runs-v1.json', 'dirty-v1.json']);
+const MIGRATION_DIRECTORY = '.migration';
+const V1_MIGRATION_DIRECTORY = 'v1';
 const MAX_RUN_INDEX_BYTES = 128 * 1024 * 1024;
 const MAX_RUN_INDEX_ENTRIES = 250_000;
 const MAX_RETENTION_RUNS = 1_000_000;
@@ -114,6 +126,7 @@ const MAX_OPERATIONS = 25_000;
 const MAX_EVENTS = 25_000;
 const MAX_LANES = 128;
 const MAX_ITERATION_DEPTH = 32;
+const MAX_BOUNDARY_REVIEWS = 1024;
 const TERMINAL_CAPACITY_TIMESTAMP = '9999-12-31T23:59:59.999Z';
 const TERMINAL_CAPACITY_OP_ID = 'x'.repeat(256);
 const TERMINAL_CAPACITY_CIPHERTEXT = 'A'.repeat(MAX_OPERATION_CIPHERTEXT_BYTES);
@@ -136,12 +149,15 @@ const BLOCK_STATUS_VALUES = new Set(Object.values(BLOCK_STATUS));
 const BLOCK_TERMINAL_VALUES = new Set(BLOCK_TERMINAL_STATES);
 const BLOCK_FINISH_VALUES = new Set(BLOCK_FINISH_STATES);
 const RESULT_STATUS_VALUES = new Set(Object.values(RESULT_STATUS));
+const BOUNDARY_DISPOSITION_VALUES = new Set(Object.values(BOUNDARY_DISPOSITION));
 const OPERATION_ACTIONS = new Set([
   'start-run',
   'start-block',
   'finish-block',
   'store-result',
   'finish-run',
+  'store-control-checkpoint',
+  'record-boundary-disposition',
 ]);
 const EVENT_TYPES = new Set([
   'run.started',
@@ -150,6 +166,8 @@ const EVENT_TYPES = new Set([
   'result.stored',
   'run.finished',
   'run.interrupted',
+  'control.checkpoint-stored',
+  'boundary.disposition-recorded',
 ]);
 
 class RunJournalError extends Error {
@@ -477,6 +495,20 @@ function normalizeEncryptionContext(context) {
       opId: asOpId(raw.opId),
     };
   }
+  if (raw.kind === 'control-checkpoint') {
+    assertOnlyKeys(
+      raw,
+      new Set(['kind', 'runId', 'visitId', 'sourceRevision', 'checkpointId']),
+      'control checkpoint encryption context'
+    );
+    return {
+      kind: 'control-checkpoint',
+      runId: asRunId(raw.runId),
+      visitId: asRunId(raw.visitId, 'visitId'),
+      sourceRevision: asPositiveInt(raw.sourceRevision, 'sourceRevision'),
+      checkpointId: asRunId(raw.checkpointId, 'checkpointId'),
+    };
+  }
   throw new RunJournalError('Encryption context kind is invalid', 'invalid-input');
 }
 
@@ -638,6 +670,117 @@ function normalizeLaneDescriptors(value) {
     }
     return normalized;
   });
+}
+
+function normalizeControlCheckpointState(value) {
+  const raw = asObject(value, 'control checkpoint state');
+  assertOnlyKeys(
+    raw,
+    new Set(['version', 'sessions', 'pendingLanes', 'pendingJoinBlockId']),
+    'control checkpoint state'
+  );
+  if (raw.version !== CONTROL_CHECKPOINT_VERSION) {
+    throw new RunJournalError('Control checkpoint version is unsupported', 'invalid-input');
+  }
+  if (!Array.isArray(raw.sessions) || raw.sessions.length > MAX_LANES) {
+    throw new RunJournalError('Control checkpoint sessions are invalid', 'invalid-input');
+  }
+  const sessionRefs = new Set();
+  const laneIds = new Set();
+  const sessions = raw.sessions.map((entry, index) => {
+    const session = asObject(entry, `control checkpoint sessions[${index}]`);
+    assertOnlyKeys(
+      session,
+      new Set(['sessionRef', 'lane', 'resultInputCapable', 'outputSeq']),
+      `control checkpoint sessions[${index}]`
+    );
+    const sessionRef = asPublicId(
+      session.sessionRef,
+      `control checkpoint sessions[${index}].sessionRef`
+    );
+    if (sessionRefs.has(sessionRef)) {
+      throw new RunJournalError('Control checkpoint repeats a session reference', 'invalid-input');
+    }
+    sessionRefs.add(sessionRef);
+    const laneInput = asObject(
+      session.lane,
+      `control checkpoint sessions[${index}].lane`
+    );
+    const lane = normalizeLaneDescriptors([laneInput])[0];
+    if (stableJson(Object.keys(laneInput).sort()) !== stableJson(Object.keys(lane).sort())) {
+      throw new RunJournalError(
+        `control checkpoint sessions[${index}].lane contains non-public fields`,
+        'invalid-input'
+      );
+    }
+    if (lane.laneId) {
+      if (laneIds.has(lane.laneId)) {
+        throw new RunJournalError(
+          'Control checkpoint repeats a lane id',
+          'invalid-input'
+        );
+      }
+      laneIds.add(lane.laneId);
+    }
+    if (typeof session.resultInputCapable !== 'boolean') {
+      throw new RunJournalError(
+        `control checkpoint sessions[${index}].resultInputCapable must be boolean`,
+        'invalid-input'
+      );
+    }
+    const outputSeq = session.outputSeq === null || session.outputSeq === undefined
+      ? null
+      : asNonNegativeInt(
+          session.outputSeq,
+          `control checkpoint sessions[${index}].outputSeq`
+        );
+    return {
+      sessionRef,
+      lane,
+      resultInputCapable: session.resultInputCapable,
+      outputSeq,
+    };
+  });
+  if (!Array.isArray(raw.pendingLanes) || raw.pendingLanes.length > MAX_LANES) {
+    throw new RunJournalError('Control checkpoint pending lanes are invalid', 'invalid-input');
+  }
+  const pendingLaneRefs = new Set();
+  const pendingLanes = raw.pendingLanes.map((value, index) => {
+    const sessionRef = asPublicId(
+      value,
+      `control checkpoint pendingLanes[${index}]`
+    );
+    if (!sessionRefs.has(sessionRef)) {
+      throw new RunJournalError(
+        'Control checkpoint pending lane references an unknown session',
+        'invalid-input'
+      );
+    }
+    if (pendingLaneRefs.has(sessionRef)) {
+      throw new RunJournalError('Control checkpoint repeats a pending lane', 'invalid-input');
+    }
+    pendingLaneRefs.add(sessionRef);
+    return sessionRef;
+  });
+  const pendingJoinBlockId = asOptionalPublicId(
+    raw.pendingJoinBlockId,
+    'control checkpoint pendingJoinBlockId'
+  );
+  const normalized = {
+    version: CONTROL_CHECKPOINT_VERSION,
+    sessions,
+    pendingLanes,
+    pendingJoinBlockId,
+  };
+  const plaintext = stableJson(normalized, 'control checkpoint state');
+  const byteLength = utf8ByteLength(plaintext);
+  if (byteLength > MAX_CONTROL_CHECKPOINT_BYTES) {
+    throw new RunJournalError(
+      `Control checkpoint is ${byteLength} UTF-8 bytes; the limit is ${MAX_CONTROL_CHECKPOINT_BYTES}`,
+      'size-limit'
+    );
+  }
+  return { state: normalized, plaintext, byteLength };
 }
 
 function normalizeIterationPath(value) {
@@ -812,6 +955,29 @@ function publicBlock(block) {
   };
 }
 
+function publicControlCheckpoint(checkpoint) {
+  if (!checkpoint) return null;
+  return {
+    id: checkpoint.id,
+    stateVersion: checkpoint.stateVersion,
+    sourceRunId: checkpoint.sourceRunId,
+    sourceRevision: checkpoint.sourceRevision,
+    afterVisitId: checkpoint.afterVisitId,
+    storage: checkpoint.storage,
+    byteLength: checkpoint.byteLength,
+    createdAt: checkpoint.createdAt,
+  };
+}
+
+function publicBoundaryReview(review) {
+  return {
+    visitId: review.visitId,
+    sourceRevision: review.sourceRevision,
+    disposition: review.disposition,
+    reviewedAt: review.reviewedAt,
+  };
+}
+
 function publicEvent(event) {
   const out = {
     seq: event.seq,
@@ -822,10 +988,12 @@ function publicEvent(event) {
     'visitId',
     'blockId',
     'resultId',
+    'checkpointId',
     'producerBlockId',
     'status',
     'reasonCode',
     'closedVisitCount',
+    'disposition',
   ]) {
     if (event[key] !== undefined && event[key] !== null) out[key] = event[key];
   }
@@ -836,6 +1004,9 @@ function publicRun(run) {
   return {
     schemaVersion: run.schemaVersion,
     id: run.id,
+    rootRunId: run.rootRunId,
+    parentRunId: run.parentRunId,
+    attempt: run.attempt,
     revision: run.revision,
     eventSeq: run.eventSeq,
     status: run.status,
@@ -848,6 +1019,10 @@ function publicRun(run) {
       storage: run.snapshot.storage,
       byteLength: run.snapshot.byteLength,
     },
+    migration: run.migration ? clonePublic(run.migration) : null,
+    controlCheckpoint: publicControlCheckpoint(run.controlCheckpoints.at(-1)),
+    controlCheckpointCount: run.controlCheckpoints.length,
+    boundaryReviews: run.boundaryReviews.map(publicBoundaryReview),
     truncated: run.truncated ? clonePublic(run.truncated) : null,
     blocks: run.blocks.map(publicBlock),
     results: run.results.map(publicResult),
@@ -860,6 +1035,9 @@ function runSummary(run) {
   return {
     schemaVersion: run.schemaVersion,
     id: run.id,
+    rootRunId: run.rootRunId,
+    parentRunId: run.parentRunId,
+    attempt: run.attempt,
     revision: run.revision,
     eventSeq: run.eventSeq,
     status: run.status,
@@ -872,6 +1050,13 @@ function runSummary(run) {
       storage: run.snapshot.storage,
       byteLength: run.snapshot.byteLength,
     },
+    migration: run.migration ? clonePublic(run.migration) : null,
+    controlCheckpoint: publicControlCheckpoint(run.controlCheckpoints.at(-1)),
+    controlCheckpointCount: run.controlCheckpoints.length,
+    boundaryReviewCount: run.boundaryReviews.length,
+    lastBoundaryReview: run.boundaryReviews.length
+      ? publicBoundaryReview(run.boundaryReviews.at(-1))
+      : null,
     truncated: run.truncated ? clonePublic(run.truncated) : null,
     blockVisitCount: run.blocks.length,
     resultCount: run.results.length,
@@ -882,6 +1067,9 @@ function runSummary(run) {
 const RUN_SUMMARY_KEYS = new Set([
   'schemaVersion',
   'id',
+  'rootRunId',
+  'parentRunId',
+  'attempt',
   'revision',
   'eventSeq',
   'status',
@@ -891,6 +1079,11 @@ const RUN_SUMMARY_KEYS = new Set([
   'workflow',
   'trigger',
   'snapshot',
+  'migration',
+  'controlCheckpoint',
+  'controlCheckpointCount',
+  'boundaryReviewCount',
+  'lastBoundaryReview',
   'truncated',
   'blockVisitCount',
   'resultCount',
@@ -902,13 +1095,100 @@ function compareRunSummaries(left, right) {
   return byStart || right.id.localeCompare(left.id);
 }
 
+function assertLineage(record, runId, what) {
+  const rootRunId = asRunId(record.rootRunId, `${what} rootRunId`);
+  const parentRunId = record.parentRunId === null
+    ? null
+    : asRunId(record.parentRunId, `${what} parentRunId`);
+  const attempt = asPositiveInt(record.attempt, `${what} attempt`);
+  if (attempt === 1) {
+    if (rootRunId !== runId || parentRunId !== null) {
+      throw new RunJournalError(`${what} root lineage is invalid`, 'invalid-input');
+    }
+    return;
+  }
+  if (rootRunId === runId || parentRunId === null || parentRunId === runId) {
+    throw new RunJournalError(`${what} child lineage is invalid`, 'invalid-input');
+  }
+}
+
+function assertMigrationMetadata(migration, what) {
+  if (migration === null) return;
+  asObject(migration, what);
+  assertOnlyKeys(
+    migration,
+    new Set(['fromSchemaVersion', 'sourceRevision', 'migratedAt']),
+    what
+  );
+  if (migration.fromSchemaVersion !== LEGACY_SCHEMA_VERSION) {
+    throw new RunJournalError(`${what} source schema is invalid`, 'invalid-input');
+  }
+  asPositiveInt(migration.sourceRevision, `${what} sourceRevision`);
+  if (!isIsoTimestamp(migration.migratedAt)) {
+    throw new RunJournalError(`${what} timestamp is invalid`, 'invalid-input');
+  }
+}
+
+function assertPublicControlCheckpoint(checkpoint, what) {
+  if (checkpoint === null) return;
+  asObject(checkpoint, what);
+  assertOnlyKeys(
+    checkpoint,
+    new Set([
+      'id',
+      'stateVersion',
+      'sourceRunId',
+      'sourceRevision',
+      'afterVisitId',
+      'storage',
+      'byteLength',
+      'createdAt',
+    ]),
+    what
+  );
+  asRunId(checkpoint.id, `${what} id`);
+  if (checkpoint.stateVersion !== CONTROL_CHECKPOINT_VERSION) {
+    throw new RunJournalError(`${what} version is invalid`, 'invalid-input');
+  }
+  asRunId(checkpoint.sourceRunId, `${what} sourceRunId`);
+  asPositiveInt(checkpoint.sourceRevision, `${what} sourceRevision`);
+  asRunId(checkpoint.afterVisitId, `${what} afterVisitId`);
+  if (checkpoint.storage !== STORAGE.ENCRYPTED) {
+    throw new RunJournalError(`${what} storage is invalid`, 'invalid-input');
+  }
+  asNonNegativeInt(checkpoint.byteLength, `${what} byteLength`, {
+    max: MAX_CONTROL_CHECKPOINT_BYTES,
+  });
+  if (!isIsoTimestamp(checkpoint.createdAt)) {
+    throw new RunJournalError(`${what} timestamp is invalid`, 'invalid-input');
+  }
+}
+
+function assertBoundaryReview(review, what) {
+  asObject(review, what);
+  assertOnlyKeys(
+    review,
+    new Set(['visitId', 'sourceRevision', 'disposition', 'reviewedAt']),
+    what
+  );
+  asRunId(review.visitId, `${what} visitId`);
+  asPositiveInt(review.sourceRevision, `${what} sourceRevision`);
+  if (!BOUNDARY_DISPOSITION_VALUES.has(review.disposition)) {
+    throw new RunJournalError(`${what} disposition is invalid`, 'invalid-input');
+  }
+  if (!isIsoTimestamp(review.reviewedAt)) {
+    throw new RunJournalError(`${what} timestamp is invalid`, 'invalid-input');
+  }
+}
+
 function assertRunSummary(summary) {
   asObject(summary, 'run summary');
   assertOnlyKeys(summary, RUN_SUMMARY_KEYS, 'run summary');
   if (summary.schemaVersion !== SCHEMA_VERSION) {
     throw new RunJournalError('Run index contains an unsupported summary', 'corrupt-index');
   }
-  asRunId(summary.id, 'run summary id');
+  const summaryId = asRunId(summary.id, 'run summary id');
+  assertLineage(summary, summaryId, 'run summary');
   asPositiveInt(summary.revision, 'run summary revision');
   asPositiveInt(summary.eventSeq, 'run summary event sequence');
   if (!RUN_STATUS_VALUES.has(summary.status)) {
@@ -968,6 +1248,38 @@ function assertRunSummary(summary) {
     'run summary snapshot byte length',
     { max: MAX_WORKFLOW_BYTES }
   );
+  assertMigrationMetadata(summary.migration, 'run summary migration');
+  assertPublicControlCheckpoint(summary.controlCheckpoint, 'run summary control checkpoint');
+  asNonNegativeInt(
+    summary.controlCheckpointCount,
+    'run summary control checkpoint count',
+    { max: MAX_BLOCK_VISITS }
+  );
+  if (
+    summary.controlCheckpoint
+    && summary.controlCheckpoint.sourceRunId !== summaryId
+  ) {
+    throw new RunJournalError('Run summary control checkpoint source is invalid', 'corrupt-index');
+  }
+  if (
+    (summary.controlCheckpoint === null && summary.controlCheckpointCount !== 0)
+    || (summary.controlCheckpoint !== null && summary.controlCheckpointCount === 0)
+  ) {
+    throw new RunJournalError('Run summary control checkpoint count is invalid', 'corrupt-index');
+  }
+  asNonNegativeInt(
+    summary.boundaryReviewCount,
+    'run summary boundary review count',
+    { max: MAX_BOUNDARY_REVIEWS }
+  );
+  if (summary.lastBoundaryReview !== null) {
+    assertBoundaryReview(summary.lastBoundaryReview, 'run summary last boundary review');
+    if (summary.boundaryReviewCount === 0) {
+      throw new RunJournalError('Run summary boundary review count is invalid', 'corrupt-index');
+    }
+  } else if (summary.boundaryReviewCount !== 0) {
+    throw new RunJournalError('Run summary omits its last boundary review', 'corrupt-index');
+  }
 
   if (summary.truncated !== null) {
     asObject(summary.truncated, 'run summary truncation');
@@ -1103,6 +1415,9 @@ function assertStoredRun(run) {
     new Set([
       'schemaVersion',
       'id',
+      'rootRunId',
+      'parentRunId',
+      'attempt',
       'revision',
       'eventSeq',
       'status',
@@ -1112,6 +1427,9 @@ function assertStoredRun(run) {
       'workflow',
       'trigger',
       'snapshot',
+      'migration',
+      'controlCheckpoints',
+      'boundaryReviews',
       'truncated',
       'blocks',
       'results',
@@ -1123,7 +1441,8 @@ function assertStoredRun(run) {
   if (run.schemaVersion !== SCHEMA_VERSION) {
     throw new RunJournalError('Unsupported Run Journal schema', 'unsupported-schema');
   }
-  asRunId(run.id, 'run.id');
+  const runId = asRunId(run.id, 'run.id');
+  assertLineage(run, runId, 'run');
   asPositiveInt(run.revision, 'run.revision');
   asPositiveInt(run.eventSeq, 'run.eventSeq');
   if (!RUN_STATUS_VALUES.has(run.status)) {
@@ -1141,6 +1460,10 @@ function assertStoredRun(run) {
   }
   if (RUN_TERMINAL_VALUES.has(run.status) && run.finishedAt === null) {
     throw new RunJournalError('Terminal run is missing its finish timestamp', 'corrupt-run');
+  }
+  assertMigrationMetadata(run.migration, 'run.migration');
+  if (run.migration && run.migration.sourceRevision >= run.revision) {
+    throw new RunJournalError('Run migration revision is invalid', 'corrupt-run');
   }
   if (Object.hasOwn(run, 'truncated')) {
     asObject(run.truncated, 'run.truncated');
@@ -1184,6 +1507,79 @@ function assertStoredRun(run) {
     );
   } else if (Object.hasOwn(run.snapshot, 'ciphertext')) {
     throw new RunJournalError('Memory snapshot contains ciphertext', 'corrupt-run');
+  }
+
+  if (!Array.isArray(run.controlCheckpoints) || run.controlCheckpoints.length > MAX_BLOCK_VISITS) {
+    throw new RunJournalError('Run control checkpoints are invalid', 'corrupt-run');
+  }
+  const checkpointIds = new Set();
+  const checkpointVisitIds = new Set();
+  let priorCheckpointRevision = 0;
+  for (let index = 0; index < run.controlCheckpoints.length; index++) {
+    const checkpoint = asObject(
+      run.controlCheckpoints[index],
+      `run.controlCheckpoints[${index}]`
+    );
+    assertOnlyKeys(
+      checkpoint,
+      new Set([
+        'id',
+        'stateVersion',
+        'sourceRunId',
+        'sourceRevision',
+        'afterVisitId',
+        'storage',
+        'byteLength',
+        'createdAt',
+        'ciphertext',
+      ]),
+      `run.controlCheckpoints[${index}]`
+    );
+    assertPublicControlCheckpoint(
+      publicControlCheckpoint(checkpoint),
+      `run.controlCheckpoints[${index}]`
+    );
+    if (checkpointIds.has(checkpoint.id)) {
+      throw new RunJournalError('Run repeats a control checkpoint id', 'corrupt-run');
+    }
+    checkpointIds.add(checkpoint.id);
+    if (checkpointVisitIds.has(checkpoint.afterVisitId)) {
+      throw new RunJournalError('Run repeats a control checkpoint visit', 'corrupt-run');
+    }
+    checkpointVisitIds.add(checkpoint.afterVisitId);
+    if (checkpoint.sourceRunId !== runId || checkpoint.sourceRevision >= run.revision) {
+      throw new RunJournalError('Control checkpoint source binding is invalid', 'corrupt-run');
+    }
+    if (checkpoint.sourceRevision <= priorCheckpointRevision) {
+      throw new RunJournalError('Control checkpoint revisions are not ordered', 'corrupt-run');
+    }
+    priorCheckpointRevision = checkpoint.sourceRevision;
+    assertCiphertext(
+      checkpoint.ciphertext,
+      'stored control checkpoint encryption',
+      MAX_CONTROL_CHECKPOINT_CIPHERTEXT_BYTES
+    );
+  }
+
+  if (!Array.isArray(run.boundaryReviews) || run.boundaryReviews.length > MAX_BOUNDARY_REVIEWS) {
+    throw new RunJournalError('Run boundary reviews are invalid', 'corrupt-run');
+  }
+  const reviewedVisitIds = new Set();
+  let priorReviewRevision = 0;
+  for (let index = 0; index < run.boundaryReviews.length; index++) {
+    const review = run.boundaryReviews[index];
+    assertBoundaryReview(review, `run.boundaryReviews[${index}]`);
+    if (review.sourceRevision >= run.revision) {
+      throw new RunJournalError('Boundary review source revision is invalid', 'corrupt-run');
+    }
+    if (reviewedVisitIds.has(review.visitId)) {
+      throw new RunJournalError('Run repeats a boundary review visit', 'corrupt-run');
+    }
+    reviewedVisitIds.add(review.visitId);
+    if (review.sourceRevision <= priorReviewRevision) {
+      throw new RunJournalError('Boundary review revisions are not ordered', 'corrupt-run');
+    }
+    priorReviewRevision = review.sourceRevision;
   }
 
   if (!Array.isArray(run.blocks) || run.blocks.length > MAX_BLOCK_VISITS) {
@@ -1253,6 +1649,24 @@ function assertStoredRun(run) {
     && run.blocks.some(block => block.status === BLOCK_STATUS.RUNNING)
   ) {
     throw new RunJournalError('Terminal run contains an active block visit', 'corrupt-run');
+  }
+  for (const checkpoint of run.controlCheckpoints) {
+    const checkpointVisit = run.blocks.find(
+      block => block.visitId === checkpoint.afterVisitId
+    );
+    if (!checkpointVisit || !BLOCK_TERMINAL_VALUES.has(checkpointVisit.status)) {
+      throw new RunJournalError('Control checkpoint visit binding is invalid', 'corrupt-run');
+    }
+  }
+  for (const review of run.boundaryReviews) {
+    const visit = run.blocks.find(block => block.visitId === review.visitId);
+    if (!visit || ![
+      BLOCK_STATUS.FAILED,
+      BLOCK_STATUS.CANCELLED,
+      BLOCK_STATUS.INTERRUPTED,
+    ].includes(visit.status)) {
+      throw new RunJournalError('Boundary review does not reference an uncertain visit', 'corrupt-run');
+    }
   }
 
   if (!Array.isArray(run.results) || run.results.length > MAX_RESULTS) {
@@ -1368,18 +1782,23 @@ function assertStoredRun(run) {
     if (operation.refId !== null) {
       const refId = asRunId(operation.refId, 'operation.refId');
       const expectsVisit = operation.action === 'start-block'
-        || operation.action === 'finish-block';
+        || operation.action === 'finish-block'
+        || operation.action === 'record-boundary-disposition';
       const expectsResult = operation.action === 'store-result';
+      const expectsCheckpoint = operation.action === 'store-control-checkpoint';
       if (
         (expectsVisit && !visitIds.has(refId))
         || (expectsResult && !resultIds.has(refId))
-        || (!expectsVisit && !expectsResult)
+        || (expectsCheckpoint && !checkpointIds.has(refId))
+        || (!expectsVisit && !expectsResult && !expectsCheckpoint)
       ) {
         throw new RunJournalError('Operation points to an unknown record', 'corrupt-run');
       }
     } else if (
       operation.action === 'start-block'
       || operation.action === 'finish-block'
+      || operation.action === 'store-control-checkpoint'
+      || operation.action === 'record-boundary-disposition'
       || operation.action === 'store-result'
     ) {
       throw new RunJournalError('Operation is missing its record reference', 'corrupt-run');
@@ -1404,10 +1823,12 @@ function assertStoredRun(run) {
         'visitId',
         'blockId',
         'resultId',
+        'checkpointId',
         'producerBlockId',
         'status',
         'reasonCode',
         'closedVisitCount',
+        'disposition',
       ]),
       'event'
     );
@@ -1430,6 +1851,12 @@ function assertStoredRun(run) {
         throw new RunJournalError('Event points to an unknown result', 'corrupt-run');
       }
     }
+    if (event.checkpointId !== undefined) {
+      const checkpointId = asRunId(event.checkpointId, 'event.checkpointId');
+      if (!checkpointIds.has(checkpointId)) {
+        throw new RunJournalError('Event points to an unknown control checkpoint', 'corrupt-run');
+      }
+    }
     if (event.blockId !== undefined) asPublicId(event.blockId, 'event.blockId');
     if (event.producerBlockId !== undefined) {
       asPublicId(event.producerBlockId, 'event.producerBlockId');
@@ -1443,6 +1870,12 @@ function assertStoredRun(run) {
       throw new RunJournalError('Event status is invalid', 'corrupt-run');
     }
     if (event.reasonCode !== undefined) asSlug(event.reasonCode, 'event.reasonCode');
+    if (
+      event.disposition !== undefined
+      && !BOUNDARY_DISPOSITION_VALUES.has(event.disposition)
+    ) {
+      throw new RunJournalError('Event disposition is invalid', 'corrupt-run');
+    }
     if (event.closedVisitCount !== undefined) {
       asNonNegativeInt(
         event.closedVisitCount,
@@ -1452,6 +1885,59 @@ function assertStoredRun(run) {
     }
   }
   return run;
+}
+
+const V1_RUN_KEYS = new Set([
+  'schemaVersion',
+  'id',
+  'revision',
+  'eventSeq',
+  'status',
+  'startedAt',
+  'updatedAt',
+  'finishedAt',
+  'workflow',
+  'trigger',
+  'snapshot',
+  'truncated',
+  'blocks',
+  'results',
+  'operations',
+  'events',
+]);
+
+function migrateStoredRunV1(run, migratedAt) {
+  if (!isPlainObject(run) || run.schemaVersion !== LEGACY_SCHEMA_VERSION) {
+    throw new RunJournalError('Run is not a v1 journal record', 'unsupported-schema');
+  }
+  assertOnlyKeys(run, V1_RUN_KEYS, 'v1 run record');
+  const sourceRevision = asPositiveInt(run.revision, 'v1 run revision');
+  if (sourceRevision >= Number.MAX_SAFE_INTEGER) {
+    throw new RunJournalError('V1 run revision cannot be migrated', 'size-limit');
+  }
+  if (!isIsoTimestamp(migratedAt)) {
+    throw new RunJournalError('Migration timestamp is invalid', 'clock-error');
+  }
+  const runId = asRunId(run.id, 'v1 run id');
+  const migrated = {
+    ...run,
+    schemaVersion: SCHEMA_VERSION,
+    rootRunId: runId,
+    parentRunId: null,
+    attempt: 1,
+    revision: sourceRevision + 1,
+    updatedAt: migratedAt,
+    migration: {
+      fromSchemaVersion: LEGACY_SCHEMA_VERSION,
+      sourceRevision,
+      migratedAt,
+    },
+    controlCheckpoints: [],
+    boundaryReviews: [],
+  };
+  if (migrated.truncated === null) delete migrated.truncated;
+  assertStoredRun(migrated);
+  return migrated;
 }
 
 function appendEvent(run, type, at, fields = {}) {
@@ -1538,7 +2024,11 @@ class RunJournal {
     memoryMaxEntries = MAX_MEMORY_ENTRIES,
     recordMaxBytes = MAX_RUN_RECORD_BYTES,
     writeRecord = writeJsonAtomic,
+    writeMigrationBackup = writeJsonAtomic,
     deleteRecord = file => fs.unlinkSync(file),
+    deleteMigrationBackup = file => fs.unlinkSync(file),
+    deleteLegacyIndex = file => fs.unlinkSync(file),
+    onMutationBoundary = null,
   } = {}) {
     if (typeof dir !== 'string' || !dir.trim()) {
       throw new RunJournalError('Run Journal dir is required', 'invalid-input');
@@ -1549,7 +2039,19 @@ class RunJournal {
     if (onError !== null && typeof onError !== 'function') {
       throw new RunJournalError('Run Journal onError must be a function', 'invalid-input');
     }
-    if (typeof writeRecord !== 'function' || typeof deleteRecord !== 'function') {
+    if (onMutationBoundary !== null && typeof onMutationBoundary !== 'function') {
+      throw new RunJournalError(
+        'Run Journal mutation boundary hook must be a function',
+        'invalid-input'
+      );
+    }
+    if (
+      typeof writeRecord !== 'function'
+      || typeof writeMigrationBackup !== 'function'
+      || typeof deleteRecord !== 'function'
+      || typeof deleteMigrationBackup !== 'function'
+      || typeof deleteLegacyIndex !== 'function'
+    ) {
       throw new RunJournalError(
         'Run Journal storage adapters must be functions',
         'invalid-input'
@@ -1571,7 +2073,11 @@ class RunJournal {
     this.randomUUID = randomUUID;
     this.onError = onError;
     this.writeRecord = writeRecord;
+    this.writeMigrationBackup = writeMigrationBackup;
     this.deleteRecord = deleteRecord;
+    this.deleteMigrationBackup = deleteMigrationBackup;
+    this.deleteLegacyIndex = deleteLegacyIndex;
+    this.onMutationBoundary = onMutationBoundary;
     this.recordMaxBytes = recordMaxBytes;
     this.memory = new BoundedMemoryStore({
       maxBytes: memoryMaxBytes,
@@ -1582,6 +2088,154 @@ class RunJournal {
     this._pruned = new Map();
     this._index = null;
     this._indexEntries = new Map();
+  }
+
+  async migrateV1Records() {
+    return this._withLock('migration', async () => {
+      let skippedCount = 0;
+      let entries;
+      try {
+        entries = readJsonDir(
+          this.dir,
+          (file, error) => {
+            this._report(file, error);
+            skippedCount += 1;
+          },
+          { maxFileBytes: this.recordMaxBytes }
+        );
+      } catch (_error) {
+        throw new RunJournalError(
+          'Run Journal records could not be listed for migration',
+          'migration-failed'
+        );
+      }
+
+      const migratedRunIds = [];
+      for (const { file, data } of entries) {
+        if (!isPlainObject(data)) {
+          skippedCount += 1;
+          this._report(
+            file,
+            new RunJournalError('Run Journal migration found an invalid record', 'corrupt-run')
+          );
+          continue;
+        }
+        if (data.schemaVersion === SCHEMA_VERSION) {
+          try {
+            assertStoredRun(data);
+            if (file !== `${data.id}.json`) {
+              throw new RunJournalError('Run id does not match its filename', 'corrupt-run');
+            }
+          } catch (error) {
+            skippedCount += 1;
+            this._report(file, error);
+          }
+          continue;
+        }
+        if (data.schemaVersion !== LEGACY_SCHEMA_VERSION) {
+          skippedCount += 1;
+          this._report(
+            file,
+            new RunJournalError(
+              'Run Journal migration found an unsupported schema',
+              'unsupported-schema'
+            )
+          );
+          continue;
+        }
+
+        const migratedAt = this._timestamp();
+        let migrated;
+        try {
+          migrated = migrateStoredRunV1(data, migratedAt);
+          if (file !== `${migrated.id}.json`) {
+            throw new RunJournalError('V1 run id does not match its filename', 'corrupt-run');
+          }
+        } catch (error) {
+          skippedCount += 1;
+          this._report(file, error);
+          continue;
+        }
+
+        await this._withLock(`run:${migrated.id}`, async () => {
+          let current;
+          try {
+            current = readJsonStrict(this._filePath(migrated.id), {
+              maxFileBytes: this.recordMaxBytes,
+            });
+          } catch (_error) {
+            throw new RunJournalError(
+              'The v1 Run Journal record changed during migration',
+              'migration-failed'
+            );
+          }
+          if (stableJson(current) !== stableJson(data)) {
+            throw new RunJournalError(
+              'The v1 Run Journal record changed during migration',
+              'migration-failed'
+            );
+          }
+
+          const backupPath = this._v1MigrationBackupPath(migrated.id);
+          if (fs.existsSync(backupPath)) {
+            let backup;
+            try {
+              backup = readJsonStrict(backupPath, { maxFileBytes: this.recordMaxBytes });
+            } catch (_error) {
+              throw new RunJournalError(
+                'The existing v1 migration backup is unreadable',
+                'migration-failed'
+              );
+            }
+            if (stableJson(backup) !== stableJson(data)) {
+              throw new RunJournalError(
+                'The existing v1 migration backup does not match its source record',
+                'migration-failed'
+              );
+            }
+          } else {
+            this._mutationBoundary('migration-backup', 'before', migrated.id);
+            try {
+              this.writeMigrationBackup(backupPath, data);
+            } catch (_error) {
+              throw new RunJournalError(
+                'The v1 Run Journal backup could not be written',
+                'migration-failed'
+              );
+            }
+            this._mutationBoundary('migration-backup', 'after', migrated.id);
+          }
+
+          this._markIndexDirty();
+          this._mutationBoundary('migration-record', 'before', migrated.id);
+          try {
+            this.writeRecord(this._filePath(migrated.id), migrated);
+          } catch (_error) {
+            throw new RunJournalError(
+              'The v2 Run Journal record could not be written',
+              'migration-failed'
+            );
+          }
+          this._mutationBoundary('migration-record', 'after', migrated.id);
+        });
+        migratedRunIds.push(migrated.id);
+      }
+
+      if (migratedRunIds.length) {
+        this._clearIndex();
+        this._rebuildIndex();
+      }
+      const legacyIndexCleanup = this._removeLegacyIndexFiles();
+      return {
+        fromSchemaVersion: LEGACY_SCHEMA_VERSION,
+        toSchemaVersion: SCHEMA_VERSION,
+        migratedRunIds,
+        migratedCount: migratedRunIds.length,
+        skippedCount,
+        removedLegacyIndexFiles: legacyIndexCleanup.removed,
+        legacyIndexCleanupFailures: legacyIndexCleanup.failed,
+      };
+    });
   }
 
   async startRun(input) {
@@ -1625,6 +2279,9 @@ class RunJournal {
       const run = {
         schemaVersion: SCHEMA_VERSION,
         id: runId,
+        rootRunId: runId,
+        parentRunId: null,
+        attempt: 1,
         revision: 1,
         eventSeq: 0,
         status: RUN_STATUS.RUNNING,
@@ -1638,6 +2295,9 @@ class RunJournal {
           byteLength: workflow.byteLength,
           ...(secured.ciphertext ? { ciphertext: secured.ciphertext } : {}),
         },
+        migration: null,
+        controlCheckpoints: [],
+        boundaryReviews: [],
         blocks: [],
         results: [],
         operations: [{
@@ -1946,6 +2606,206 @@ class RunJournal {
     });
   }
 
+  async storeControlCheckpoint(input) {
+    const raw = asObject(input, 'storeControlCheckpoint payload');
+    assertOnlyKeys(
+      raw,
+      new Set(['runId', 'sourceRevision', 'afterVisitId', 'state', 'opId']),
+      'storeControlCheckpoint payload'
+    );
+    const runId = asRunId(raw.runId);
+    const sourceRevision = asPositiveInt(raw.sourceRevision, 'sourceRevision');
+    const afterVisitId = asRunId(raw.afterVisitId, 'afterVisitId');
+    const opId = asOpId(raw.opId);
+    const checkpoint = normalizeControlCheckpointState(raw.state);
+    const fingerprint = operationFingerprint('store-control-checkpoint', {
+      sourceRevision,
+      afterVisitId,
+      state: checkpoint.plaintext,
+    });
+
+    return this._mutate({
+      runId,
+      opId,
+      action: 'store-control-checkpoint',
+      mutationKind: 'control-checkpoint',
+      fingerprint,
+      replay: (run, operation) => {
+        const stored = run.controlCheckpoints.find(entry => entry.id === operation.refId);
+        if (!stored) {
+          throw new RunJournalError('Replayed control checkpoint is missing', 'corrupt-run');
+        }
+        return publicControlCheckpoint(stored);
+      },
+      apply: async (run, at) => {
+        this._assertActive(run);
+        if (run.revision !== sourceRevision) {
+          throw new RunJournalError(
+            'The source run changed before its control checkpoint was stored',
+            'stale-source'
+          );
+        }
+        if (run.controlCheckpoints.length >= MAX_BLOCK_VISITS) {
+          throw new RunJournalError('Control checkpoint capacity has been reached', 'size-limit');
+        }
+        const visit = run.blocks.find(entry => entry.visitId === afterVisitId);
+        if (
+          !visit
+          || !BLOCK_TERMINAL_VALUES.has(visit.status)
+          || run.blocks.at(-1)?.visitId !== afterVisitId
+        ) {
+          throw new RunJournalError(
+            'Control checkpoint must follow the last committed block visit',
+            'invalid-state'
+          );
+        }
+        if (run.controlCheckpoints.some(entry => entry.afterVisitId === afterVisitId)) {
+          throw new RunJournalError(
+            'The last committed visit already has a control checkpoint',
+            'invalid-state'
+          );
+        }
+        const checkpointId = this._newUuid(
+          new Set([
+            run.id,
+            ...run.blocks.map(entry => entry.visitId),
+            ...run.results.map(entry => entry.id),
+            ...run.controlCheckpoints.map(entry => entry.id),
+          ])
+        );
+        const context = {
+          kind: 'control-checkpoint',
+          runId,
+          visitId: afterVisitId,
+          sourceRevision,
+          checkpointId,
+        };
+        const secured = await this._secureEncryptedPayload(
+          checkpoint.plaintext,
+          context,
+          MAX_CONTROL_CHECKPOINT_CIPHERTEXT_BYTES
+        );
+        const stored = {
+          id: checkpointId,
+          stateVersion: CONTROL_CHECKPOINT_VERSION,
+          sourceRunId: runId,
+          sourceRevision,
+          afterVisitId,
+          storage: STORAGE.ENCRYPTED,
+          byteLength: checkpoint.byteLength,
+          createdAt: at,
+          ciphertext: secured.ciphertext,
+        };
+        run.controlCheckpoints.push(stored);
+        appendEvent(run, 'control.checkpoint-stored', at, {
+          visitId: afterVisitId,
+          checkpointId,
+        });
+        return {
+          refId: checkpointId,
+          value: () => publicControlCheckpoint(stored),
+        };
+      },
+    });
+  }
+
+  async recordBoundaryDisposition(input) {
+    const raw = asObject(input, 'recordBoundaryDisposition payload');
+    assertOnlyKeys(
+      raw,
+      new Set(['runId', 'sourceRevision', 'visitId', 'disposition', 'opId']),
+      'recordBoundaryDisposition payload'
+    );
+    const runId = asRunId(raw.runId);
+    const sourceRevision = asPositiveInt(raw.sourceRevision, 'sourceRevision');
+    const visitId = asRunId(raw.visitId, 'visitId');
+    if (!BOUNDARY_DISPOSITION_VALUES.has(raw.disposition)) {
+      throw new RunJournalError(
+        'Boundary disposition must be abort, skip, or retry',
+        'invalid-input'
+      );
+    }
+    const disposition = raw.disposition;
+    const opId = asOpId(raw.opId);
+    const fingerprint = operationFingerprint('record-boundary-disposition', {
+      sourceRevision,
+      visitId,
+      disposition,
+    });
+
+    return this._mutate({
+      runId,
+      opId,
+      action: 'record-boundary-disposition',
+      mutationKind: 'boundary-disposition',
+      fingerprint,
+      replay: (run, operation) => {
+        const review = run.boundaryReviews.find(entry => (
+          entry.visitId === operation.refId
+          && entry.sourceRevision === sourceRevision
+          && entry.disposition === disposition
+        ));
+        if (!review) {
+          throw new RunJournalError('Replayed boundary review is missing', 'corrupt-run');
+        }
+        return publicBoundaryReview(review);
+      },
+      apply: async (run, at) => {
+        if (run.revision !== sourceRevision) {
+          throw new RunJournalError(
+            'The source run changed before its boundary disposition was recorded',
+            'stale-source'
+          );
+        }
+        if (run.status !== RUN_STATUS.INTERRUPTED) {
+          throw new RunJournalError(
+            'Boundary disposition requires an interrupted source run',
+            'invalid-state'
+          );
+        }
+        if (run.boundaryReviews.length >= MAX_BOUNDARY_REVIEWS) {
+          throw new RunJournalError('Boundary review capacity has been reached', 'size-limit');
+        }
+        if (run.boundaryReviews.some(review => review.visitId === visitId)) {
+          throw new RunJournalError(
+            'The uncertain visit already has a boundary disposition',
+            'invalid-state'
+          );
+        }
+        const visit = run.blocks.find(entry => entry.visitId === visitId);
+        if (
+          !visit
+          || run.blocks.at(-1)?.visitId !== visitId
+          || ![
+            BLOCK_STATUS.FAILED,
+            BLOCK_STATUS.CANCELLED,
+            BLOCK_STATUS.INTERRUPTED,
+          ].includes(visit.status)
+        ) {
+          throw new RunJournalError(
+            'Boundary disposition requires the final uncertain visit',
+            'invalid-state'
+          );
+        }
+        const review = {
+          visitId,
+          sourceRevision,
+          disposition,
+          reviewedAt: at,
+        };
+        run.boundaryReviews.push(review);
+        appendEvent(run, 'boundary.disposition-recorded', at, {
+          visitId,
+          disposition,
+        });
+        return {
+          refId: visitId,
+          value: () => publicBoundaryReview(review),
+        };
+      },
+    });
+  }
+
   async finishRun(input) {
     const raw = asObject(input, 'finishRun payload');
     assertOnlyKeys(raw, new Set(['runId', 'status', 'opId']), 'finishRun payload');
@@ -2146,6 +3006,7 @@ class RunJournal {
     const deletedIds = new Set();
     try {
       for (const run of records) {
+        this._deleteV1MigrationBackup(run.id);
         this.deleteRecord(this._filePath(run.id));
         deletedIds.add(run.id);
         this.memory.deletePrefix(`workflow:${run.id}`);
@@ -2338,6 +3199,64 @@ class RunJournal {
     return body;
   }
 
+  async _readControlCheckpoint(run, checkpoint) {
+    if (checkpoint.storage !== STORAGE.ENCRYPTED) {
+      throw new RunJournalError(
+        'Control checkpoint is not durably protected',
+        'body-unavailable'
+      );
+    }
+    if (!await this._encryptionAvailable({ decrypt: true })) {
+      throw new RunJournalError(
+        'Encrypted control checkpoint is unavailable on this system',
+        'body-unavailable'
+      );
+    }
+
+    const context = {
+      kind: 'control-checkpoint',
+      runId: run.id,
+      visitId: checkpoint.afterVisitId,
+      sourceRevision: checkpoint.sourceRevision,
+      checkpointId: checkpoint.id,
+    };
+    let body;
+    try {
+      const decrypted = await this.encryption.decrypt(
+        checkpoint.ciphertext,
+        context
+      );
+      body = decodeEncryptedEnvelope(decrypted, context);
+    } catch (_error) {
+      throw new RunJournalError(
+        'Encrypted control checkpoint could not be decrypted',
+        'decrypt-failed'
+      );
+    }
+    if (utf8ByteLength(body) !== checkpoint.byteLength) {
+      throw new RunJournalError(
+        'Control checkpoint failed its integrity check',
+        'integrity-failed'
+      );
+    }
+
+    try {
+      const normalized = normalizeControlCheckpointState(JSON.parse(body));
+      if (
+        normalized.plaintext !== body
+        || normalized.state.version !== checkpoint.stateVersion
+      ) {
+        throw new Error('control checkpoint metadata mismatch');
+      }
+      return normalized.state;
+    } catch (_error) {
+      throw new RunJournalError(
+        'Control checkpoint failed its integrity check',
+        'integrity-failed'
+      );
+    }
+  }
+
   async recoverInterrupted() {
     const recovered = [];
     let failureCount = 0;
@@ -2432,6 +3351,7 @@ class RunJournal {
       const index = this._prepareIndexMutation();
       this._markIndexDirty();
       try {
+        this._deleteV1MigrationBackup(runId);
         this.deleteRecord(this._filePath(runId));
       } catch (error) {
         this._clearIndex();
@@ -2460,6 +3380,7 @@ class RunJournal {
     runId,
     opId,
     action,
+    mutationKind = null,
     fingerprint,
     replay,
     apply,
@@ -2505,7 +3426,9 @@ class RunJournal {
           });
           run.updatedAt = at;
           this._advanceRevision(run);
+          if (mutationKind) this._mutationBoundary(mutationKind, 'before', runId);
           this._writeRun(run);
+          if (mutationKind) this._mutationBoundary(mutationKind, 'after', runId);
         } catch (error) {
           if (proof.rollback) proof.rollback();
           if (mutation.rollback) mutation.rollback();
@@ -2643,6 +3566,34 @@ class RunJournal {
     }
   }
 
+  async _secureEncryptedPayload(plaintext, context, maxCiphertextBytes) {
+    const normalizedContext = normalizeEncryptionContext(context);
+    if (!await this._encryptionAvailable()) {
+      throw new RunJournalError(
+        'OS-backed encryption is required for control checkpoints',
+        'encryption-unavailable'
+      );
+    }
+    const envelope = encodeEncryptedEnvelope(plaintext, normalizedContext);
+    try {
+      const ciphertext = await this.encryption.encrypt(envelope, normalizedContext);
+      return {
+        storage: STORAGE.ENCRYPTED,
+        ciphertext: assertCiphertext(
+          ciphertext,
+          `${normalizedContext.kind} encryption`,
+          maxCiphertextBytes
+        ),
+      };
+    } catch (error) {
+      if (error instanceof RunJournalError) throw error;
+      throw new RunJournalError(
+        'Control checkpoint encryption failed',
+        'encryption-failed'
+      );
+    }
+  }
+
   async _securePayload(plaintext, context, memoryKey, maxCiphertextBytes) {
     const normalizedContext = normalizeEncryptionContext(context);
     const envelope = encodeEncryptedEnvelope(plaintext, normalizedContext);
@@ -2768,8 +3719,54 @@ class RunJournal {
     return path.join(this.dir, `${runId}.json`);
   }
 
+  _v1MigrationBackupPath(runId) {
+    return path.join(
+      this.dir,
+      MIGRATION_DIRECTORY,
+      V1_MIGRATION_DIRECTORY,
+      `${runId}.json`
+    );
+  }
+
+  _deleteV1MigrationBackup(runId) {
+    try {
+      this.deleteMigrationBackup(this._v1MigrationBackupPath(runId));
+    } catch (error) {
+      if (error?.code === 'ENOENT') return false;
+      throw new RunJournalError(
+        'Run Journal migration backup could not be deleted',
+        'storage-delete-failed'
+      );
+    }
+    return true;
+  }
+
   _indexDirectoryPath() {
     return path.join(this.dir, RUN_INDEX_DIRECTORY);
+  }
+
+  _removeLegacyIndexFiles() {
+    this._mutationBoundary('migration-index-cleanup', 'before', null);
+    let removed = 0;
+    let failed = 0;
+    for (const file of LEGACY_RUN_INDEX_FILES) {
+      try {
+        this.deleteLegacyIndex(path.join(this._indexDirectoryPath(), file));
+        removed += 1;
+      } catch (error) {
+        if (error?.code === 'ENOENT') continue;
+        failed += 1;
+        this._report(
+          this._indexReportFile(file),
+          new RunJournalError(
+            'A rebuildable legacy Run Journal index could not be removed',
+            'storage-delete-failed'
+          )
+        );
+      }
+    }
+    this._mutationBoundary('migration-index-cleanup', 'after', null);
+    return { removed, failed };
   }
 
   _indexFilePath() {
@@ -3102,6 +4099,11 @@ class RunJournal {
     }
   }
 
+  _mutationBoundary(kind, phase, runId) {
+    if (!this.onMutationBoundary) return;
+    this.onMutationBoundary({ kind, phase, runId });
+  }
+
   _rememberPrune(opId, entry) {
     this._pruned.delete(opId);
     this._pruned.set(opId, {
@@ -3116,7 +4118,9 @@ class RunJournal {
 
 module.exports = {
   SCHEMA_VERSION,
+  LEGACY_SCHEMA_VERSION,
   ENCRYPTED_ENVELOPE_VERSION,
+  CONTROL_CHECKPOINT_VERSION,
   RUN_STATUS,
   RUN_TERMINAL_STATES,
   RUN_FINISH_STATES,
@@ -3125,11 +4129,13 @@ module.exports = {
   BLOCK_FINISH_STATES,
   RESULT_STATUS,
   STORAGE,
+  BOUNDARY_DISPOSITION,
   MAX_RESULT_BYTES_PER_LANE,
   MAX_HANDOFF_BYTES,
   MAX_RESULT_BYTES,
   MAX_RUN_RESULT_BYTES,
   MAX_WORKFLOW_BYTES,
+  MAX_CONTROL_CHECKPOINT_BYTES,
   MAX_MEMORY_BYTES,
   MAX_RUN_RECORD_BYTES,
   MAX_MEMORY_ENTRIES,
@@ -3148,7 +4154,9 @@ module.exports = {
   normalizeWorkflowSnapshot,
   normalizeTrigger,
   normalizeLaneDescriptors,
+  normalizeControlCheckpointState,
   normalizeIterationPath,
+  migrateStoredRunV1,
   assertStoredRun,
   publicRun,
   publicResult,

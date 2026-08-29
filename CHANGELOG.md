@@ -3,7 +3,20 @@
 Every notable change to Agent Orchestrator, newest first. The README keeps only
 the product story; this file keeps the history.
 
-## Unreleased (Indexed History + Deep Resume Preflight)
+## Unreleased (Journal v2 + Evidence-First Field Guide)
+
+- **Deliberate Run Journal v2 migration**: startup validates each v1 record,
+  preserves a rollback copy, and atomically writes an explicit v2 record rather
+  than reinterpreting old data. Migration is idempotent across crashes before
+  and after the backup, replacement, and legacy-index cleanup writes. Corrupt
+  or future records are preserved and reported without blocking valid upgrades;
+  the recovery health gate still blocks new journal/session admission while
+  any durable record remains unknowable.
+- **Lineage and review groundwork without replay**: v2 records expose root run,
+  parent run, and attempt identities; retain encrypted, visit-bound control
+  checkpoints with no plaintext fallback; and audit an explicit `abort`,
+  `skip`, or `retry` disposition for an uncertain boundary. No confirmation
+  receipt, child-run creation, or resume execution path ships with this layer.
 
 - **Readable UI text**: the smallest interface labels moved off a 9px floor.
   Block type labels, parameter labels, run statuses, buttons, and the security
@@ -47,10 +60,6 @@ the product story; this file keeps the history.
 - **Current-format evidence fixed at the contract boundary**: workflow format
   compatibility now belongs to the shared deep validator. The metadata gate no
   longer hard-codes v1 and incorrectly blocks the v2 documents the editor writes.
-- **One-shot social key art**: the field guide and README now share a verified
-  1731×909 browser-generated visual, with exact prompt and integrity sidecars.
-  It depicts the same route → fan-out → join → protected-journal story the app
-  actually implements.
 - **Authentic product capture**: `npm run promo:capture --
   --promo-output=docs/assets/promo` now creates three deterministic 1600×1000
   frames from the real renderer using an inert fixture. It starts no account,

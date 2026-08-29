@@ -24,7 +24,10 @@ form for people deciding whether a specific behavior exists.
   Snapshots and result bodies are protected with Electron `safeStorage`; bodies
   are fetched and decrypted only on request. No-encryption environments fall
   back to bounded memory, never plaintext files. A rebuildable metadata index
-  serves stable cursor pages without copying ciphertext or result bodies.
+  serves stable cursor pages without copying ciphertext or result bodies. An
+  explicit, idempotent v1-to-v2 migration preserves a rollback record and adds
+  public lineage identities, protected visit-bound control checkpoints, and
+  auditable human boundary dispositions.
   Interrupted-run detail derives a metadata-only evidence assessment; an
   explicit deep preflight can then validate protected snapshot/result bytes,
   prove the control prefix, classify runtime reconstruction, and re-resolve
@@ -75,7 +78,9 @@ form for people deciding whether a specific behavior exists.
   visit, result, revision, and event IDs are persisted atomically and may be
   listed in the renderer. Snapshot/result plaintext is never placed in those
   public objects: it is independently encrypted, or held only in a bounded
-  in-memory store when OS protection is unavailable.
+  in-memory store when OS protection is unavailable. Control checkpoints are
+  stricter: their narrow state schema is always context-bound and encrypted,
+  with no memory or plaintext fallback.
 - **Workflow loading is schema-aware.** The pure workflow-document module
   validates the format version and every block type before normalizing known
   parameters. Unsupported future data is reported instead of being normalized

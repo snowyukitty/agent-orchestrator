@@ -7,10 +7,12 @@ const path = require('node:path');
 
 const {
   SCHEMA_VERSION,
+  CONTROL_CHECKPOINT_VERSION,
   RUN_STATUS,
   BLOCK_STATUS,
   RESULT_STATUS,
   STORAGE,
+  BOUNDARY_DISPOSITION,
   MAX_RESULT_BYTES_PER_LANE,
   MAX_HANDOFF_BYTES,
   MAX_RESULT_BYTES,
@@ -106,8 +108,12 @@ function makeJournal(options = {}) {
       memoryMaxBytes: options.memoryMaxBytes,
       recordMaxBytes: options.recordMaxBytes,
       writeRecord: options.writeRecord,
+      writeMigrationBackup: options.writeMigrationBackup,
       deleteRecord: options.deleteRecord,
+      deleteMigrationBackup: options.deleteMigrationBackup,
+      deleteLegacyIndex: options.deleteLegacyIndex,
       onError: options.onError,
+      onMutationBoundary: options.onMutationBoundary,
     }),
   };
 }
@@ -153,6 +159,52 @@ function formerOperationFingerprint(action, payload) {
   return sha256(stableJson({ action, payload }, `${action} operation`));
 }
 
+function checkpointState(overrides = {}) {
+  return {
+    version: CONTROL_CHECKPOINT_VERSION,
+    sessions: [{
+      sessionRef: 'workflow-session-a',
+      lane: {
+        laneId: 'lane-a',
+        profileId: 'codex:a',
+        agent: 'codex',
+        displayName: 'Research lane A',
+        assurance: 'L1-routed',
+      },
+      resultInputCapable: true,
+      outputSeq: 17,
+    }],
+    pendingLanes: ['workflow-session-a'],
+    pendingJoinBlockId: 'blk-join',
+    ...overrides,
+  };
+}
+
+function asV1Record(record) {
+  const legacy = JSON.parse(JSON.stringify(record));
+  legacy.schemaVersion = 1;
+  for (const key of [
+    'rootRunId',
+    'parentRunId',
+    'attempt',
+    'migration',
+    'controlCheckpoints',
+    'boundaryReviews',
+  ]) {
+    delete legacy[key];
+  }
+  return legacy;
+}
+
+async function makeV1Fixture() {
+  const created = makeJournal();
+  const run = await startRun(created.journal);
+  const file = onlyJournalFile(created.dir);
+  const v1 = asV1Record(JSON.parse(fs.readFileSync(file, 'utf8')));
+  writeJsonAtomic(file, v1);
+  return { ...created, run, file, v1 };
+}
+
 test('encrypted run persists one atomic file with public metadata and no plaintext snapshot', async () => {
   const { journal, dir, encryption } = makeJournal();
   const run = await startRun(journal, {
@@ -164,6 +216,12 @@ test('encrypted run persists one atomic file with public metadata and no plainte
 
   assert.match(run.id, /^[0-9a-f-]{36}$/);
   assert.equal(run.schemaVersion, SCHEMA_VERSION);
+  assert.equal(run.rootRunId, run.id);
+  assert.equal(run.parentRunId, null);
+  assert.equal(run.attempt, 1);
+  assert.equal(run.controlCheckpoint, null);
+  assert.equal(run.controlCheckpointCount, 0);
+  assert.deepEqual(run.boundaryReviews, []);
   assert.equal(run.revision, 1);
   assert.equal(run.eventSeq, 1);
   assert.equal(run.status, RUN_STATUS.RUNNING);
@@ -188,7 +246,7 @@ test('encrypted run persists one atomic file with public metadata and no plainte
   assert.equal(path.basename(file), `${run.id}.json`);
   const diskText = fs.readFileSync(file, 'utf8');
   const disk = JSON.parse(diskText);
-  assert.equal(disk.schemaVersion, 1);
+  assert.equal(disk.schemaVersion, 2);
   assert.equal(disk.id, run.id);
   assert.equal(disk.snapshot.storage, STORAGE.ENCRYPTED);
   assert.equal(typeof disk.snapshot.ciphertext, 'string');
@@ -205,6 +263,618 @@ test('encrypted run persists one atomic file with public metadata and no plainte
   assert.equal(typeof envelope.body, 'string');
   assert.match(envelope.body, /PRIVATE WORKFLOW BODY/);
   assert.equal(diskText.includes('"context"'), false);
+});
+
+test('v1 migration is explicit, idempotent, indexed as v2, and keeps its rollback source', async () => {
+  const fixture = await makeV1Fixture();
+  const legacyIndexDir = path.join(fixture.dir, '.index');
+  fs.mkdirSync(legacyIndexDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(legacyIndexDir, 'runs-v1.json'),
+    JSON.stringify({ schemaVersion: 1, runs: [{ id: fixture.run.id }] })
+  );
+  fs.writeFileSync(
+    path.join(legacyIndexDir, 'dirty-v1.json'),
+    JSON.stringify({ schemaVersion: 1, dirty: true })
+  );
+  const restarted = makeJournal({ dir: fixture.dir }).journal;
+  const result = await restarted.migrateV1Records();
+
+  assert.equal(result.fromSchemaVersion, 1);
+  assert.equal(result.toSchemaVersion, SCHEMA_VERSION);
+  assert.deepEqual(result.migratedRunIds, [fixture.run.id]);
+  const disk = JSON.parse(fs.readFileSync(fixture.file, 'utf8'));
+  assert.equal(disk.schemaVersion, SCHEMA_VERSION);
+  assert.equal(disk.rootRunId, fixture.run.id);
+  assert.equal(disk.parentRunId, null);
+  assert.equal(disk.attempt, 1);
+  assert.equal(disk.revision, fixture.v1.revision + 1);
+  assert.deepEqual(disk.migration, {
+    fromSchemaVersion: 1,
+    sourceRevision: fixture.v1.revision,
+    migratedAt: disk.updatedAt,
+  });
+  assert.deepEqual(disk.controlCheckpoints, []);
+  assert.deepEqual(disk.boundaryReviews, []);
+  assert.equal(result.skippedCount, 0);
+  assert.equal(result.removedLegacyIndexFiles, 2);
+  assert.equal(result.legacyIndexCleanupFailures, 0);
+  assert.equal(fs.existsSync(path.join(legacyIndexDir, 'runs-v1.json')), false);
+  assert.equal(fs.existsSync(path.join(legacyIndexDir, 'dirty-v1.json')), false);
+
+  const backupFile = path.join(
+    fixture.dir,
+    '.migration',
+    'v1',
+    `${fixture.run.id}.json`
+  );
+  assert.deepEqual(JSON.parse(fs.readFileSync(backupFile, 'utf8')), fixture.v1);
+  assert.equal(fs.existsSync(path.join(fixture.dir, '.index', 'runs-v2.json')), true);
+  const beforeReplay = fs.readFileSync(fixture.file, 'utf8');
+  const replay = await restarted.migrateV1Records();
+  assert.equal(replay.migratedCount, 0);
+  assert.equal(fs.readFileSync(fixture.file, 'utf8'), beforeReplay);
+
+  const publicRecord = await restarted.getRun(fixture.run.id);
+  assert.equal(publicRecord.schemaVersion, SCHEMA_VERSION);
+  assert.equal(publicRecord.migration.fromSchemaVersion, 1);
+  assert.equal(publicRecord.resumeEvidence.executionAvailable, false);
+});
+
+test('v1 migration recovers idempotently across every backup and record crash boundary', async (t) => {
+  const boundaries = [
+    ['migration-backup', 'before'],
+    ['migration-backup', 'after'],
+    ['migration-record', 'before'],
+    ['migration-record', 'after'],
+    ['migration-index-cleanup', 'before'],
+    ['migration-index-cleanup', 'after'],
+  ];
+  for (const [kind, phase] of boundaries) {
+    await t.test(`${kind} ${phase}`, async () => {
+      const fixture = await makeV1Fixture();
+      const legacyIndexDir = path.join(fixture.dir, '.index');
+      fs.mkdirSync(legacyIndexDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(legacyIndexDir, 'runs-v1.json'),
+        JSON.stringify({ schemaVersion: 1, runs: [{ id: fixture.run.id }] })
+      );
+      const crashing = makeJournal({
+        dir: fixture.dir,
+        onMutationBoundary(boundary) {
+          if (boundary.kind === kind && boundary.phase === phase) {
+            throw new Error(`simulated crash ${kind} ${phase}`);
+          }
+        },
+      }).journal;
+      await assert.rejects(
+        crashing.migrateV1Records(),
+        new RegExp(`simulated crash ${kind} ${phase}`)
+      );
+
+      const recovered = makeJournal({ dir: fixture.dir }).journal;
+      await recovered.migrateV1Records();
+      const run = await recovered.getRun(fixture.run.id);
+      assert.equal(run.schemaVersion, SCHEMA_VERSION);
+      assert.equal(run.rootRunId, fixture.run.id);
+      assert.equal(run.migration.fromSchemaVersion, 1);
+      assert.equal((await recovered.listRuns()).total, 1);
+      assert.equal(fs.existsSync(path.join(legacyIndexDir, 'runs-v1.json')), false);
+    });
+  }
+});
+
+test('v1 migration contains corrupt and future records without blocking valid upgrades', async () => {
+  const errors = [];
+  const fixture = await makeV1Fixture();
+  fs.writeFileSync(path.join(fixture.dir, 'corrupt.json'), '{');
+  fs.writeFileSync(
+    path.join(fixture.dir, 'future.json'),
+    JSON.stringify({ schemaVersion: SCHEMA_VERSION + 1 })
+  );
+  const restarted = makeJournal({
+    dir: fixture.dir,
+    onError: (file, error) => errors.push({ file, code: error.code }),
+  }).journal;
+  const result = await restarted.migrateV1Records();
+
+  assert.deepEqual(result.migratedRunIds, [fixture.run.id]);
+  assert.equal(result.skippedCount, 2);
+  assert.deepEqual(
+    [...new Set(errors.map(entry => path.basename(entry.file)))].sort(),
+    ['corrupt.json', 'future.json']
+  );
+  assert.equal(
+    JSON.parse(fs.readFileSync(fixture.file, 'utf8')).schemaVersion,
+    SCHEMA_VERSION
+  );
+  assert.equal(fs.readFileSync(path.join(fixture.dir, 'corrupt.json'), 'utf8'), '{');
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(fixture.dir, 'future.json'), 'utf8')).schemaVersion,
+    SCHEMA_VERSION + 1
+  );
+});
+
+test('a locked rebuildable v1 index is reported without blocking record migration', async () => {
+  const errors = [];
+  const fixture = await makeV1Fixture();
+  const legacyIndexDir = path.join(fixture.dir, '.index');
+  const legacyIndex = path.join(legacyIndexDir, 'runs-v1.json');
+  fs.mkdirSync(legacyIndexDir, { recursive: true });
+  fs.writeFileSync(legacyIndex, JSON.stringify({ schemaVersion: 1, runs: [] }));
+  const restarted = makeJournal({
+    dir: fixture.dir,
+    deleteLegacyIndex(file) {
+      if (path.basename(file) === 'runs-v1.json') {
+        const error = new Error('simulated lock with a private path');
+        error.code = 'EPERM';
+        throw error;
+      }
+      fs.unlinkSync(file);
+    },
+    onError: (file, error) => errors.push({ file, code: error.code, message: error.message }),
+  }).journal;
+
+  const result = await restarted.migrateV1Records();
+  assert.equal(result.migratedCount, 1);
+  assert.equal(result.legacyIndexCleanupFailures, 1);
+  assert.equal(fs.existsSync(legacyIndex), true);
+  assert.deepEqual(errors, [{
+    file: path.join('.index', 'runs-v1.json'),
+    code: 'storage-delete-failed',
+    message: 'A rebuildable legacy Run Journal index could not be removed',
+  }]);
+  assert.equal(
+    JSON.parse(fs.readFileSync(fixture.file, 'utf8')).schemaVersion,
+    SCHEMA_VERSION
+  );
+});
+
+test('v1 migration normalizes an explicit null truncation marker without losing its backup', async () => {
+  const fixture = await makeV1Fixture();
+  fixture.v1.truncated = null;
+  writeJsonAtomic(fixture.file, fixture.v1);
+  const restarted = makeJournal({ dir: fixture.dir }).journal;
+
+  const result = await restarted.migrateV1Records();
+  assert.equal(result.migratedCount, 1);
+  const migrated = JSON.parse(fs.readFileSync(fixture.file, 'utf8'));
+  assert.equal(Object.hasOwn(migrated, 'truncated'), false);
+  const backup = JSON.parse(fs.readFileSync(
+    path.join(fixture.dir, '.migration', 'v1', `${fixture.run.id}.json`),
+    'utf8'
+  ));
+  assert.equal(Object.hasOwn(backup, 'truncated'), true);
+  assert.equal(backup.truncated, null);
+});
+
+test('v1 migration preserves visits, results, and truncation before startup recovery', async () => {
+  const fixture = makeJournal();
+  const run = await startRun(fixture.journal);
+  const visit = await startVisit(fixture.journal, run.id, {
+    lanes: [
+      { laneId: 'lane-a', profileId: 'codex:a', assurance: 'L1-routed' },
+      { laneId: 'lane-b', profileId: 'codex:b', assurance: 'L1-routed' },
+    ],
+  });
+  const result = await fixture.journal.storeResult({
+    runId: run.id,
+    producerBlockId: 'blk-prompt',
+    visitId: visit.visitId,
+    name: 'migration-result',
+    status: RESULT_STATUS.PARTIAL,
+    lanes: [{ laneId: 'lane-a', profileId: 'codex:a' }],
+    body: 'PROTECTED MIGRATION RESULT',
+    opId: 'migration-result-store',
+  });
+  await fixture.journal.finishBlock({
+    runId: run.id,
+    visitId: visit.visitId,
+    status: BLOCK_STATUS.FAILED,
+    reasonCode: 'fixture-failure',
+    opId: 'migration-visit-finish',
+  });
+  await fixture.journal.finishRun({
+    runId: run.id,
+    status: RUN_STATUS.FAILED,
+    opId: 'migration-run-finish',
+  });
+
+  const file = onlyJournalFile(fixture.dir);
+  const v2 = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const v1 = asV1Record(v2);
+  v1.truncated = {
+    reason: 'result-capacity',
+    at: v1.finishedAt,
+  };
+  writeJsonAtomic(file, v1);
+
+  const restarted = makeJournal({
+    dir: fixture.dir,
+    encryption: fixture.encryption,
+  }).journal;
+  await restarted.migrateV1Records();
+  const migrated = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.deepEqual(migrated.blocks, v1.blocks);
+  assert.deepEqual(migrated.results, v1.results);
+  assert.deepEqual(migrated.truncated, v1.truncated);
+  assert.equal(
+    (await restarted.getResult({ runId: run.id, resultId: result.id })).body,
+    'PROTECTED MIGRATION RESULT'
+  );
+  assert.deepEqual(await restarted.recoverInterrupted(), []);
+});
+
+test('protected control checkpoint is visit-bound, redacted, and has no plaintext fallback', async () => {
+  const { journal, dir, encryption } = makeJournal();
+  const run = await startRun(journal);
+  const visit = await startVisit(journal, run.id);
+  await journal.finishBlock({
+    runId: run.id,
+    visitId: visit.visitId,
+    status: BLOCK_STATUS.COMPLETED,
+    opId: 'checkpoint-visit-finish',
+  });
+  const source = await journal.getRun(run.id);
+  const checkpoint = await journal.storeControlCheckpoint({
+    runId: run.id,
+    sourceRevision: source.revision,
+    afterVisitId: visit.visitId,
+    state: checkpointState(),
+    opId: 'checkpoint-store',
+  });
+
+  assert.equal(checkpoint.sourceRunId, run.id);
+  assert.equal(checkpoint.sourceRevision, source.revision);
+  assert.equal(checkpoint.afterVisitId, visit.visitId);
+  assert.equal(checkpoint.storage, STORAGE.ENCRYPTED);
+  assert.equal(Object.hasOwn(checkpoint, 'ciphertext'), false);
+  const publicRun = await journal.getRun(run.id);
+  assert.equal(publicRun.controlCheckpointCount, 1);
+  assert.deepEqual(publicRun.controlCheckpoint, checkpoint);
+  assert.equal(publicRun.resumeEvidence.executionAvailable, false);
+  const summary = (await listRuns(journal))[0];
+  assert.equal(summary.controlCheckpointCount, 1);
+  assert.deepEqual(summary.controlCheckpoint, checkpoint);
+  assert.equal(JSON.stringify(summary).includes('workflow-session-a'), false);
+  assert.equal(JSON.stringify(summary).includes('codex:a'), false);
+  assert.equal(JSON.stringify(summary).includes('ciphertext'), false);
+
+  const diskText = fs.readFileSync(onlyJournalFile(dir), 'utf8');
+  assert.equal(diskText.includes('workflow-session-a'), false);
+  assert.equal(diskText.includes('codex:a'), false);
+  const encryptionCall = encryption.calls.find(call => (
+    call.method === 'encrypt' && call.context.kind === 'control-checkpoint'
+  ));
+  assert.deepEqual(encryptionCall.context, {
+    kind: 'control-checkpoint',
+    runId: run.id,
+    visitId: visit.visitId,
+    sourceRevision: source.revision,
+    checkpointId: checkpoint.id,
+  });
+  const envelope = JSON.parse(encryptionCall.plaintext);
+  assert.deepEqual(envelope.context, encryptionCall.context);
+  assert.deepEqual(JSON.parse(envelope.body), checkpointState());
+
+  const storedRun = JSON.parse(fs.readFileSync(onlyJournalFile(dir), 'utf8'));
+  assert.deepEqual(
+    await journal._readControlCheckpoint(
+      storedRun,
+      storedRun.controlCheckpoints[0]
+    ),
+    checkpointState()
+  );
+  await assert.rejects(
+    journal._readControlCheckpoint(
+      storedRun,
+      {
+        ...storedRun.controlCheckpoints[0],
+        sourceRevision: storedRun.controlCheckpoints[0].sourceRevision + 1,
+      }
+    ),
+    error => error instanceof RunJournalError && error.code === 'decrypt-failed'
+  );
+
+  await assert.rejects(
+    journal.storeControlCheckpoint({
+      runId: run.id,
+      sourceRevision: publicRun.revision,
+      afterVisitId: visit.visitId,
+      state: checkpointState({
+        sessions: [{
+          ...checkpointState().sessions[0],
+          lane: { ...checkpointState().sessions[0].lane, cwd: 'C:\\private' },
+        }],
+      }),
+      opId: 'checkpoint-private-field',
+    }),
+    /non-public fields/
+  );
+  await assert.rejects(
+    journal.storeControlCheckpoint({
+      runId: run.id,
+      sourceRevision: publicRun.revision,
+      afterVisitId: visit.visitId,
+      state: checkpointState({
+        sessions: [
+          checkpointState().sessions[0],
+          {
+            ...checkpointState().sessions[0],
+            sessionRef: 'workflow-session-b',
+          },
+        ],
+        pendingLanes: [],
+      }),
+      opId: 'checkpoint-duplicate-lane',
+    }),
+    /repeats a lane id/
+  );
+
+  const unavailable = makeJournal({ encryption: encryptionAdapter({ available: false }) });
+  const unavailableRun = await startRun(unavailable.journal);
+  const unavailableVisit = await startVisit(unavailable.journal, unavailableRun.id);
+  await unavailable.journal.finishBlock({
+    runId: unavailableRun.id,
+    visitId: unavailableVisit.visitId,
+    status: BLOCK_STATUS.COMPLETED,
+    opId: 'memory-checkpoint-visit-finish',
+  });
+  const before = await unavailable.journal.getRun(unavailableRun.id);
+  await assert.rejects(
+    unavailable.journal.storeControlCheckpoint({
+      runId: unavailableRun.id,
+      sourceRevision: before.revision,
+      afterVisitId: unavailableVisit.visitId,
+      state: checkpointState(),
+      opId: 'memory-checkpoint-store',
+    }),
+    error => error instanceof RunJournalError && error.code === 'encryption-unavailable'
+  );
+  const after = await unavailable.journal.getRun(unavailableRun.id);
+  assert.equal(after.revision, before.revision);
+  assert.equal(after.controlCheckpoint, null);
+});
+
+test('control checkpoint mutation is crash-idempotent before and after its durable write', async (t) => {
+  for (const phase of ['before', 'after']) {
+    await t.test(phase, async () => {
+      const fixture = makeJournal();
+      const run = await startRun(fixture.journal);
+      const visit = await startVisit(fixture.journal, run.id);
+      await fixture.journal.finishBlock({
+        runId: run.id,
+        visitId: visit.visitId,
+        status: BLOCK_STATUS.COMPLETED,
+        opId: `checkpoint-finish-${phase}`,
+      });
+      const source = await fixture.journal.getRun(run.id);
+      const payload = {
+        runId: run.id,
+        sourceRevision: source.revision,
+        afterVisitId: visit.visitId,
+        state: checkpointState(),
+        opId: `checkpoint-crash-${phase}`,
+      };
+      const crashing = makeJournal({
+        dir: fixture.dir,
+        onMutationBoundary(boundary) {
+          if (boundary.kind === 'control-checkpoint' && boundary.phase === phase) {
+            throw new Error(`simulated checkpoint crash ${phase}`);
+          }
+        },
+      }).journal;
+      await assert.rejects(
+        crashing.storeControlCheckpoint(payload),
+        new RegExp(`simulated checkpoint crash ${phase}`)
+      );
+
+      const recovered = makeJournal({ dir: fixture.dir }).journal;
+      const beforeReplay = await recovered.getRun(run.id);
+      assert.equal(beforeReplay.controlCheckpointCount, phase === 'after' ? 1 : 0);
+      const replayed = await recovered.storeControlCheckpoint(payload);
+      const afterReplay = await recovered.getRun(run.id);
+      assert.equal(afterReplay.controlCheckpointCount, 1);
+      assert.equal(replayed.afterVisitId, visit.visitId);
+      assert.equal(
+        afterReplay.revision,
+        phase === 'after' ? beforeReplay.revision : beforeReplay.revision + 1
+      );
+    });
+  }
+});
+
+test('control checkpoints reject stale, non-final, and duplicate visit bindings', async () => {
+  const { journal } = makeJournal();
+  const run = await startRun(journal);
+  const firstVisit = await startVisit(journal, run.id, { opId: 'checkpoint-first-start' });
+  await journal.finishBlock({
+    runId: run.id,
+    visitId: firstVisit.visitId,
+    status: BLOCK_STATUS.COMPLETED,
+    opId: 'checkpoint-first-finish',
+  });
+  const firstSource = await journal.getRun(run.id);
+  await assert.rejects(
+    journal.storeControlCheckpoint({
+      runId: run.id,
+      sourceRevision: firstSource.revision - 1,
+      afterVisitId: firstVisit.visitId,
+      state: checkpointState(),
+      opId: 'checkpoint-stale-source',
+    }),
+    error => error instanceof RunJournalError && error.code === 'stale-source'
+  );
+
+  const secondVisit = await startVisit(journal, run.id, { opId: 'checkpoint-second-start' });
+  await journal.finishBlock({
+    runId: run.id,
+    visitId: secondVisit.visitId,
+    status: BLOCK_STATUS.COMPLETED,
+    opId: 'checkpoint-second-finish',
+  });
+  const secondSource = await journal.getRun(run.id);
+  await assert.rejects(
+    journal.storeControlCheckpoint({
+      runId: run.id,
+      sourceRevision: secondSource.revision,
+      afterVisitId: firstVisit.visitId,
+      state: checkpointState(),
+      opId: 'checkpoint-non-final-visit',
+    }),
+    error => error instanceof RunJournalError && error.code === 'invalid-state'
+  );
+
+  await journal.storeControlCheckpoint({
+    runId: run.id,
+    sourceRevision: secondSource.revision,
+    afterVisitId: secondVisit.visitId,
+    state: checkpointState(),
+    opId: 'checkpoint-final-visit',
+  });
+  const afterCheckpoint = await journal.getRun(run.id);
+  await assert.rejects(
+    journal.storeControlCheckpoint({
+      runId: run.id,
+      sourceRevision: afterCheckpoint.revision,
+      afterVisitId: secondVisit.visitId,
+      state: checkpointState(),
+      opId: 'checkpoint-duplicate-visit',
+    }),
+    error => error instanceof RunJournalError && error.code === 'invalid-state'
+  );
+});
+
+test('uncertain boundary disposition is public audit data without execution authority', async () => {
+  const { journal, dir } = makeJournal();
+  const run = await startRun(journal);
+  const visit = await startVisit(journal, run.id);
+  await journal.recoverInterrupted();
+  const source = await journal.getRun(run.id);
+  const review = await journal.recordBoundaryDisposition({
+    runId: run.id,
+    sourceRevision: source.revision,
+    visitId: visit.visitId,
+    disposition: BOUNDARY_DISPOSITION.SKIP,
+    opId: 'boundary-review-skip',
+  });
+
+  assert.deepEqual(review, {
+    visitId: visit.visitId,
+    sourceRevision: source.revision,
+    disposition: 'skip',
+    reviewedAt: review.reviewedAt,
+  });
+  const stored = await journal.getRun(run.id);
+  assert.deepEqual(stored.boundaryReviews, [review]);
+  assert.equal(stored.resumeEvidence.executionAvailable, false);
+  const summary = (await listRuns(journal))[0];
+  assert.equal(summary.boundaryReviewCount, 1);
+  assert.deepEqual(summary.lastBoundaryReview, review);
+  const diskText = fs.readFileSync(onlyJournalFile(dir), 'utf8');
+  assert.equal(diskText.includes('"disposition": "skip"'), true);
+  assert.equal(diskText.includes('executionAvailable'), false);
+
+  await assert.rejects(
+    journal.recordBoundaryDisposition({
+      runId: run.id,
+      sourceRevision: stored.revision,
+      visitId: visit.visitId,
+      disposition: BOUNDARY_DISPOSITION.ABORT,
+      opId: 'boundary-review-duplicate',
+    }),
+    error => error instanceof RunJournalError && error.code === 'invalid-state'
+  );
+});
+
+test('boundary disposition mutation is crash-idempotent before and after its durable write', async (t) => {
+  for (const phase of ['before', 'after']) {
+    await t.test(phase, async () => {
+      const fixture = makeJournal();
+      const run = await startRun(fixture.journal);
+      const visit = await startVisit(fixture.journal, run.id);
+      await fixture.journal.recoverInterrupted();
+      const source = await fixture.journal.getRun(run.id);
+      const payload = {
+        runId: run.id,
+        sourceRevision: source.revision,
+        visitId: visit.visitId,
+        disposition: BOUNDARY_DISPOSITION.RETRY,
+        opId: `boundary-crash-${phase}`,
+      };
+      const crashing = makeJournal({
+        dir: fixture.dir,
+        onMutationBoundary(boundary) {
+          if (boundary.kind === 'boundary-disposition' && boundary.phase === phase) {
+            throw new Error(`simulated boundary crash ${phase}`);
+          }
+        },
+      }).journal;
+      await assert.rejects(
+        crashing.recordBoundaryDisposition(payload),
+        new RegExp(`simulated boundary crash ${phase}`)
+      );
+
+      const recovered = makeJournal({ dir: fixture.dir }).journal;
+      const beforeReplay = await recovered.getRun(run.id);
+      assert.equal(beforeReplay.boundaryReviews.length, phase === 'after' ? 1 : 0);
+      const replayed = await recovered.recordBoundaryDisposition(payload);
+      const afterReplay = await recovered.getRun(run.id);
+      assert.equal(afterReplay.boundaryReviews.length, 1);
+      assert.equal(replayed.disposition, 'retry');
+      assert.equal(
+        afterReplay.revision,
+        phase === 'after' ? beforeReplay.revision : beforeReplay.revision + 1
+      );
+    });
+  }
+});
+
+test('boundary disposition requires an interrupted run and its final uncertain visit', async () => {
+  const { journal } = makeJournal();
+  const run = await startRun(journal);
+  const uncertainVisit = await startVisit(journal, run.id, {
+    opId: 'boundary-precondition-first-start',
+  });
+  const activeSource = await journal.getRun(run.id);
+  await assert.rejects(
+    journal.recordBoundaryDisposition({
+      runId: run.id,
+      sourceRevision: activeSource.revision,
+      visitId: uncertainVisit.visitId,
+      disposition: BOUNDARY_DISPOSITION.ABORT,
+      opId: 'boundary-precondition-running',
+    }),
+    error => error instanceof RunJournalError && error.code === 'invalid-state'
+  );
+
+  await journal.finishBlock({
+    runId: run.id,
+    visitId: uncertainVisit.visitId,
+    status: BLOCK_STATUS.FAILED,
+    opId: 'boundary-precondition-first-finish',
+  });
+  const finalVisit = await startVisit(journal, run.id, {
+    opId: 'boundary-precondition-final-start',
+  });
+  await journal.finishBlock({
+    runId: run.id,
+    visitId: finalVisit.visitId,
+    status: BLOCK_STATUS.COMPLETED,
+    opId: 'boundary-precondition-final-finish',
+  });
+  await journal.recoverInterrupted();
+  const interruptedSource = await journal.getRun(run.id);
+  await assert.rejects(
+    journal.recordBoundaryDisposition({
+      runId: run.id,
+      sourceRevision: interruptedSource.revision,
+      visitId: uncertainVisit.visitId,
+      disposition: BOUNDARY_DISPOSITION.RETRY,
+      opId: 'boundary-precondition-non-final',
+    }),
+    error => error instanceof RunJournalError && error.code === 'invalid-state'
+  );
 });
 
 test('maximum escape-heavy payloads remain encrypted beyond the former ciphertext caps', async () => {
@@ -1288,7 +1958,7 @@ test('list/get skip corrupt and future files while omitting ciphertext and bodie
   fs.writeFileSync(path.join(dir, 'corrupt.json'), '{broken', 'utf8');
   const futureId = '00000000-0000-4000-8000-0000000000f0';
   writeJsonAtomic(path.join(dir, `${futureId}.json`), {
-    schemaVersion: 2,
+    schemaVersion: 3,
     id: futureId,
     ciphertext: 'should-not-matter',
   });
@@ -1352,7 +2022,7 @@ test('metadata index serves stable cursor pages and contains public summaries on
   assert.deepEqual(third.runs.map(run => run.id), [created[0].id]);
   assert.equal(third.nextCursor, null);
 
-  const indexFile = path.join(dir, '.index', 'runs-v1.json');
+  const indexFile = path.join(dir, '.index', 'runs-v2.json');
   const indexText = fs.readFileSync(indexFile, 'utf8');
   assert.equal(indexText.includes('PRIVATE WORKFLOW BODY'), false);
   assert.equal(indexText.includes('ciphertext'), false);
@@ -1375,7 +2045,7 @@ test('a corrupt metadata index is reported and rebuilt from source records', asy
   const { journal, dir } = makeJournal();
   const run = await startRun(journal);
   await journal.listRuns({ limit: 1 });
-  const indexFile = path.join(dir, '.index', 'runs-v1.json');
+  const indexFile = path.join(dir, '.index', 'runs-v2.json');
   fs.writeFileSync(indexFile, '{broken', 'utf8');
 
   const reopened = makeJournal({
@@ -1385,7 +2055,7 @@ test('a corrupt metadata index is reported and rebuilt from source records', asy
   const page = await reopened.listRuns({ limit: 1 });
   assert.equal(page.runs[0].id, run.id);
   assert.equal(page.total, 1);
-  assert.deepEqual(reports, [['runs-v1.json', 'SyntaxError']]);
+  assert.deepEqual(reports, [['runs-v2.json', 'SyntaxError']]);
   assert.equal(JSON.parse(fs.readFileSync(indexFile, 'utf8')).runs.length, 1);
 });
 
@@ -1398,8 +2068,8 @@ test('active run events stay in the in-memory index until one terminal commit', 
     opId: 'index-baseline-finish',
   });
   await journal.listRuns({ limit: 10 });
-  const indexFile = path.join(dir, '.index', 'runs-v1.json');
-  const dirtyFile = path.join(dir, '.index', 'dirty-v1.json');
+  const indexFile = path.join(dir, '.index', 'runs-v2.json');
+  const dirtyFile = path.join(dir, '.index', 'dirty-v2.json');
   const baselineIndex = fs.readFileSync(indexFile, 'utf8');
 
   const active = await journal.startRun({
@@ -1749,6 +2419,9 @@ test('exceeding operation capacity mid-run degrades to a truncated no-op journal
   writeJsonAtomic(path.join(dir, `${runId}.json`), {
     schemaVersion: SCHEMA_VERSION,
     id: runId,
+    rootRunId: runId,
+    parentRunId: null,
+    attempt: 1,
     revision: 1,
     eventSeq: 1,
     status: RUN_STATUS.RUNNING,
@@ -1758,6 +2431,9 @@ test('exceeding operation capacity mid-run degrades to a truncated no-op journal
     workflow: { id: 'wf-demo', name: 'Demo workflow', formatVersion: 1, blockCount: 1 },
     trigger: { kind: 'manual' },
     snapshot: { storage: STORAGE.MEMORY, byteLength: 16 },
+    migration: null,
+    controlCheckpoints: [],
+    boundaryReviews: [],
     blocks: [],
     results: [],
     operations,
