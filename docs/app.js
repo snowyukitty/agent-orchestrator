@@ -302,30 +302,86 @@
 
   function setupProofViewports() {
     const viewports = Array.from(document.querySelectorAll('.proof-viewport'));
-    const records = viewports.map((viewport) => ({ viewport, userPositioned: false }));
+    const records = viewports.map((viewport) => ({
+      viewport,
+      userPositioned: false,
+      userFocusRatio: null,
+      programmaticLeft: null,
+    }));
+
+    function isScrollable(viewport) {
+      return viewport.scrollWidth > viewport.clientWidth + 1;
+    }
+
+    function setScrollLeft(record, left) {
+      const { viewport } = record;
+      const maximum = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+      record.programmaticLeft = Math.max(0, Math.min(left, maximum));
+      viewport.scrollLeft = record.programmaticLeft;
+    }
 
     function focusViewport(record) {
       const { viewport } = record;
-      if (record.userPositioned || viewport.scrollWidth <= viewport.clientWidth + 1) return;
-      const focusRatio = Number.parseFloat(viewport.dataset.focusX) || 0.5;
+      if (!isScrollable(viewport)) {
+        viewport.removeAttribute('tabindex');
+        record.userPositioned = false;
+        record.userFocusRatio = null;
+        setScrollLeft(record, 0);
+        return;
+      }
+
+      viewport.tabIndex = 0;
+      const defaultRatio = Number.parseFloat(viewport.dataset.focusX) || 0.5;
+      const focusRatio = record.userPositioned && record.userFocusRatio !== null
+        ? record.userFocusRatio
+        : defaultRatio;
       const target = (viewport.scrollWidth * focusRatio) - (viewport.clientWidth / 2);
-      viewport.scrollLeft = Math.max(0, Math.min(target, viewport.scrollWidth - viewport.clientWidth));
+      setScrollLeft(record, target);
+    }
+
+    function rememberUserPosition(record) {
+      const { viewport } = record;
+      if (!isScrollable(viewport)) return;
+      record.userPositioned = true;
+      record.userFocusRatio = (viewport.scrollLeft + (viewport.clientWidth / 2)) / viewport.scrollWidth;
     }
 
     records.forEach((record) => {
       const { viewport } = record;
       const image = viewport.querySelector('img');
-      const markPositioned = () => { record.userPositioned = true; };
       const focusAfterLayout = () => window.requestAnimationFrame(() => focusViewport(record));
 
-      viewport.addEventListener('pointerdown', markPositioned, { passive: true });
-      viewport.addEventListener('wheel', markPositioned, { passive: true });
+      viewport.addEventListener('scroll', () => {
+        if (record.programmaticLeft !== null
+          && Math.abs(viewport.scrollLeft - record.programmaticLeft) <= 1) {
+          record.programmaticLeft = null;
+          return;
+        }
+        record.programmaticLeft = null;
+        rememberUserPosition(record);
+      }, { passive: true });
+
       viewport.addEventListener('keydown', (event) => {
-        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') markPositioned();
+        if (!isScrollable(viewport)) return;
+        const step = Math.max(72, viewport.clientWidth * 0.75);
+        let nextLeft = null;
+        if (event.key === 'ArrowLeft') nextLeft = viewport.scrollLeft - step;
+        if (event.key === 'ArrowRight') nextLeft = viewport.scrollLeft + step;
+        if (event.key === 'Home') nextLeft = 0;
+        if (event.key === 'End') nextLeft = viewport.scrollWidth - viewport.clientWidth;
+        if (nextLeft === null) return;
+
+        event.preventDefault();
+        record.programmaticLeft = null;
+        viewport.scrollLeft = nextLeft;
+        rememberUserPosition(record);
       });
 
-      if (image.complete) focusAfterLayout();
-      else image.addEventListener('load', focusAfterLayout, { once: true });
+      if (!image || image.complete) focusAfterLayout();
+      else {
+        image.addEventListener('load', focusAfterLayout, { once: true });
+        image.addEventListener('error', focusAfterLayout, { once: true });
+      }
     });
 
     let resizeFrame = 0;

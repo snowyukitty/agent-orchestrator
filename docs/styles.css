@@ -24,6 +24,7 @@
   --console-ink: #f3eadc;
   --console-soft: #c7b9a6;
   --console-muted: #968978;
+  --focus-on-dark: #e49270;
   --figure-mat: #e4dacb;
   --figure-border: #8c7a66;
   --max-width: 1180px;
@@ -608,10 +609,7 @@ p {
   scrollbar-width: thin;
 }
 
-.proof-image-link {
-  display: block;
-  line-height: 0;
-}
+.proof-viewport:focus-visible { outline-color: var(--focus-on-dark); }
 
 .proof-frame img {
   display: block;
@@ -1628,6 +1626,7 @@ p {
   .proof-viewport {
     overflow-x: auto;
     overscroll-behavior-inline: contain;
+    touch-action: pan-x pan-y;
   }
 
   .proof-frame-workflow img,
