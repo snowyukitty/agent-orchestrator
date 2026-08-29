@@ -446,7 +446,7 @@ html, body {
 }
 
 .workflow-block.done {
-  opacity: 0.45;
+  opacity: 0.78;
   transform: scale(0.99);
 }
 

@@ -14,9 +14,11 @@ hand the collected results to the next stage explicitly.
 
 > Every screenshot on this page is the real renderer captured with inert
 > fixture data — `npm run promo:capture` launches no account, agent, or PTY and
-> reads no production journal. Frames are captured at 2x with the UI enlarged,
-> and each claim below is shown as a crop, because a full 1600px window scaled
-> into this column drops 9px labels under 6px. Dimensions and SHA-256 hashes are
+> reads no production journal. Two isolated runs must produce identical hashes
+> before the asset set is promoted. Frames are captured at 2x with the UI
+> enlarged, and each claim below is shown as a lossless semantic crop, because
+> a full 1600px window scaled into this column drops 9px labels under 6px.
+> Crop geometry, dimensions, state receipts, and SHA-256 hashes are
 > recorded in [`docs/assets/promo/manifest.json`](docs/assets/promo/manifest.json)
 > and re-verified by `npm run check`.
 
@@ -143,7 +145,7 @@ npm run check       # syntax-check every JS file, then validate the static guide
 npm test            # main-process unit tests + headless renderer self-test
 npm run smoke       # Electron startup/shutdown cleanup path
 npm run visual      # normal UI with disposable resume-evidence scenarios
-npm run promo:capture -- --promo-output=docs/assets/promo   # refresh the frames above
+npm run promo:capture   # reproduce twice, verify, then atomically refresh the frames
 npm run icons       # regenerate icon.png + icon.ico from src/assets/icon-source.png
 npm run verify      # the complete checkpoint gate used by CI
 npm run verify:routed -- --confirm-live   # opt-in gate: two real routed accounts

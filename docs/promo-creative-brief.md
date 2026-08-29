@@ -48,15 +48,19 @@ behavior and has been superseded by the sequence above.
 ## Reproducible capture
 
 ```powershell
-npm run promo:capture -- --promo-output=docs/assets/promo
+npm run promo:capture
 ```
 
-The command requires an explicit output directory, fixes the content viewport
-and device scale to 1600×1000, and uses a disposable Electron user-data root.
+The command fixes the content viewport and device scale to 1600×1000, freezes
+motion, and uses a disposable Electron user-data root. It performs two isolated
+runs and atomically promotes the staged asset set only when their complete
+receipts are identical.
 Renderer startup skips account discovery, profile loading, and the default PTY.
 The fixture opens implemented UI states only, stamps every frame
 `PRODUCT UI · INERT CAPTURE FIXTURE`, and writes `manifest.json` with dimensions
-and SHA-256 receipts.
+and SHA-256 receipts. Each detail names its semantic evidence selectors, safe
+boundary, source-frame crop geometry, and inert claim state. Required evidence
+that moves, disappears, or cannot retain its margin makes the capture fail.
 
 `npm run check` rejects missing, device-scaled, stale, re-ordered, or unreferenced
 frames and validates the disclosure. The capture itself also refuses to write a

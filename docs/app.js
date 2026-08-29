@@ -375,15 +375,23 @@
     records.forEach((record) => {
       const { viewport } = record;
       const image = viewport.querySelector('img');
-      const focusAfterLayout = () => window.requestAnimationFrame(() => focusViewport(record));
+      let layoutFrame = 0;
+      const focusAfterLayout = () => {
+        window.cancelAnimationFrame(layoutFrame);
+        layoutFrame = window.requestAnimationFrame(() => {
+          layoutFrame = window.requestAnimationFrame(() => focusViewport(record));
+        });
+      };
 
       viewport.addEventListener('scroll', () => {
-        if (record.programmaticLeft !== null
-          && Math.abs(viewport.scrollLeft - record.programmaticLeft) <= 1) {
-          record.programmaticLeft = null;
+        if (record.programmaticLeft !== null) {
+          if (Math.abs(viewport.scrollLeft - record.programmaticLeft) <= 1) {
+            record.programmaticLeft = null;
+          } else {
+            focusAfterLayout();
+          }
           return;
         }
-        record.programmaticLeft = null;
         rememberUserPosition(record);
       }, { passive: true });
 
@@ -407,6 +415,12 @@
       else {
         image.addEventListener('load', focusAfterLayout, { once: true });
         image.addEventListener('error', focusAfterLayout, { once: true });
+      }
+
+      if ('ResizeObserver' in window) {
+        const layoutObserver = new ResizeObserver(focusAfterLayout);
+        layoutObserver.observe(viewport);
+        if (image) layoutObserver.observe(image);
       }
     });
 

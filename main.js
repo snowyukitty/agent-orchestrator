@@ -27,7 +27,11 @@ const { prepareUserData } = require('./src/main/user-data');
 const { RoutedDiscoveryCache } = require('./src/main/routed-cache');
 const { ShutdownCoordinator } = require('./src/main/shutdown');
 const { RunJournal } = require('./src/main/run-journal');
-const { seedVisualRunJournal } = require('./src/main/visual-fixtures');
+const {
+  PROMO_CAPTURE_TIME,
+  createVisualUuidSource,
+  seedVisualRunJournal,
+} = require('./src/main/visual-fixtures');
 const {
   capturePromoFrames,
   parsePromoCaptureOptions,
@@ -270,8 +274,13 @@ function runJournalDir() {
 }
 
 function createRunJournal() {
+  const promoUuidSource = promoCapture ? createVisualUuidSource() : undefined;
   return new RunJournal({
     dir: runJournalDir(),
+    ...(promoCapture ? {
+      now: () => new Date(PROMO_CAPTURE_TIME),
+      randomUUID: promoUuidSource,
+    } : {}),
     encryption: {
       isAvailable: () => safeStorage.isEncryptionAvailable(),
       encrypt: (plaintext) => (
@@ -565,7 +574,7 @@ function createWindow() {
         })
         .catch((error) => {
           console.error(`[Main] Promo capture failed: ${error.message}`);
-          app.exitCode = 1;
+          process.exitCode = 1;
           app.isQuitting = true;
           app.quit();
         });

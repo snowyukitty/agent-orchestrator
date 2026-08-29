@@ -14,6 +14,16 @@ const VISUAL_WORKFLOW = Object.freeze({
   }],
 });
 
+const PROMO_CAPTURE_TIME = '2026-08-01T12:00:00.000Z';
+
+function createVisualUuidSource() {
+  let sequence = 0;
+  return () => {
+    sequence += 1;
+    return `00000000-0000-4000-8000-${String(sequence).padStart(12, '0')}`;
+  };
+}
+
 async function seedVisualRunJournal(journal) {
   if (
     !journal
@@ -57,6 +67,8 @@ async function seedVisualRunJournal(journal) {
 }
 
 module.exports = {
+  PROMO_CAPTURE_TIME,
   VISUAL_WORKFLOW,
+  createVisualUuidSource,
   seedVisualRunJournal,
 };

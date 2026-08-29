@@ -2,9 +2,18 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  PROMO_CAPTURE_TIME,
   VISUAL_WORKFLOW,
+  createVisualUuidSource,
   seedVisualRunJournal,
 } = require('../src/main/visual-fixtures');
+
+test('visual capture clock and UUID source are deterministic and valid', () => {
+  assert.equal(PROMO_CAPTURE_TIME, '2026-08-01T12:00:00.000Z');
+  const nextUuid = createVisualUuidSource();
+  assert.equal(nextUuid(), '00000000-0000-4000-8000-000000000001');
+  assert.equal(nextUuid(), '00000000-0000-4000-8000-000000000002');
+});
 
 test('visual journal fixture creates two inert recovery boundaries', async () => {
   const calls = [];

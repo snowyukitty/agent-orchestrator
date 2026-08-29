@@ -155,7 +155,8 @@
           <p>
             These are deterministic captures of the real renderer with inert
             fixture data. No account, agent, PTY, or production journal was
-            opened to make them.
+            opened to make them. Each detail is a lossless semantic crop of its
+            linked full frame; the manifest records both geometry and hashes.
           </p>
           <a class="proof-manifest-link" href="assets/promo/manifest.json">
             Capture manifest + SHA-256 digests <span aria-hidden="true">↗</span>
@@ -165,11 +166,11 @@
 
       <div class="proof-grid">
         <figure class="proof-frame proof-frame-workflow">
-          <div class="proof-viewport" data-focus-x="0.52" role="group"
+          <div class="proof-viewport" data-focus-x="0.5" role="group"
                aria-label="Workflow detail crop; scroll horizontally to inspect it at a readable detail scale on narrow screens.">
             <img src="assets/promo/01-workflow-editor-detail.png"
                  alt="The real Agent Orchestrator editor stopped at a Join Agents barrier with two of three result lanes ready."
-                 width="1800" height="1150" loading="lazy">
+                 width="1359" height="591" loading="lazy">
           </div>
           <figcaption>
             <span class="proof-caption-copy"><strong>Fan out first.</strong> Three lanes share one visible workflow; downstream work remains stopped at 2 / 3.</span>
@@ -177,11 +178,11 @@
           </figcaption>
         </figure>
         <figure class="proof-frame proof-frame-handoff">
-          <div class="proof-viewport" data-focus-x="0.52" role="group"
+          <div class="proof-viewport" data-focus-x="0.5" role="group"
                aria-label="Join and handoff detail crop; scroll horizontally to inspect it at a readable detail scale on narrow screens.">
             <img src="assets/promo/02-join-and-handoff-detail.png"
                  alt="The real editor after Join Agents reaches three of three and explicitly attaches the complete result bundle to synthesis."
-                 width="1800" height="1150" loading="lazy">
+                 width="1359" height="1096" loading="lazy">
           </div>
           <figcaption>
             <span class="proof-caption-copy"><strong>Join once.</strong> At 3 / 3, a bounded result bundle crosses into synthesis explicitly.</span>
@@ -189,11 +190,11 @@
           </figcaption>
         </figure>
         <figure class="proof-frame proof-frame-journal">
-          <div class="proof-viewport" data-focus-x="0.65" role="group"
+          <div class="proof-viewport" data-focus-x="0.5" role="group"
                aria-label="Run journal detail crop; scroll horizontally to inspect it at a readable detail scale on narrow screens.">
             <img src="assets/promo/03-run-journal-detail.png"
                  alt="The real Runs view showing protected interrupted-run evidence and a decision-required resume inspection."
-                 width="1950" height="1602" loading="lazy">
+                 width="1871" height="788" loading="lazy">
           </div>
           <figcaption>
             <span class="proof-caption-copy"><strong>Keep the proof.</strong> Protected evidence can be inspected; inspection never executes or replays.</span>

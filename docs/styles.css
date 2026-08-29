@@ -1726,7 +1726,7 @@ p {
   .proof-frame-workflow img,
   .proof-frame-handoff img { width: 610px; }
 
-  .proof-frame-journal img { width: 590px; }
+  .proof-frame-journal img { width: 780px; }
 
   .site-header {
     grid-template-columns: minmax(0, 1fr) auto;

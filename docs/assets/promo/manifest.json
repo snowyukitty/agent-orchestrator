@@ -1,9 +1,11 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "source": "Agent Orchestrator isolated visual fixture",
   "capture": {
     "scale": 2,
-    "zoom": 1.25
+    "zoom": 1.25,
+    "motion": "frozen",
+    "detailDerivation": "lossless-parent-crop"
   },
   "disclosure": "Real renderer UI with inert fixture state; no PTY or agent was launched, and no account or production data was read.",
   "viewport": {
@@ -14,47 +16,127 @@
     {
       "file": "01-workflow-editor.png",
       "label": "Parallel workflow in the real editor",
+      "claim": "join-waiting",
+      "state": {
+        "workflow": "Parallel research → synthesis",
+        "blockCount": 7,
+        "ready": 2,
+        "total": 3,
+        "downstream": "stopped",
+        "executionAvailable": false
+      },
       "width": 3200,
       "height": 2000,
-      "sha256": "5cd73c964d42e765c506ca9eb4531b02b3947013be1e359b9550d6ba57eecb3d"
+      "sha256": "eee7342114104a80de91aa70e0e8d42ac6b44e3edda2a602f3dfa73ebe97bcbf"
     },
     {
       "file": "01-workflow-editor-detail.png",
       "label": "Parallel workflow in the real editor — detail",
-      "width": 1800,
-      "height": 1150,
+      "width": 1359,
+      "height": 591,
       "detailOf": "01-workflow-editor.png",
-      "sha256": "9ef2e744faff50c0227b14095be956881f29e54df3a32447251428aa8e17f237"
+      "derivation": {
+        "method": "lossless-parent-crop",
+        "crop": {
+          "x": 570,
+          "y": 757,
+          "width": 1359,
+          "height": 591
+        },
+        "evidenceSelectors": [
+          ".workflow-block[data-type=\"agentJoin\"]"
+        ],
+        "boundarySelector": "#editor-canvas",
+        "paddingCss": {
+          "x": 16,
+          "y": 20
+        },
+        "claimCoverage": 0.7815
+      },
+      "sha256": "705c717c677712e5aa66f0822f26da293302ec0e888a76f81cf03426ba08ef2d"
     },
     {
       "file": "02-join-and-handoff.png",
       "label": "Join completion and explicit result handoff",
+      "claim": "join-handoff",
+      "state": {
+        "ready": 3,
+        "total": 3,
+        "handoff": "research",
+        "downstream": "running",
+        "executionAvailable": false
+      },
       "width": 3200,
       "height": 2000,
-      "sha256": "b1227af2ab26f1b4304c2ac49f44b8c617c1b01bd265ecf44471f2fc1c6cf65c"
+      "sha256": "455cf59651d3bd2b8523ba67e62117658479c8199c2b2678b87d6af33c7f0866"
     },
     {
       "file": "02-join-and-handoff-detail.png",
       "label": "Join completion and explicit result handoff — detail",
-      "width": 1800,
-      "height": 1150,
+      "width": 1359,
+      "height": 1096,
       "detailOf": "02-join-and-handoff.png",
-      "sha256": "e2204d35ba77f71ddd653119c7846b03abb02473170684b5e01a850936c42847"
+      "derivation": {
+        "method": "lossless-parent-crop",
+        "crop": {
+          "x": 570,
+          "y": 504,
+          "width": 1359,
+          "height": 1096
+        },
+        "evidenceSelectors": [
+          ".workflow-block[data-type=\"agentJoin\"]",
+          ".workflow-block[data-type=\"agentJoin\"] + .block-connector + .workflow-block"
+        ],
+        "boundarySelector": "#editor-canvas",
+        "paddingCss": {
+          "x": 16,
+          "y": 16
+        },
+        "claimCoverage": 0.8723
+      },
+      "sha256": "8731b1833d84095b52d0634bf0d9b7853d734189c98ff0f90881e93786f2746b"
     },
     {
       "file": "03-run-journal.png",
       "label": "Protected Run Journal evidence",
+      "claim": "journal-review-boundary",
+      "state": {
+        "modalOpen": true,
+        "decision": "required",
+        "executionAvailable": false
+      },
       "width": 3200,
       "height": 2000,
-      "sha256": "e23ffed5a1becf0e88ed55c2062055b194f9d0b555cf2e2c1cab88dc46d7a73f"
+      "sha256": "8a8afd0cbca0a5468f68d0a3a58f278ff6bd672abef517f271d3221154a6f0aa"
     },
     {
       "file": "03-run-journal-detail.png",
       "label": "Protected Run Journal evidence — detail",
-      "width": 1950,
-      "height": 1602,
+      "width": 1871,
+      "height": 788,
       "detailOf": "03-run-journal.png",
-      "sha256": "d0e6992cff867fb4f22c972e96c3b97db4ee22ef5697c976deaf6dbb2aab32e5"
+      "derivation": {
+        "method": "lossless-parent-crop",
+        "crop": {
+          "x": 650,
+          "y": 338,
+          "width": 1871,
+          "height": 788
+        },
+        "evidenceSelectors": [
+          "#runs-list .run-row.selected",
+          "#run-detail .run-detail-head",
+          "#run-detail .run-resume-evidence"
+        ],
+        "boundarySelector": "#runs-modal .run-journal-layout",
+        "paddingCss": {
+          "x": 12,
+          "y": 12
+        },
+        "claimCoverage": 0.8941
+      },
+      "sha256": "6ad647bb1180d72e15834987401834a6dc2a235909af7594b8e325ae5acba686"
     }
   ]
 }

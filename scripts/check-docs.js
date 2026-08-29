@@ -31,6 +31,7 @@ const SOCIAL_FRAME_NAME = PROMO_FULL_NAMES[0];
 const PROMO_MIN_SCALE = 2;
 const PROMO_MIN_ZOOM = 1.25;
 const PROMO_MIN_DETAIL_WIDTH = 1200;
+const PROMO_MIN_CLAIM_COVERAGE = 0.6;
 const CANONICAL_URL = 'https://snowyukitty.github.io/agent-orchestrator/';
 const README_FILE = path.join(ROOT, 'README.md');
 
@@ -88,7 +89,8 @@ if (!html.includes(`<link rel="canonical" href="${CANONICAL_URL}">`)) {
 try {
   const manifest = JSON.parse(fs.readFileSync(PROMO_MANIFEST_FILE, 'utf8'));
   if (
-    manifest?.viewport?.width !== 1600
+    manifest?.schemaVersion !== 2
+    || manifest?.viewport?.width !== 1600
     || manifest?.viewport?.height !== 1000
     || !/inert fixture/i.test(manifest?.disclosure || '')
     || !/no PTY or agent was launched/i.test(manifest?.disclosure || '')
@@ -103,6 +105,12 @@ try {
       `promo capture must stay at or above scale ${PROMO_MIN_SCALE} and zoom ${PROMO_MIN_ZOOM}`
       + ' so published UI text survives being scaled into a README column'
     );
+  }
+  if (
+    manifest?.capture?.motion !== 'frozen'
+    || manifest?.capture?.detailDerivation !== 'lossless-parent-crop'
+  ) {
+    fail('promo capture must freeze motion and derive detail frames as lossless parent crops');
   }
   const fullSize = {
     width: manifest?.viewport?.width * scale,
@@ -134,6 +142,25 @@ try {
         if (dimensions.width >= fullSize.width || dimensions.width < PROMO_MIN_DETAIL_WIDTH) {
           fail(`detail crop width must be between ${PROMO_MIN_DETAIL_WIDTH} and the full frame: ${frame.file}`);
         }
+        const derivation = frame.derivation;
+        const crop = derivation?.crop;
+        if (
+          derivation?.method !== 'lossless-parent-crop'
+          || !crop
+          || !['x', 'y', 'width', 'height'].every(key => Number.isInteger(crop[key]))
+          || crop.x < 0
+          || crop.y < 0
+          || crop.width !== dimensions.width
+          || crop.height !== dimensions.height
+          || crop.x + crop.width > fullSize.width
+          || crop.y + crop.height > fullSize.height
+          || !Array.isArray(derivation.evidenceSelectors)
+          || derivation.evidenceSelectors.length === 0
+          || typeof derivation.boundarySelector !== 'string'
+          || !(derivation.claimCoverage >= PROMO_MIN_CLAIM_COVERAGE)
+        ) {
+          fail(`detail crop lacks a bounded semantic derivation receipt: ${frame.file}`);
+        }
         if (!html.includes(`src="assets/promo/${frame.file}"`)) {
           fail(`field guide does not present detail crop: ${frame.file}`);
         }
@@ -143,6 +170,9 @@ try {
         }
         if (!html.includes(`assets/promo/${frame.file}"`)) {
           fail(`field guide does not reference full frame: ${frame.file}`);
+        }
+        if (!frame.claim || frame.state?.executionAvailable !== false) {
+          fail(`full frame must declare its inert claim state: ${frame.file}`);
         }
       }
     }
