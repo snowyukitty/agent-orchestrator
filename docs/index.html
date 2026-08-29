@@ -61,13 +61,14 @@
       href="https://github.com/snowyukitty/agent-orchestrator"
       target="_blank"
       rel="noreferrer"
+      aria-label="Open the Agent Orchestrator repository on GitHub"
     >
       GitHub
       <span aria-hidden="true">↗</span>
     </a>
   </header>
 
-  <main id="main-content">
+  <main id="main-content" tabindex="-1">
     <section class="hero section-shell" id="top" aria-labelledby="hero-title">
       <div class="hero-copy">
         <p class="eyebrow"><span class="pulse-dot" aria-hidden="true"></span> Desktop control plane for CLI agents</p>
@@ -164,7 +165,7 @@
 
       <div class="proof-grid">
         <figure class="proof-frame proof-frame-workflow">
-          <div class="proof-viewport" data-focus-x="0.52" role="region"
+          <div class="proof-viewport" data-focus-x="0.52" role="group"
                aria-label="Workflow detail crop; scroll horizontally to inspect it at a readable detail scale on narrow screens.">
             <img src="assets/promo/01-workflow-editor-detail.png"
                  alt="The real Agent Orchestrator editor stopped at a Join Agents barrier with two of three result lanes ready."
@@ -176,7 +177,7 @@
           </figcaption>
         </figure>
         <figure class="proof-frame proof-frame-handoff">
-          <div class="proof-viewport" data-focus-x="0.52" role="region"
+          <div class="proof-viewport" data-focus-x="0.52" role="group"
                aria-label="Join and handoff detail crop; scroll horizontally to inspect it at a readable detail scale on narrow screens.">
             <img src="assets/promo/02-join-and-handoff-detail.png"
                  alt="The real editor after Join Agents reaches three of three and explicitly attaches the complete result bundle to synthesis."
@@ -188,7 +189,7 @@
           </figcaption>
         </figure>
         <figure class="proof-frame proof-frame-journal">
-          <div class="proof-viewport" data-focus-x="0.65" role="region"
+          <div class="proof-viewport" data-focus-x="0.65" role="group"
                aria-label="Run journal detail crop; scroll horizontally to inspect it at a readable detail scale on narrow screens.">
             <img src="assets/promo/03-run-journal-detail.png"
                  alt="The real Runs view showing protected interrupted-run evidence and a decision-required resume inspection."
@@ -293,6 +294,7 @@
               class="assurance-tab is-active"
               type="button"
               role="tab"
+              aria-label="L1 routed account"
               aria-selected="true"
               aria-controls="panel-l1"
               data-tab-target="panel-l1"
@@ -305,6 +307,7 @@
               class="assurance-tab"
               type="button"
               role="tab"
+              aria-label="L2 environment-only profile"
               aria-selected="false"
               aria-controls="panel-l2"
               data-tab-target="panel-l2"
@@ -318,6 +321,7 @@
               class="assurance-tab"
               type="button"
               role="tab"
+              aria-label="L0 native session"
               aria-selected="false"
               aria-controls="panel-l0"
               data-tab-target="panel-l0"
@@ -329,7 +333,7 @@
           </div>
 
           <div class="assurance-panels">
-            <article id="panel-l1" class="assurance-panel" role="tabpanel" aria-labelledby="tab-l1">
+            <article id="panel-l1" class="assurance-panel" role="tabpanel" aria-labelledby="tab-l1" tabindex="0">
               <div class="panel-level level-copy-l1">L1</div>
               <div>
                 <p class="panel-overline">STRONGEST AVAILABLE ROUTE</p>
@@ -357,7 +361,7 @@
               </div>
             </article>
 
-            <article id="panel-l2" class="assurance-panel" role="tabpanel" aria-labelledby="tab-l2" hidden>
+            <article id="panel-l2" class="assurance-panel" role="tabpanel" aria-labelledby="tab-l2" tabindex="0" hidden>
               <div class="panel-level level-copy-l2">L2</div>
               <div>
                 <p class="panel-overline">LOCAL CHILD ENVIRONMENT</p>
@@ -382,7 +386,7 @@
               </div>
             </article>
 
-            <article id="panel-l0" class="assurance-panel" role="tabpanel" aria-labelledby="tab-l0" hidden>
+            <article id="panel-l0" class="assurance-panel" role="tabpanel" aria-labelledby="tab-l0" tabindex="0" hidden>
               <div class="panel-level level-copy-l0">L0</div>
               <div>
                 <p class="panel-overline">PLAIN NATIVE SHELL</p>
@@ -462,8 +466,10 @@
               Copy plan
             </button>
           </div>
-          <div class="recipe-lanes" id="recipe-lanes" aria-live="polite"></div>
-          <pre class="recipe-summary" id="recipe-summary" tabindex="0"></pre>
+          <div class="recipe-lanes" id="recipe-lanes" aria-hidden="true"></div>
+          <pre class="recipe-summary" id="recipe-summary" role="region"
+               aria-label="Generated block plan" tabindex="0"></pre>
+          <p class="visually-hidden" id="recipe-status" role="status" aria-live="polite" aria-atomic="true"></p>
           <p class="recipe-note">
             <span aria-hidden="true">◇</span>
             Role-specific sends all precede the shared barrier. For one common

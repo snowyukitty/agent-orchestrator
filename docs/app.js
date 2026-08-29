@@ -9,6 +9,7 @@
   const recipeTitle = document.getElementById('recipe-title');
   const recipeLanes = document.getElementById('recipe-lanes');
   const recipeSummary = document.getElementById('recipe-summary');
+  const recipeStatus = document.getElementById('recipe-status');
   const runSimulationButton = document.getElementById('run-simulation');
   const simulationLog = document.getElementById('simulation-log');
   const simulationClock = document.getElementById('simulation-clock');
@@ -43,6 +44,7 @@
   };
 
   let simulationTimers = [];
+  let recipeAnnouncementTimer = 0;
 
   function clampNumber(input, fallback, minimum, maximum) {
     const parsed = Number.parseInt(input.value, 10);
@@ -143,6 +145,15 @@
     recipeSummary.textContent = lines.join('\n');
   }
 
+  function renderRecipeWithAnnouncement() {
+    renderRecipe();
+    window.clearTimeout(recipeAnnouncementTimer);
+    recipeAnnouncementTimer = window.setTimeout(() => {
+      const topology = topologies[topologySelect.value] || topologies.pair;
+      recipeStatus.textContent = `Recipe preview updated: ${topology.title}; marker ${cleanMarker()}.`;
+    }, 350);
+  }
+
   function activateAssuranceTab(tab) {
     const tabs = Array.from(document.querySelectorAll('[role="tab"][data-tab-target]'));
     for (const candidate of tabs) {
@@ -157,14 +168,26 @@
 
   function setupAssuranceTabs() {
     const tabs = Array.from(document.querySelectorAll('[role="tab"][data-tab-target]'));
+    const tablist = document.querySelector('[role="tablist"]');
+    const narrowLayout = window.matchMedia('(max-width: 780px)');
+    const syncOrientation = () => {
+      tablist.setAttribute('aria-orientation', narrowLayout.matches ? 'horizontal' : 'vertical');
+    };
+    syncOrientation();
+    narrowLayout.addEventListener('change', syncOrientation);
+
     tabs.forEach((tab, index) => {
       tab.addEventListener('click', () => activateAssuranceTab(tab));
       tab.addEventListener('keydown', (event) => {
-        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
         event.preventDefault();
         let nextIndex = index;
-        if (event.key === 'ArrowLeft') nextIndex = (index - 1 + tabs.length) % tabs.length;
-        if (event.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length;
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') {
+          nextIndex = (index - 1 + tabs.length) % tabs.length;
+        }
+        if (event.key === 'ArrowRight' || event.key === 'ArrowDown') {
+          nextIndex = (index + 1) % tabs.length;
+        }
         if (event.key === 'Home') nextIndex = 0;
         if (event.key === 'End') nextIndex = tabs.length - 1;
         activateAssuranceTab(tabs[nextIndex]);
@@ -294,9 +317,12 @@
         .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
       if (!visible) return;
       links.forEach((link) => {
-        link.classList.toggle('is-active', link.getAttribute('href') === `#${visible.target.id}`);
+        const active = link.getAttribute('href') === `#${visible.target.id}`;
+        link.classList.toggle('is-active', active);
+        if (active) link.setAttribute('aria-current', 'location');
+        else link.removeAttribute('aria-current');
       });
-    }, { rootMargin: '-25% 0px -60%', threshold: [0.1, 0.4, 0.7] });
+    }, { rootMargin: '-25% 0px -60%', threshold: [0, 0.1, 0.4, 0.7] });
     sections.forEach((section) => observer.observe(section));
   }
 
@@ -393,11 +419,11 @@
     }, { passive: true });
   }
 
-  topologySelect.addEventListener('change', renderRecipe);
-  markerInput.addEventListener('input', renderRecipe);
-  idleInput.addEventListener('change', renderRecipe);
-  timeoutInput.addEventListener('change', renderRecipe);
-  failurePolicySelect.addEventListener('change', renderRecipe);
+  topologySelect.addEventListener('change', renderRecipeWithAnnouncement);
+  markerInput.addEventListener('input', renderRecipeWithAnnouncement);
+  idleInput.addEventListener('change', renderRecipeWithAnnouncement);
+  timeoutInput.addEventListener('change', renderRecipeWithAnnouncement);
+  failurePolicySelect.addEventListener('change', renderRecipeWithAnnouncement);
   runSimulationButton.addEventListener('click', runSimulation);
 
   setupAssuranceTabs();

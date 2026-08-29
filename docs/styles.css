@@ -115,6 +115,18 @@ p {
   opacity: 0;
 }
 
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  border: 0;
+  white-space: nowrap;
+}
+
 .skip-link {
   position: fixed;
   z-index: 100;
@@ -609,6 +621,9 @@ p {
   scrollbar-width: thin;
 }
 
+.wait-console :focus-visible,
+.command-card :focus-visible,
+.recipe-summary:focus-visible,
 .proof-viewport:focus-visible { outline-color: var(--focus-on-dark); }
 
 .proof-frame img {
@@ -1178,7 +1193,7 @@ p {
   white-space: pre-wrap;
 }
 
-.recipe-summary:focus { border-color: #e49270; outline: 3px solid rgba(228, 146, 112, 0.25); }
+.recipe-summary:focus-visible { border-color: var(--focus-on-dark); }
 
 .recipe-note {
   display: flex;
@@ -1626,7 +1641,6 @@ p {
   .proof-viewport {
     overflow-x: auto;
     overscroll-behavior-inline: contain;
-    touch-action: pan-x pan-y;
   }
 
   .proof-frame-workflow img,
