@@ -14,7 +14,7 @@
   /* Font sizing — larger for readability at distance */
   --font-size-base: 14px;
   --font-size-sm: 12px;
-  --font-size-xs: 10px;
+  --font-size-xs: 11px;
   /* Backgrounds */
   --bg-primary: #0d1117;
   --bg-secondary: #161b22;
@@ -133,7 +133,7 @@ html, body {
 .titlebar-icon { font-size: 15px; }
 
 .titlebar-text {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   color: var(--text-secondary);
   letter-spacing: 1.2px;
@@ -141,7 +141,7 @@ html, body {
 }
 
 .titlebar-version {
-  font-size: 9px;
+  font-size: 11px;
   color: var(--text-muted);
   letter-spacing: 0.5px;
   -webkit-app-region: no-drag;
@@ -177,7 +177,7 @@ html, body {
 }
 
 .panel-header h2 {
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1.8px;
@@ -186,8 +186,8 @@ html, body {
 
 /* ── Palette Panel (Left) ──────────────────────────────────── */
 .panel-palette {
-  width: 210px;
-  min-width: 170px;
+  width: 228px;
+  min-width: 186px;
   flex-shrink: 0;
 }
 
@@ -256,7 +256,7 @@ html, body {
 }
 
 .palette-block .block-desc {
-  font-size: 9px;
+  font-size: 11px;
   color: var(--text-muted);
   margin-top: 1px;
   white-space: nowrap;
@@ -287,7 +287,7 @@ html, body {
 }
 
 .palette-hint {
-  font-size: 9px;
+  font-size: 11px;
   color: var(--text-muted);
   font-style: italic;
 }
@@ -326,7 +326,7 @@ html, body {
 }
 
 .workflow-status {
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1.2px;
@@ -394,7 +394,7 @@ html, body {
 }
 
 .empty-hint {
-  font-size: 11px;
+  font-size: 12px;
   opacity: 0.6;
 }
 
@@ -490,7 +490,7 @@ html, body {
   opacity: 0;
   transition: opacity var(--t-fast);
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: 12px;
   letter-spacing: 1px;
 }
 
@@ -504,7 +504,7 @@ html, body {
   align-items: center;
   justify-content: center;
   width: 26px;
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   color: var(--text-muted);
   flex-shrink: 0;
@@ -530,7 +530,7 @@ html, body {
 .block-header .block-icon { font-size: 13px; }
 
 .block-header .block-type-label {
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1.2px;
@@ -551,11 +551,11 @@ html, body {
 }
 
 .block-param label {
-  font-size: 9px;
+  font-size: 11px;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  width: 52px;
+  width: 66px;
   flex-shrink: 0;
   font-weight: 600;
 }
@@ -570,7 +570,7 @@ html, body {
   border: 1px solid var(--border-subtle);
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
   padding: 3px var(--sp-2);
   border-radius: var(--radius-sm);
   outline: none;
@@ -632,7 +632,7 @@ html, body {
   display: block;
   margin-top: 3px;
   color: var(--accent-yellow);
-  font-size: 9px;
+  font-size: 11px;
   line-height: 1.25;
 }
 
@@ -675,7 +675,7 @@ html, body {
   cursor: pointer;
   padding: 3px;
   border-radius: var(--radius-sm);
-  font-size: 11px;
+  font-size: 12px;
   transition: all var(--t-fast);
   display: flex;
   align-items: center;
@@ -734,7 +734,7 @@ html, body {
   background: transparent;
   border: none;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.5px;
   text-transform: uppercase;
@@ -1089,7 +1089,7 @@ html, body {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-sm);
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
   cursor: pointer;
   transition: all var(--t-fast);
@@ -1157,7 +1157,7 @@ html, body {
   border-color: var(--border-medium);
 }
 
-.btn-sm { padding: 2px 6px; font-size: 10px; min-width: 22px; }
+.btn-sm { padding: 2px 6px; font-size: 11px; min-width: 22px; }
 
 .btn-run {
   padding: var(--sp-2) var(--sp-6);
@@ -1165,10 +1165,10 @@ html, body {
   letter-spacing: 0.3px;
 }
 
-.btn-icon-text { font-size: 10px; }
+.btn-icon-text { font-size: 11px; }
 
 .status-text {
-  font-size: 10px;
+  font-size: 11px;
   color: var(--text-muted);
   letter-spacing: 0.3px;
 }
@@ -1584,7 +1584,7 @@ html, body {
   display: grid;
   gap: 4px;
   color: var(--text-muted);
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.5px;
   text-transform: uppercase;
 }
@@ -1665,7 +1665,7 @@ html, body {
   border-radius: 999px;
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 11px;
   text-transform: uppercase;
 }
 
@@ -1717,7 +1717,7 @@ html, body {
 .run-resume-head span {
   color: var(--text-muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 11px;
 }
 
 .run-resume-evidence p,
@@ -1784,7 +1784,7 @@ html, body {
   flex-shrink: 0;
   color: var(--text-muted);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 11px;
   letter-spacing: 0.4px;
   text-transform: uppercase;
 }
@@ -1933,7 +1933,7 @@ html, body {
 }
 
 .agents-section-head h3 {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 1.2px;

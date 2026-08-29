@@ -40,13 +40,24 @@ still validates source records because an unknowable active run must fail
 containment closed.
 
 The `assets/promo/` frames carry the whole outward face: the field guide's
-proof section, the README hero, and the `og:image` / Twitter card are all
-`01-workflow-editor.png`. They are deterministic captures of the real renderer
-using an inert fixture. The capture launches no account,
+proof section, the README hero, and the `og:image` / Twitter card all come from
+this directory. They are deterministic captures of the real renderer using an
+inert fixture.
+
+Each capture produces two artifacts. The **full frame** is the 1600x1000 layout
+rendered at 2x (3200x2000) with the UI enlarged to 1.25, and the **detail crop**
+is the region that carries the claim, cropped from that same frame using the
+focus element's own bounding rect. The crop exists because of arithmetic: a
+1600px window scaled into GitHub's ~900px README column arrives at 0.56x, which
+drops this app's 9-11px labels below 6px. A crop shown at that width is closer
+to 1.25x, so the same text lands near 12px and stays readable. Full frames are
+still published and linked behind every crop. The capture launches no account,
 agent, or PTY and reads no production data. `assets/promo/manifest.json`
-records exact dimensions and hashes, and `npm run check` verifies those receipts
-against the PNGs, their field-guide references, the social metadata, and the
-README hero. The earlier AI-generated key art was removed on 2026-08-29: it was
+records the capture dials, exact dimensions, and hashes; `npm run check`
+verifies those receipts against the PNGs, their field-guide references, the
+social metadata, the README hero, and each README crop. It also fails if the
+capture ever drops below the published legibility floor of scale 2 and zoom
+1.25. The earlier AI-generated key art was removed on 2026-08-29: it was
 abstract, off-product, and strictly worse than showing the app. The creative and
 publication boundary lives in [`promo-creative-brief.md`](promo-creative-brief.md).
 

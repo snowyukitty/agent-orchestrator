@@ -14,9 +14,11 @@ hand the collected results to the next stage explicitly.
 
 > Every screenshot on this page is the real renderer captured with inert
 > fixture data — `npm run promo:capture` launches no account, agent, or PTY and
-> reads no production journal. Dimensions and SHA-256 hashes are recorded in
-> [`docs/assets/promo/manifest.json`](docs/assets/promo/manifest.json) and
-> re-verified by `npm run check`.
+> reads no production journal. Frames are captured at 2x with the UI enlarged,
+> and each claim below is shown as a crop, because a full 1600px window scaled
+> into this column drops 9px labels under 6px. Dimensions and SHA-256 hashes are
+> recorded in [`docs/assets/promo/manifest.json`](docs/assets/promo/manifest.json)
+> and re-verified by `npm run check`.
 
 ## Fan out first, join once
 
@@ -27,7 +29,7 @@ since the previous wait and reports live `N / M ready`. A timeout or a session
 exiting early stops downstream blocks by default instead of silently continuing
 with partial work.
 
-![The same workflow after the join completes: 3 / 3 ready, with the collected result bundle explicitly attached to a synthesis prompt.](docs/assets/promo/02-join-and-handoff.png)
+![Close-up of the Join Agents block holding at 2 / 3 ready while the rest of the workflow waits.](docs/assets/promo/01-workflow-editor-detail.png)
 
 Results are explicit, not scraped. A send block can issue a bounded result
 contract to each lane; the join captures the complete framed payloads in stable
@@ -35,7 +37,7 @@ lane order; a later send may attach that bundle as clearly labelled *untrusted*
 reference data. Partial, empty, or truncated bundles never reach a downstream
 agent by default.
 
-![The Runs view showing a protected run journal entry for an interrupted run, with its evidence assessment and an explicit local inspection action.](docs/assets/promo/03-run-journal.png)
+![Close-up of the join at 3 / 3 ready, saving its result as "research", with the next stage synthesising the attached bundle.](docs/assets/promo/02-join-and-handoff-detail.png)
 
 Every run is journaled: immutable workflow identity, trigger, ordered block
 visits, terminal status, and result metadata. Snapshots and result bodies are
@@ -43,6 +45,13 @@ encrypted with Electron `safeStorage` and decrypted only on request; raw
 terminal history is never journaled. Interrupted runs can be *inspected* —
 never replayed. See [`docs/resume-design.md`](docs/resume-design.md) for why
 that line is drawn where it is.
+
+![Close-up of the Run Journal: an interrupted run marked decision required, with an explicit protected-evidence inspection that never replays the workflow.](docs/assets/promo/03-run-journal-detail.png)
+
+Full-window frames behind each crop:
+[editor](docs/assets/promo/01-workflow-editor.png) ·
+[join and handoff](docs/assets/promo/02-join-and-handoff.png) ·
+[run journal](docs/assets/promo/03-run-journal.png).
 
 ## Why schedule an agent? The 5-hour-window trick
 

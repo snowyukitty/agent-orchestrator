@@ -13,7 +13,7 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "visual": "electron . --visual-test",
-    "promo:capture": "electron . --promo-capture",
+    "promo:capture": "electron . --promo-capture --promo-scale=2 --promo-zoom=1.25 --promo-details",
     "smoke": "electron . --smoke-test",
     "test": "npm run test:unit && npm run test:app",
     "test:unit": "node --test \"tests/**/*.test.js\"",

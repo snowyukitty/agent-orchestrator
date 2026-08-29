@@ -54,7 +54,7 @@ Three pillars, in the order visitors should meet them:
 | Asset | Tool | Notes |
 |---|---|---|
 | Functional hero (50.6 s, narrated) | HyperFrames (`snowy-hyperframes` pipeline) | real editor → 2/3 barrier → 3/3 explicit handoff → protected journal; English voice + en/ja/zh-Hant sidecars; human gate pending |
-| Product-proof stills | `npm run promo:capture` | shipped in field guide; deterministic 1600×1000 real-renderer fixture captures with disclosure and hashed manifest |
+| Product-proof stills | `npm run promo:capture` | shipped in field guide and README; deterministic real-renderer fixture captures at 2× with the UI at 1.25, each with a focus crop, disclosure, and hashed manifest |
 | Product overview (89.7 s, narrated) | HyperFrames + Edge-TTS | clean English master; English/default + Japanese + Traditional Chinese SRT/VTT; human gate pending |
 | 5-hour-window explainer (87.8 s, narrated) | HyperFrames + Edge-TTS | same trilingual contract; flagship promo candidate; human gate pending |
 | Fan-out/join clip | Screen capture of the real app | authenticity beats composition here |

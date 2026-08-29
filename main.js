@@ -54,10 +54,12 @@ const isSelfTest = process.argv.includes('--self-test');
 const isVisualTest = process.argv.includes('--visual-test');
 const promoCapture = parsePromoCaptureOptions(process.argv, __dirname);
 if (promoCapture) {
-  // Capture receipts are portable only when one CSS pixel maps to one output
-  // pixel. The switch is scoped to the disposable promo process and must be
-  // set before Electron creates a BrowserWindow.
-  app.commandLine.appendSwitch('force-device-scale-factor', '1');
+  // Capture receipts are portable only when the output pixel ratio is fixed
+  // here rather than inherited from whatever display runs the capture. Scale 1
+  // maps one CSS pixel to one output pixel; a higher scale keeps the same
+  // layout and multiplies resolution. The switch is scoped to the disposable
+  // promo process and must be set before Electron creates a BrowserWindow.
+  app.commandLine.appendSwitch('force-device-scale-factor', String(promoCapture.scale ?? 1));
 }
 app.setName('Agent Orchestrator');
 const userDataState = prepareUserData({

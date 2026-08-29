@@ -1,6 +1,10 @@
 {
   "schemaVersion": 1,
   "source": "Agent Orchestrator isolated visual fixture",
+  "capture": {
+    "scale": 2,
+    "zoom": 1.25
+  },
   "disclosure": "Real renderer UI with inert fixture state; no PTY or agent was launched, and no account or production data was read.",
   "viewport": {
     "width": 1600,
@@ -10,23 +14,47 @@
     {
       "file": "01-workflow-editor.png",
       "label": "Parallel workflow in the real editor",
-      "width": 1600,
-      "height": 1000,
-      "sha256": "27ab5f7a1e175fea8ccda96265debb474ef953eaa6ae8e74d9022b6446d9be03"
+      "width": 3200,
+      "height": 2000,
+      "sha256": "5cd73c964d42e765c506ca9eb4531b02b3947013be1e359b9550d6ba57eecb3d"
+    },
+    {
+      "file": "01-workflow-editor-detail.png",
+      "label": "Parallel workflow in the real editor — detail",
+      "width": 1800,
+      "height": 1150,
+      "detailOf": "01-workflow-editor.png",
+      "sha256": "9ef2e744faff50c0227b14095be956881f29e54df3a32447251428aa8e17f237"
     },
     {
       "file": "02-join-and-handoff.png",
       "label": "Join completion and explicit result handoff",
-      "width": 1600,
-      "height": 1000,
-      "sha256": "d3977697336db473448befb0a4ff8e9612318f4413ea2c7a91e3a10bca0a8590"
+      "width": 3200,
+      "height": 2000,
+      "sha256": "b1227af2ab26f1b4304c2ac49f44b8c617c1b01bd265ecf44471f2fc1c6cf65c"
+    },
+    {
+      "file": "02-join-and-handoff-detail.png",
+      "label": "Join completion and explicit result handoff — detail",
+      "width": 1800,
+      "height": 1150,
+      "detailOf": "02-join-and-handoff.png",
+      "sha256": "e2204d35ba77f71ddd653119c7846b03abb02473170684b5e01a850936c42847"
     },
     {
       "file": "03-run-journal.png",
       "label": "Protected Run Journal evidence",
-      "width": 1600,
-      "height": 1000,
-      "sha256": "f26b7531f34d8790812f223bb5f22569f2c38319ec2d45d8a92e0624b8a3d38f"
+      "width": 3200,
+      "height": 2000,
+      "sha256": "e23ffed5a1becf0e88ed55c2062055b194f9d0b555cf2e2c1cab88dc46d7a73f"
+    },
+    {
+      "file": "03-run-journal-detail.png",
+      "label": "Protected Run Journal evidence — detail",
+      "width": 1950,
+      "height": 1602,
+      "detailOf": "03-run-journal.png",
+      "sha256": "d0e6992cff867fb4f22c972e96c3b97db4ee22ef5697c976deaf6dbb2aab32e5"
     }
   ]
 }

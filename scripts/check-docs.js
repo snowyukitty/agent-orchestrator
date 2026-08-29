@@ -13,12 +13,24 @@ const PROMO_DIR = path.join(DOCS, 'assets', 'promo');
 const PROMO_MANIFEST_FILE = path.join(PROMO_DIR, 'manifest.json');
 const PROMO_FRAME_NAMES = [
   '01-workflow-editor.png',
+  '01-workflow-editor-detail.png',
   '02-join-and-handoff.png',
+  '02-join-and-handoff-detail.png',
   '03-run-journal.png',
+  '03-run-journal-detail.png',
 ];
+const PROMO_FULL_NAMES = PROMO_FRAME_NAMES.filter((name) => !name.endsWith('-detail.png'));
+const PROMO_DETAIL_NAMES = PROMO_FRAME_NAMES.filter((name) => name.endsWith('-detail.png'));
 // The outward face is proof-first: the social card and the README hero are the
 // same authentic capture the field guide presents, never a conceptual render.
-const SOCIAL_FRAME_NAME = PROMO_FRAME_NAMES[0];
+const SOCIAL_FRAME_NAME = PROMO_FULL_NAMES[0];
+// Published frames must clear the legibility floor the capture tool documents:
+// a 1x full-window frame scaled into a README column puts this UI's smallest
+// labels under 6px, so the standard is a 2x capture, an enlarged UI, and a
+// focus crop for every claim.
+const PROMO_MIN_SCALE = 2;
+const PROMO_MIN_ZOOM = 1.25;
+const PROMO_MIN_DETAIL_WIDTH = 1200;
 const CANONICAL_URL = 'https://snowyukitty.github.io/agent-orchestrator/';
 const README_FILE = path.join(ROOT, 'README.md');
 
@@ -84,29 +96,54 @@ try {
   ) {
     fail('promo capture manifest must retain its exact viewport and inert-data disclosure');
   }
+  const scale = manifest?.capture?.scale;
+  const zoom = manifest?.capture?.zoom;
+  if (!(scale >= PROMO_MIN_SCALE) || !(zoom >= PROMO_MIN_ZOOM)) {
+    fail(
+      `promo capture must stay at or above scale ${PROMO_MIN_SCALE} and zoom ${PROMO_MIN_ZOOM}`
+      + ' so published UI text survives being scaled into a README column'
+    );
+  }
+  const fullSize = {
+    width: manifest?.viewport?.width * scale,
+    height: manifest?.viewport?.height * scale,
+  };
   if (
     !Array.isArray(manifest?.frames)
     || manifest.frames.length !== PROMO_FRAME_NAMES.length
     || manifest.frames.some((frame, index) => frame.file !== PROMO_FRAME_NAMES[index])
   ) {
-    fail('promo capture manifest must name the three canonical frames in order');
+    fail('promo capture manifest must name every canonical frame and its detail crop in order');
   } else {
     for (const frame of manifest.frames) {
       const file = path.join(PROMO_DIR, frame.file);
       const bytes = fs.readFileSync(file);
       const digest = crypto.createHash('sha256').update(bytes).digest('hex');
       const dimensions = pngSize(file);
+      const isDetail = PROMO_DETAIL_NAMES.includes(frame.file);
       if (frame.sha256 !== digest) fail(`promo frame SHA-256 mismatch: ${frame.file}`);
-      if (
-        frame.width !== dimensions.width
-        || frame.height !== dimensions.height
-        || dimensions.width !== 1600
-        || dimensions.height !== 1000
-      ) {
-        fail(`promo frame dimensions must be exactly 1600x1000: ${frame.file}`);
+      if (frame.width !== dimensions.width || frame.height !== dimensions.height) {
+        fail(`promo frame dimensions do not match their receipt: ${frame.file}`);
       }
-      if (!html.includes(`src="assets/promo/${frame.file}"`)) {
-        fail(`field guide does not present promo frame: ${frame.file}`);
+      if (isDetail) {
+        // A crop is the frame a reader can actually read, so it must be a real
+        // crop of its own full frame and stay wide enough to carry the claim.
+        if (frame.detailOf !== frame.file.replace('-detail.png', '.png')) {
+          fail(`detail crop does not name its source frame: ${frame.file}`);
+        }
+        if (dimensions.width >= fullSize.width || dimensions.width < PROMO_MIN_DETAIL_WIDTH) {
+          fail(`detail crop width must be between ${PROMO_MIN_DETAIL_WIDTH} and the full frame: ${frame.file}`);
+        }
+        if (!html.includes(`src="assets/promo/${frame.file}"`)) {
+          fail(`field guide does not present detail crop: ${frame.file}`);
+        }
+      } else {
+        if (dimensions.width !== fullSize.width || dimensions.height !== fullSize.height) {
+          fail(`full frame must be exactly ${fullSize.width}x${fullSize.height}: ${frame.file}`);
+        }
+        if (!html.includes(`assets/promo/${frame.file}"`)) {
+          fail(`field guide does not reference full frame: ${frame.file}`);
+        }
       }
     }
 
@@ -128,6 +165,13 @@ try {
     const readme = read(README_FILE);
     if (!readme.includes(`](docs/assets/promo/${SOCIAL_FRAME_NAME})`)) {
       fail('README hero must be the authentic capture frame');
+    }
+    // The README column is the surface where a full frame becomes unreadable,
+    // so every product claim there is carried by its detail crop.
+    for (const name of PROMO_DETAIL_NAMES) {
+      if (!readme.includes(`](docs/assets/promo/${name})`)) {
+        fail(`README must present the readable detail crop: ${name}`);
+      }
     }
     if (/agent-orchestrator-key-art/.test(`${readme}\n${html}`)) {
       fail('the retired conceptual key art must not return to the outward face');

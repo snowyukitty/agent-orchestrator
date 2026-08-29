@@ -10,6 +10,12 @@ workflow fan out, stop at an incomplete barrier, cross the barrier with an
 explicit result bundle, and leave protected evidence. A viewer should be able
 to explain the product after one watch without relying on the narration.
 
+Legibility is part of proof: a frame nobody can read proves nothing. Published
+stills are captured at 2x with the UI enlarged to 1.25, and every claim is
+also published as a focus crop, because a full window scaled into a README
+column puts this app's smallest labels under 6px. `npm run check` enforces that
+floor against the capture manifest.
+
 The proof hierarchy is:
 
 1. real renderer state from a deterministic, disclosed fixture;

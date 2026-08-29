@@ -5,6 +5,19 @@ the product story; this file keeps the history.
 
 ## Unreleased (Indexed History + Deep Resume Preflight)
 
+- **Readable UI text**: the smallest interface labels moved off a 9px floor.
+  Block type labels, parameter labels, run statuses, buttons, and the security
+  warning now sit at 11-12px, with the parameter label column and the palette
+  widened so nothing collides or truncates further than before.
+- **Legible product frames**: `npm run promo:capture` now takes `--promo-scale`,
+  `--promo-zoom`, and `--promo-details`, and publishes at 2x with the UI at
+  1.25 plus a focus crop per frame. Crops are cut from each frame using the
+  focus element's own bounding rect, so they stay reproducible and hashed.
+  `npm run check` fails if a published capture drops below that floor.
+- **Fixed the capture fixture's target**: the join-state scripts matched
+  `[data-type="agentJoin"]`, which the block palette also carries, so the badge
+  and running state were being applied to the sidebar entry instead of the
+  workflow block. Frames now show the barrier they claim to show.
 - **Proof-first repository front page**: the README now opens on the real
   editor capture and reads as a product page. The 180-line release history moved
   to this file, the feature reference to `docs/features.md`, and the stated
