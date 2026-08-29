@@ -67,5 +67,5 @@ and verification layers, see [`architecture.md`](architecture.md).
 
 GitHub Pages publishes this directory at
 <https://snowyukitty.github.io/agent-orchestrator/>, and the same static
-artifact is mirrored at <https://agent-orchestrator-855.pages.dev/>. Changing
+artifact is mirrored at <https://agentorch.pages.dev/>. Changing
 either publication surface remains an explicit repository-owner action.

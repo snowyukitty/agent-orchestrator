@@ -1,19 +1,21 @@
-# Website plan — `agent-orchestrator.pages.dev` (future work)
+# Website plan — `agentorch.pages.dev` (future work)
 
 Status: **v1 live as a mirror with authentic product proof; the dedicated
 landing page below is future work.** The GitHub Pages field guide is the primary product page, live at
 <https://snowyukitty.github.io/agent-orchestrator/>. The same `docs/` artifact
 is mirrored on Cloudflare Pages at
-<https://agent-orchestrator-855.pages.dev/> (the bare `agent-orchestrator`
-pages.dev subdomain was already taken globally; renaming or attaching a custom
-domain is an open decision). The dedicated marketing landing (v2) below waits
+<https://agentorch.pages.dev/>. The bare `agent-orchestrator` and
+`orchestrator` pages.dev subdomains are held by unrelated accounts — creating a
+project under either name returns a suffixed subdomain — so `agentorch` is the
+short name this project owns. A custom domain on one of the account's zones
+remains available if a branded URL is wanted later. The dedicated marketing landing (v2) below waits
 for human approval and Release publication of the promo video assets; the
 English masters and trilingual sidecars themselves are generated.
 
 Deploy command for the mirror (established portfolio flow):
 
 ```bash
-wrangler pages deploy docs --project-name=agent-orchestrator --branch=main
+wrangler pages deploy docs --project-name=agentorch --branch=main
 ```
 
 ## Positioning
@@ -64,7 +66,7 @@ Three pillars, in the order visitors should meet them:
 - Static only, no build step — same discipline as `docs/`: hand-written HTML,
   CSS, JS; CSP with `connect-src 'none'`; no analytics, cookies, or forms.
 - Deploy with the established `wrangler pages deploy` flow (see the
-  `cloudflare-pages` skill); project name `agent-orchestrator`, production
+  `cloudflare-pages` skill); project name `agentorch`, production
   branch `main`, site source in a new `site/` directory so `docs/` stays the
   GitHub Pages root.
 - Keep videos out of the Pages bundle: host reviewed renders as GitHub Release
