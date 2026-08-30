@@ -36,7 +36,12 @@ form for people deciding whether a specific behavior exists.
 - **Explicit Journal Retention**: **📖 Runs** can preview and apply a count
   limit, an age limit, or both to terminal runs. Active runs are never selected,
   history is never pruned automatically, and a changed preview must be reviewed
-  again before deletion.
+  again before deletion. The opaque preview token expires after ten minutes and
+  does not survive an app restart. Destructive selection revalidates canonical
+  run files, not the rebuildable index. Once confirmed, path-free durable intent
+  and a bounded receipt history make multi-record deletion idempotently
+  recoverable and replayable after a process crash. Individual deletion is also
+  recoverable. Retained descendants protect every lineage ancestor.
 - **Loops**: A **Loop** block repeats every block up to its matching **End Loop** a configurable number of times. Nested loops are supported and the loop body is indented (with a continuous nesting rail) so the structure is readable at a glance. A live iteration badge (`2/3`) tracks progress during a run, unbalanced loop markers are flagged inline (dashed outline + tooltip) and summarized in a banner, and the engine still runs safely by skipping broken markers.
 - **Drag-to-Position Editing**: Blocks dragged from the palette land exactly where they are dropped (with a live insertion-line preview); they can still be reordered afterward by their drag handles.
 - **Templates**: A **🧩 Templates** picker provides pre-built workflows (including a Loop example) as one-click starting points.

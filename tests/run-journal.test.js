@@ -109,6 +109,9 @@ function makeJournal(options = {}) {
       recordMaxBytes: options.recordMaxBytes,
       writeRecord: options.writeRecord,
       writeMigrationBackup: options.writeMigrationBackup,
+      writeRetentionTransaction: options.writeRetentionTransaction,
+      writeRetentionReceipts: options.writeRetentionReceipts,
+      writeDeleteTransaction: options.writeDeleteTransaction,
       deleteRecord: options.deleteRecord,
       deleteMigrationBackup: options.deleteMigrationBackup,
       deleteLegacyIndex: options.deleteLegacyIndex,
@@ -1805,6 +1808,153 @@ test('completed run requires terminal block visits and active runs alone are und
   assert.deepEqual(await journal.listRuns(), { runs: [], nextCursor: null, total: 0 });
 });
 
+test('individual deletion recovers record-first cleanup across every durable boundary', async t => {
+  const scenarios = [
+    ['delete-transaction', 'before', false, true],
+    ['delete-transaction', 'after', true, false],
+    ['delete-record', 'before', true, false],
+    ['delete-record', 'after', true, false],
+    ['delete-backup', 'before', true, false],
+    ['delete-backup', 'after', true, false],
+    ['delete-commit', 'before', true, false],
+    ['delete-commit', 'after', false, false],
+  ];
+  for (const [kind, phase, recovered, remains] of scenarios) {
+    await t.test(`${kind} ${phase}`, async () => {
+      const fixture = await makeV1Fixture();
+      const journal = makeJournal({ dir: fixture.dir }).journal;
+      await journal.migrateV1Records();
+      await journal.finishRun({
+        runId: fixture.run.id,
+        status: RUN_STATUS.CANCELLED,
+        opId: 'delete-crash-finish',
+      });
+      const recordFile = path.join(fixture.dir, `${fixture.run.id}.json`);
+      const backupFile = path.join(
+        fixture.dir,
+        '.migration',
+        'v1',
+        `${fixture.run.id}.json`
+      );
+      let injected = false;
+      journal.onMutationBoundary = event => {
+        if (!injected && event.kind === kind && event.phase === phase) {
+          injected = true;
+          throw new Error(`crash:${kind}:${phase}`);
+        }
+      };
+      await assert.rejects(
+        journal.deleteRun({ runId: fixture.run.id, opId: 'delete-crash' }),
+        new RegExp(`crash:${kind}:${phase}`)
+      );
+      assert.equal(injected, true);
+
+      const restarted = makeJournal({ dir: fixture.dir }).journal;
+      const recovery = await restarted.recoverDelete();
+      assert.equal(recovery.recovered, recovered);
+      assert.equal(fs.existsSync(recordFile), remains);
+      assert.equal(fs.existsSync(backupFile), remains);
+      if (!remains) assert.equal(recovery.result, true);
+      assert.deepEqual(await restarted.recoverDelete(), {
+        recovered: false,
+        result: remains ? null : true,
+      });
+    });
+  }
+});
+
+test('an applying individual deletion blocks run admission and mutations until recovery', async () => {
+  const created = makeJournal();
+  const target = await startRun(created.journal);
+  await created.journal.finishRun({
+    runId: target.id,
+    status: RUN_STATUS.CANCELLED,
+    opId: 'delete-pending-finish',
+  });
+  const active = await created.journal.startRun({
+    workflow: workflow({ id: 'wf-delete-pending-active', name: 'Delete pending active' }),
+    trigger: { kind: 'manual' },
+    opId: 'delete-pending-active-start',
+  });
+  let injected = false;
+  created.journal.onMutationBoundary = event => {
+    if (!injected && event.kind === 'delete-transaction' && event.phase === 'after') {
+      injected = true;
+      throw new Error('crash:delete-pending');
+    }
+  };
+  await assert.rejects(
+    created.journal.deleteRun({ runId: target.id, opId: 'delete-pending' }),
+    /crash:delete-pending/
+  );
+  await assert.rejects(
+    created.journal.startRun({
+      workflow: workflow({ id: 'wf-delete-pending-new', name: 'Delete pending new' }),
+      trigger: { kind: 'manual' },
+      opId: 'delete-pending-new-start',
+    }),
+    error => error instanceof RunJournalError && error.code === 'delete-incomplete'
+  );
+  await assert.rejects(
+    created.journal.startBlock({
+      runId: active.id,
+      opId: 'delete-pending-mutation',
+      block: { id: 'blk-prompt', index: 0, type: 'prompt', iterationPath: [] },
+    }),
+    error => error instanceof RunJournalError && error.code === 'delete-incomplete'
+  );
+
+  const restarted = makeJournal({ dir: created.dir }).journal;
+  assert.deepEqual(await restarted.recoverDelete(), { recovered: true, result: true });
+  const visit = await restarted.startBlock({
+    runId: active.id,
+    opId: 'delete-pending-mutation',
+    block: { id: 'blk-prompt', index: 0, type: 'prompt', iterationPath: [] },
+  });
+  assert.equal(visit.status, BLOCK_STATUS.RUNNING);
+});
+
+test('individual deletion removes the canonical record before its migration backup', async () => {
+  const fixture = await makeV1Fixture();
+  const journal = makeJournal({ dir: fixture.dir }).journal;
+  await journal.migrateV1Records();
+  await journal.finishRun({
+    runId: fixture.run.id,
+    status: RUN_STATUS.CANCELLED,
+    opId: 'delete-order-finish',
+  });
+  const order = [];
+  journal.deleteRecord = file => {
+    order.push('record');
+    fs.unlinkSync(file);
+  };
+  journal.deleteMigrationBackup = file => {
+    order.push('backup');
+    fs.unlinkSync(file);
+  };
+  assert.equal(await journal.deleteRun({
+    runId: fixture.run.id,
+    opId: 'delete-order',
+  }), true);
+  assert.deepEqual(order, ['record', 'backup']);
+});
+
+test('a restored canonical record is visible to a later explicit deletion', async () => {
+  const { journal, dir } = makeJournal();
+  const run = await startRun(journal);
+  await journal.finishRun({
+    runId: run.id,
+    status: RUN_STATUS.CANCELLED,
+    opId: 'tombstone-finish',
+  });
+  const file = path.join(dir, `${run.id}.json`);
+  const durable = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(await journal.deleteRun({ runId: run.id, opId: 'tombstone-delete' }), true);
+  writeJsonAtomic(file, durable);
+  assert.equal(await journal.deleteRun({ runId: run.id, opId: 'tombstone-delete-restored' }), true);
+  assert.equal(fs.existsSync(file), false);
+});
+
 test('recoverInterrupted atomically terminals active runs and is idempotent', async () => {
   const { journal } = makeJournal();
   const active = await startRun(journal);
@@ -1922,8 +2072,12 @@ test('recoverInterrupted sweeps valid active runs then rejects an unreadable sca
       && !error.message.includes('unknown.json')
     )
   );
-  assert.equal((await journal.getRun(active.id)).status, RUN_STATUS.INTERRUPTED);
   assert.deepEqual(reports, [['unknown.json', 'SyntaxError']]);
+  assert.equal((await journal.getRun(active.id)).status, RUN_STATUS.INTERRUPTED);
+  assert.deepEqual(reports, [
+    ['unknown.json', 'SyntaxError'],
+    ['unknown.json', 'SyntaxError'],
+  ]);
 });
 
 test('recoverInterrupted tolerates an active record removed after its scan', async () => {
@@ -2179,6 +2333,856 @@ test('retention previews exact terminal candidates, rejects stale plans, and nev
   assert.equal((await journal.getRun(active.id)).status, RUN_STATUS.RUNNING);
   const remaining = await journal.listRuns();
   assert.deepEqual(remaining.runs.map(run => run.id), [active.id]);
+});
+
+test('retention derives destructive plans from canonical records instead of a valid stale index', async () => {
+  const { journal, dir } = makeJournal();
+  const first = await startRun(journal);
+  await journal.finishRun({
+    runId: first.id,
+    status: RUN_STATUS.COMPLETED,
+    opId: 'canonical-finish-first',
+  });
+  const second = await journal.startRun({
+    workflow: workflow({ id: 'wf-canonical-second', name: 'Canonical second' }),
+    trigger: { kind: 'manual' },
+    opId: 'canonical-start-second',
+  });
+  await journal.finishRun({
+    runId: second.id,
+    status: RUN_STATUS.COMPLETED,
+    opId: 'canonical-finish-second',
+  });
+  await journal.listRuns();
+  fs.writeFileSync(path.join(dir, `${first.id}.json`), '{broken', 'utf8');
+
+  await assert.rejects(
+    journal.pruneRuns({ maxRuns: 1, preview: true }),
+    error => (
+      error instanceof RunJournalError
+      && error.code === 'retention-source-uncertain'
+    )
+  );
+  await assert.rejects(
+    journal.deleteRun({ runId: second.id, opId: 'canonical-delete-second' }),
+    error => (
+      error instanceof RunJournalError
+      && error.code === 'retention-source-uncertain'
+    )
+  );
+  assert.equal(fs.existsSync(path.join(dir, `${second.id}.json`)), true);
+});
+
+test('retention confirmation requires an opaque unexpired preview from this process', async () => {
+  const created = makeJournal();
+  for (let index = 0; index < 2; index += 1) {
+    const run = await created.journal.startRun({
+      workflow: workflow({ id: `wf-preview-${index}`, name: `Preview ${index}` }),
+      trigger: { kind: 'manual' },
+      opId: `preview-start-${index}`,
+    });
+    await created.journal.finishRun({
+      runId: run.id,
+      status: RUN_STATUS.COMPLETED,
+      opId: `preview-finish-${index}`,
+    });
+  }
+  const preview = await created.journal.pruneRuns({ maxRuns: 1, preview: true });
+  assert.match(preview.previewToken, /^[a-f0-9]{64}$/);
+
+  const restarted = makeJournal({ dir: created.dir }).journal;
+  await assert.rejects(
+    restarted.pruneRuns({
+      maxRuns: 1,
+      preview: false,
+      previewToken: preview.previewToken,
+      opId: 'preview-restarted',
+    }),
+    error => error instanceof RunJournalError && error.code === 'prune-preview-stale'
+  );
+  await assert.rejects(
+    created.journal.pruneRuns({
+      maxAgeDays: 1,
+      preview: false,
+      cutoff: '9999-12-31T23:59:59.999Z',
+      previewToken: preview.previewToken,
+      opId: 'preview-forged-cutoff',
+    }),
+    error => error instanceof RunJournalError && error.code === 'prune-preview-stale'
+  );
+  await assert.rejects(
+    created.journal.pruneRuns({
+      maxRuns: 1,
+      preview: false,
+      previewToken: 'a'.repeat(64),
+      opId: 'preview-forged-token',
+    }),
+    error => error instanceof RunJournalError && error.code === 'prune-preview-stale'
+  );
+  assert.equal((await created.journal.listRuns()).total, 2);
+});
+
+test('retention confirmation rejects an expired process-local preview', async () => {
+  let timestamp = Date.parse('2026-07-30T00:00:00.000Z');
+  const created = makeJournal({ now: () => new Date(timestamp) });
+  for (let index = 0; index < 2; index += 1) {
+    const run = await created.journal.startRun({
+      workflow: workflow({ id: `wf-expiry-${index}`, name: `Expiry ${index}` }),
+      trigger: { kind: 'manual' },
+      opId: `expiry-start-${index}`,
+    });
+    await created.journal.finishRun({
+      runId: run.id,
+      status: RUN_STATUS.COMPLETED,
+      opId: `expiry-finish-${index}`,
+    });
+    timestamp += 1000;
+  }
+  const preview = await created.journal.pruneRuns({ maxRuns: 1, preview: true });
+  timestamp += 10 * 60 * 1000 + 1;
+
+  await assert.rejects(
+    created.journal.pruneRuns({
+      maxRuns: 1,
+      preview: false,
+      previewToken: preview.previewToken,
+      opId: 'expiry-prune',
+    }),
+    error => error instanceof RunJournalError && error.code === 'prune-preview-stale'
+  );
+  assert.equal((await created.journal.listRuns()).total, 2);
+});
+
+test('validated transaction caching detects a later coordination-file change', async () => {
+  const created = makeJournal();
+  for (let index = 0; index < 2; index += 1) {
+    const run = await created.journal.startRun({
+      workflow: workflow({ id: `wf-cache-${index}`, name: `Cache ${index}` }),
+      trigger: { kind: 'manual' },
+      opId: `cache-start-${index}`,
+    });
+    await created.journal.finishRun({
+      runId: run.id,
+      status: RUN_STATUS.COMPLETED,
+      opId: `cache-finish-${index}`,
+    });
+  }
+  const preview = await created.journal.pruneRuns({ maxRuns: 1, preview: true });
+  await created.journal.pruneRuns({
+    maxRuns: 1,
+    preview: false,
+    previewToken: preview.previewToken,
+    opId: 'cache-prune',
+  });
+  const transactionFile = path.join(created.dir, '.retention', 'prune-v1.json');
+  const originalOpenSync = fs.openSync;
+  let transactionReads = 0;
+  fs.openSync = (file, flags, ...args) => {
+    if (path.resolve(String(file)) === path.resolve(transactionFile) && flags === 'r') {
+      transactionReads += 1;
+    }
+    return originalOpenSync(file, flags, ...args);
+  };
+  try {
+    const active = await created.journal.startRun({
+      workflow: workflow({ id: 'wf-cache-active', name: 'Cache active' }),
+      trigger: { kind: 'manual' },
+      opId: 'cache-active-start',
+    });
+    const visit = await created.journal.startBlock({
+      runId: active.id,
+      opId: 'cache-visit-start',
+      block: { id: 'blk-prompt', index: 0, type: 'prompt', iterationPath: [] },
+    });
+    assert.equal(transactionReads, 1, 'unchanged coordination state is parsed once');
+    fs.writeFileSync(transactionFile, '{broken', 'utf8');
+
+    await assert.rejects(
+      created.journal.finishBlock({
+        runId: active.id,
+        visitId: visit.visitId,
+        status: BLOCK_STATUS.COMPLETED,
+        opId: 'cache-visit-finish',
+      }),
+      error => error instanceof RunJournalError && error.code === 'corrupt-retention'
+    );
+    assert.equal(transactionReads, 2, 'changed coordination state is re-read');
+  } finally {
+    fs.openSync = originalOpenSync;
+  }
+});
+
+test('confirmed retention recovers idempotently across every durable mutation boundary', async t => {
+  const scenarios = [
+    ['prune-transaction', 'before', false, 3],
+    ['prune-transaction', 'after', true, 1],
+    ['prune-apply', 'before', true, 1],
+    ['prune-apply', 'after', true, 1],
+    ['prune-record', 'before', true, 1],
+    ['prune-record', 'after', true, 1],
+    ['prune-backup', 'before', true, 1],
+    ['prune-backup', 'after', true, 1],
+    ['prune-commit', 'before', true, 1],
+    ['prune-commit', 'after', false, 1],
+    ['prune-receipt', 'before', false, 1],
+    ['prune-receipt', 'after', false, 1],
+  ];
+
+  for (const [kind, phase, recovered, expectedTotal] of scenarios) {
+    await t.test(`${kind} ${phase}`, async () => {
+      const created = makeJournal();
+      for (let index = 0; index < 3; index += 1) {
+        const run = await created.journal.startRun({
+          workflow: workflow({ id: `wf-crash-${index}`, name: `Crash ${index}` }),
+          trigger: { kind: 'manual' },
+          opId: `crash-start-${index}`,
+        });
+        await created.journal.finishRun({
+          runId: run.id,
+          status: RUN_STATUS.COMPLETED,
+          opId: `crash-finish-${index}`,
+        });
+      }
+      const preview = await created.journal.pruneRuns({ maxRuns: 1, preview: true });
+      let injected = false;
+      created.journal.onMutationBoundary = event => {
+        if (!injected && event.kind === kind && event.phase === phase) {
+          injected = true;
+          throw new Error(`crash:${kind}:${phase}`);
+        }
+      };
+      await assert.rejects(
+        created.journal.pruneRuns({
+          maxRuns: 1,
+          preview: false,
+          previewToken: preview.previewToken,
+          opId: 'crash-prune',
+        }),
+        new RegExp(`crash:${kind}:${phase}`)
+      );
+      assert.equal(injected, true);
+
+      const restarted = makeJournal({ dir: created.dir }).journal;
+      const recovery = await restarted.recoverPrune();
+      assert.equal(recovery.recovered, recovered);
+      if (kind === 'prune-transaction' && phase === 'before') {
+        assert.equal(recovery.result, null);
+      } else {
+        assert.equal(recovery.result.deletedCount, 2);
+      }
+      assert.equal((await restarted.listRuns()).total, expectedTotal);
+      const replay = await restarted.recoverPrune();
+      assert.deepEqual(replay, {
+        recovered: false,
+        result: recovery.result === null ? null : structuredClone(recovery.result),
+      });
+      if (recovery.result !== null) assert.notStrictEqual(replay.result, recovery.result);
+    });
+  }
+});
+
+test('partial multi-record delete failure leaves a recoverable retention intent', async () => {
+  const created = makeJournal();
+  for (let index = 0; index < 3; index += 1) {
+    const run = await created.journal.startRun({
+      workflow: workflow({ id: `wf-delete-${index}`, name: `Delete ${index}` }),
+      trigger: { kind: 'manual' },
+      opId: `delete-start-${index}`,
+    });
+    await created.journal.finishRun({
+      runId: run.id,
+      status: RUN_STATUS.COMPLETED,
+      opId: `delete-finish-${index}`,
+    });
+  }
+  const preview = await created.journal.pruneRuns({ maxRuns: 1, preview: true });
+  let deletes = 0;
+  created.journal.deleteRecord = file => {
+    deletes += 1;
+    if (deletes === 2) throw new Error('simulated delete failure');
+    fs.unlinkSync(file);
+  };
+  await assert.rejects(
+    created.journal.pruneRuns({
+      maxRuns: 1,
+      preview: false,
+      previewToken: preview.previewToken,
+      opId: 'delete-prune',
+    }),
+    error => error instanceof RunJournalError && error.code === 'storage-delete-failed'
+  );
+
+  const restarted = makeJournal({ dir: created.dir }).journal;
+  const recovery = await restarted.recoverPrune();
+  assert.equal(recovery.recovered, true);
+  assert.equal(recovery.result.deletedCount, 2);
+  assert.equal((await restarted.listRuns()).total, 1);
+  const receipt = fs.readFileSync(
+    path.join(created.dir, '.retention', 'prune-v1.json'),
+    'utf8'
+  );
+  assert.equal(receipt.includes('PRIVATE WORKFLOW BODY'), false);
+  assert.equal(receipt.includes('ciphertext'), false);
+  assert.equal(receipt.includes(created.dir), false);
+  assert.equal(JSON.parse(receipt).status, 'committed');
+});
+
+test('prepared retention detects candidate substitution before any deletion', async () => {
+  const created = makeJournal();
+  for (let index = 0; index < 2; index += 1) {
+    const run = await created.journal.startRun({
+      workflow: workflow({ id: `wf-integrity-${index}`, name: `Integrity ${index}` }),
+      trigger: { kind: 'manual' },
+      opId: `integrity-start-${index}`,
+    });
+    await created.journal.finishRun({
+      runId: run.id,
+      status: RUN_STATUS.COMPLETED,
+      opId: `integrity-finish-${index}`,
+    });
+  }
+  const preview = await created.journal.pruneRuns({ maxRuns: 1, preview: true });
+  created.journal.onMutationBoundary = event => {
+    if (event.kind === 'prune-transaction' && event.phase === 'after') {
+      throw new Error('crash:integrity-prepared');
+    }
+  };
+  await assert.rejects(
+    created.journal.pruneRuns({
+      maxRuns: 1,
+      preview: false,
+      previewToken: preview.previewToken,
+      opId: 'integrity-prune',
+    }),
+    /crash:integrity-prepared/
+  );
+  const transactionFile = path.join(created.dir, '.retention', 'prune-v1.json');
+  const transaction = JSON.parse(fs.readFileSync(transactionFile, 'utf8'));
+  const retainedId = (await created.journal.listRuns()).runs
+    .find(run => run.id !== transaction.candidates[0].id).id;
+  transaction.candidates[0].id = retainedId;
+  writeJsonAtomic(transactionFile, transaction);
+  let deletes = 0;
+  const guarded = makeJournal({
+    dir: created.dir,
+    deleteRecord() {
+      deletes += 1;
+    },
+  }).journal;
+  await assert.rejects(
+    guarded.recoverPrune(),
+    error => error instanceof RunJournalError && error.code === 'corrupt-retention'
+  );
+  assert.equal(deletes, 0);
+  assert.equal((await created.journal.listRuns()).total, 2);
+});
+
+test('retention serializes an in-flight candidate mutation before revalidating its preview', async () => {
+  const base = encryptionAdapter();
+  let releaseProof;
+  let reportPaused;
+  const paused = new Promise(resolve => { reportPaused = resolve; });
+  const proofGate = new Promise(resolve => { releaseProof = resolve; });
+  const encryption = {
+    ...base,
+    async encrypt(plaintext, context) {
+      if (context.kind === 'operation' && context.opId === 'race-review') {
+        reportPaused();
+        await proofGate;
+      }
+      return base.encrypt(plaintext, context);
+    },
+  };
+  const { journal, dir } = makeJournal({ encryption });
+  const source = await startRun(journal);
+  const visit = await startVisit(journal, source.id);
+  await journal.recoverInterrupted();
+  const newer = await journal.startRun({
+    workflow: workflow({ id: 'wf-race-newer', name: 'Race newer' }),
+    trigger: { kind: 'manual' },
+    opId: 'race-newer-start',
+  });
+  await journal.finishRun({
+    runId: newer.id,
+    status: RUN_STATUS.COMPLETED,
+    opId: 'race-newer-finish',
+  });
+  const sourceBefore = await journal.getRun(source.id);
+  const preview = await journal.pruneRuns({ maxRuns: 1, preview: true });
+  const mutation = journal.recordBoundaryDisposition({
+    runId: source.id,
+    sourceRevision: sourceBefore.revision,
+    visitId: visit.visitId,
+    disposition: BOUNDARY_DISPOSITION.ABORT,
+    opId: 'race-review',
+  });
+  await paused;
+  const prune = journal.pruneRuns({
+    maxRuns: 1,
+    preview: false,
+    previewToken: preview.previewToken,
+    opId: 'race-prune',
+  }).then(
+    value => ({ ok: true, value }),
+    error => ({ ok: false, error })
+  );
+  let pruneSettled = false;
+  prune.then(() => { pruneSettled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(pruneSettled, false, 'retention waits behind the mutation barrier');
+  releaseProof();
+  await mutation;
+  const pruneOutcome = await prune;
+  assert.equal(pruneOutcome.ok, false);
+  assert.equal(pruneOutcome.error.code, 'prune-preview-stale');
+  assert.equal(fs.existsSync(path.join(dir, `${source.id}.json`)), true);
+});
+
+test('bounded durable retention receipts replay older operations after later prunes', async () => {
+  const created = makeJournal();
+  for (let index = 0; index < 3; index += 1) {
+    const run = await created.journal.startRun({
+      workflow: workflow({ id: `wf-receipt-a-${index}`, name: `Receipt A ${index}` }),
+      trigger: { kind: 'manual' },
+      opId: `receipt-a-start-${index}`,
+    });
+    await created.journal.finishRun({
+      runId: run.id,
+      status: RUN_STATUS.COMPLETED,
+      opId: `receipt-a-finish-${index}`,
+    });
+  }
+  const previewA = await created.journal.pruneRuns({ maxRuns: 2, preview: true });
+  const resultA = await created.journal.pruneRuns({
+    maxRuns: 2,
+    preview: false,
+    previewToken: previewA.previewToken,
+    opId: 'receipt-prune-a',
+  });
+  for (let index = 0; index < 2; index += 1) {
+    const run = await created.journal.startRun({
+      workflow: workflow({ id: `wf-receipt-b-${index}`, name: `Receipt B ${index}` }),
+      trigger: { kind: 'manual' },
+      opId: `receipt-b-start-${index}`,
+    });
+    await created.journal.finishRun({
+      runId: run.id,
+      status: RUN_STATUS.COMPLETED,
+      opId: `receipt-b-finish-${index}`,
+    });
+  }
+  const previewB = await created.journal.pruneRuns({ maxRuns: 2, preview: true });
+  await created.journal.pruneRuns({
+    maxRuns: 2,
+    preview: false,
+    previewToken: previewB.previewToken,
+    opId: 'receipt-prune-b',
+  });
+
+  const restarted = makeJournal({ dir: created.dir }).journal;
+  assert.deepEqual(
+    await restarted.pruneRuns({
+      maxRuns: 2,
+      preview: false,
+      previewToken: previewA.previewToken,
+      opId: 'receipt-prune-a',
+    }),
+    resultA
+  );
+  await assert.rejects(
+    restarted.pruneRuns({
+      maxRuns: 1,
+      preview: false,
+      previewToken: previewA.previewToken,
+      opId: 'receipt-prune-a',
+    }),
+    error => error instanceof RunJournalError && error.code === 'op-conflict'
+  );
+  const receiptText = fs.readFileSync(
+    path.join(created.dir, '.retention', 'receipts-v1.json'),
+    'utf8'
+  );
+  const receipts = JSON.parse(receiptText).receipts;
+  assert.deepEqual(receipts.map(receipt => receipt.opId), [
+    'receipt-prune-a',
+    'receipt-prune-b',
+  ]);
+  assert.equal(receiptText.includes('PRIVATE WORKFLOW BODY'), false);
+  assert.equal(receiptText.includes('ciphertext'), false);
+  assert.equal(receiptText.includes(created.dir), false);
+});
+
+test('retention receipt eviction degrades replay to a non-destructive stale preview', async () => {
+  const created = makeJournal();
+  const policy = { maxRuns: 1, maxAgeDays: null, cutoff: null };
+  const receipts = [];
+  for (let index = 0; index < 128; index += 1) {
+    const previewToken = sha256(`receipt-token-${index}`);
+    const planDigest = sha256(`receipt-plan-${index}`);
+    receipts.push({
+      opId: `receipt-history-${index}`,
+      fingerprint: formerOperationFingerprint('prune-runs', {
+        policy,
+        previewToken,
+        planDigest,
+      }),
+      policy,
+      previewToken,
+      planDigest,
+      result: {
+        preview: false,
+        deletedCount: 0,
+        remainingCount: 0,
+        previewToken,
+      },
+      committedAt: '2026-07-30T00:00:00.000Z',
+    });
+  }
+  const retentionDir = path.join(created.dir, '.retention');
+  fs.mkdirSync(retentionDir, { recursive: true });
+  writeJsonAtomic(path.join(retentionDir, 'receipts-v1.json'), {
+    schemaVersion: 1,
+    receipts,
+  });
+  for (let index = 0; index < 2; index += 1) {
+    const run = await created.journal.startRun({
+      workflow: workflow({ id: `wf-receipt-limit-${index}`, name: `Limit ${index}` }),
+      trigger: { kind: 'manual' },
+      opId: `receipt-limit-start-${index}`,
+    });
+    await created.journal.finishRun({
+      runId: run.id,
+      status: RUN_STATUS.COMPLETED,
+      opId: `receipt-limit-finish-${index}`,
+    });
+  }
+  const preview = await created.journal.pruneRuns({ maxRuns: 1, preview: true });
+  await created.journal.pruneRuns({
+    maxRuns: 1,
+    preview: false,
+    previewToken: preview.previewToken,
+    opId: 'receipt-limit-prune',
+  });
+  const stored = JSON.parse(fs.readFileSync(
+    path.join(retentionDir, 'receipts-v1.json'),
+    'utf8'
+  ));
+  assert.equal(stored.receipts.length, 128);
+  assert.equal(stored.receipts.some(receipt => receipt.opId === 'receipt-history-0'), false);
+
+  const evicted = receipts[0];
+  const restarted = makeJournal({ dir: created.dir }).journal;
+  await assert.rejects(
+    restarted.pruneRuns({
+      maxRuns: 1,
+      preview: false,
+      previewToken: evicted.previewToken,
+      opId: evicted.opId,
+    }),
+    error => error instanceof RunJournalError && error.code === 'prune-preview-stale'
+  );
+  assert.equal((await restarted.listRuns()).total, 1);
+});
+
+test('a stale prepared intent aborts safely and blocks candidate mutation beforehand', async t => {
+  for (const phase of ['before', 'after']) {
+    await t.test(`prune-abort ${phase}`, async () => {
+      const created = makeJournal();
+      for (let index = 0; index < 2; index += 1) {
+        const run = await created.journal.startRun({
+          workflow: workflow({ id: `wf-abort-${index}`, name: `Abort ${index}` }),
+          trigger: { kind: 'manual' },
+          opId: `abort-start-${index}`,
+        });
+        await created.journal.finishRun({
+          runId: run.id,
+          status: RUN_STATUS.COMPLETED,
+          opId: `abort-finish-${index}`,
+        });
+      }
+      const preview = await created.journal.pruneRuns({ maxRuns: 1, preview: true });
+      let prepared = false;
+      created.journal.onMutationBoundary = event => {
+        if (!prepared && event.kind === 'prune-transaction' && event.phase === 'after') {
+          prepared = true;
+          throw new Error('crash:prepared');
+        }
+      };
+      await assert.rejects(
+        created.journal.pruneRuns({
+          maxRuns: 1,
+          preview: false,
+          previewToken: preview.previewToken,
+          opId: 'abort-prune',
+        }),
+        /crash:prepared/
+      );
+      const transactionFile = path.join(created.dir, '.retention', 'prune-v1.json');
+      const transaction = JSON.parse(fs.readFileSync(transactionFile, 'utf8'));
+      const candidate = transaction.candidates[0];
+      await assert.rejects(
+        created.journal.startBlock({
+          runId: candidate.id,
+          opId: 'abort-candidate-mutation',
+          block: { id: 'blk-prompt', index: 0, type: 'prompt', iterationPath: [] },
+        }),
+        error => error instanceof RunJournalError && error.code === 'prune-incomplete'
+      );
+      await assert.rejects(
+        created.journal.startRun({
+          workflow: workflow({ id: 'wf-pending-prune', name: 'Pending prune' }),
+          trigger: { kind: 'manual' },
+          opId: 'pending-prune-start',
+        }),
+        error => error instanceof RunJournalError && error.code === 'prune-incomplete'
+      );
+
+      const recordFile = path.join(created.dir, `${candidate.id}.json`);
+      const record = JSON.parse(fs.readFileSync(recordFile, 'utf8'));
+      record.revision += 1;
+      writeJsonAtomic(recordFile, record);
+      let aborted = false;
+      const recovering = makeJournal({
+        dir: created.dir,
+        onMutationBoundary(event) {
+          if (!aborted && event.kind === 'prune-abort' && event.phase === phase) {
+            aborted = true;
+            throw new Error(`crash:prune-abort:${phase}`);
+          }
+        },
+      }).journal;
+      await assert.rejects(
+        recovering.recoverPrune(),
+        new RegExp(`crash:prune-abort:${phase}`)
+      );
+      const restarted = makeJournal({ dir: created.dir }).journal;
+      const recovery = await restarted.recoverPrune();
+      assert.equal(recovery.recovered, phase === 'before');
+      assert.equal(recovery.result.aborted, true);
+      assert.equal(recovery.result.deletedCount, 0);
+      assert.equal((await restarted.listRuns()).total, 2);
+      const nextPreview = await restarted.pruneRuns({ maxRuns: 1, preview: true });
+      assert.equal(nextPreview.candidateCount, 1);
+    });
+  }
+});
+
+test('a corrupt retention transaction fails journal admission and destructive entry points closed', async () => {
+  const created = makeJournal();
+  const run = await startRun(created.journal);
+  await created.journal.finishRun({
+    runId: run.id,
+    status: RUN_STATUS.COMPLETED,
+    opId: 'corrupt-retention-finish',
+  });
+  const active = await created.journal.startRun({
+    workflow: workflow({ id: 'wf-corrupt-active', name: 'Corrupt active' }),
+    trigger: { kind: 'manual' },
+    opId: 'corrupt-active-start',
+  });
+  const retentionDir = path.join(created.dir, '.retention');
+  fs.mkdirSync(retentionDir, { recursive: true });
+  fs.writeFileSync(path.join(retentionDir, 'prune-v1.json'), '{broken', 'utf8');
+  const guarded = makeJournal({ dir: created.dir }).journal;
+  for (const operation of [
+    () => guarded.recoverPrune(),
+    () => guarded.pruneRuns({ maxRuns: 1, preview: true }),
+    () => guarded.deleteRun({ runId: run.id, opId: 'corrupt-retention-delete' }),
+    () => guarded.startRun({
+      workflow: workflow({ id: 'wf-corrupt-retention', name: 'Corrupt retention' }),
+      trigger: { kind: 'manual' },
+      opId: 'corrupt-retention-start',
+    }),
+    () => guarded.startBlock({
+      runId: active.id,
+      opId: 'corrupt-retention-mutation',
+      block: { id: 'blk-prompt', index: 0, type: 'prompt', iterationPath: [] },
+    }),
+  ]) {
+    await assert.rejects(
+      operation(),
+      error => error instanceof RunJournalError && error.code === 'corrupt-retention'
+    );
+  }
+  assert.equal(fs.existsSync(path.join(created.dir, `${run.id}.json`)), true);
+});
+
+test('lineage validation rejects malformed graphs and retention preserves ancestors', async () => {
+  const valid = makeJournal();
+  const root = await startRun(valid.journal);
+  await valid.journal.finishRun({
+    runId: root.id,
+    status: RUN_STATUS.COMPLETED,
+    opId: 'lineage-root-finish',
+  });
+  const rootFile = path.join(valid.dir, `${root.id}.json`);
+  const child = JSON.parse(fs.readFileSync(rootFile, 'utf8'));
+  child.id = '11111111-1111-4111-8111-111111111112';
+  child.rootRunId = root.id;
+  child.parentRunId = root.id;
+  child.attempt = 2;
+  child.startedAt = '2026-07-30T00:00:01.500Z';
+  child.updatedAt = '2026-07-30T00:00:01.750Z';
+  child.finishedAt = '2026-07-30T00:00:01.750Z';
+  writeJsonAtomic(path.join(valid.dir, `${child.id}.json`), child);
+
+  const reopened = makeJournal({ dir: valid.dir }).journal;
+  const preview = await reopened.pruneRuns({ maxRuns: 1, preview: true });
+  assert.equal(preview.candidateCount, 0);
+  assert.equal(preview.protectedAncestorCount, 1);
+  await assert.rejects(
+    reopened.deleteRun({ runId: root.id, opId: 'lineage-delete-root' }),
+    error => error instanceof RunJournalError && error.code === 'lineage-retained'
+  );
+  assert.equal(await reopened.deleteRun({ runId: child.id, opId: 'lineage-delete-child' }), true);
+  assert.equal(await reopened.deleteRun({ runId: root.id, opId: 'lineage-delete-root' }), true);
+
+  const malformed = makeJournal();
+  const malformedRoot = await startRun(malformed.journal);
+  await malformed.journal.finishRun({
+    runId: malformedRoot.id,
+    status: RUN_STATUS.COMPLETED,
+    opId: 'malformed-root-finish',
+  });
+  const malformedChild = JSON.parse(fs.readFileSync(
+    path.join(malformed.dir, `${malformedRoot.id}.json`),
+    'utf8'
+  ));
+  malformedChild.id = '22222222-2222-4222-8222-222222222223';
+  malformedChild.rootRunId = malformedRoot.id;
+  malformedChild.parentRunId = malformedRoot.id;
+  malformedChild.attempt = 3;
+  malformedChild.startedAt = '2026-07-31T00:00:00.000Z';
+  malformedChild.updatedAt = '2026-07-31T00:00:01.000Z';
+  malformedChild.finishedAt = '2026-07-31T00:00:01.000Z';
+  writeJsonAtomic(path.join(malformed.dir, `${malformedChild.id}.json`), malformedChild);
+  const reports = [];
+  const guarded = makeJournal({
+    dir: malformed.dir,
+    onError: (file, error) => reports.push([file, error.code]),
+  }).journal;
+  assert.equal(await guarded.getRun(malformedChild.id), null);
+  assert.equal(await guarded.getResult({
+    runId: malformedChild.id,
+    resultId: '66666666-6666-4666-8666-666666666667',
+  }), null);
+  await assert.rejects(
+    guarded.preflightResume({
+      runId: malformedChild.id,
+      sourceRevision: malformedChild.revision,
+    }),
+    error => error instanceof RunJournalError && error.code === 'not-found'
+  );
+  await assert.rejects(
+    guarded.startBlock({
+      runId: malformedChild.id,
+      opId: 'malformed-child-mutation',
+      block: { id: 'blk-prompt', index: 0, type: 'prompt', iterationPath: [] },
+    }),
+    error => error instanceof RunJournalError && error.code === 'not-found'
+  );
+  assert.deepEqual(reports, [
+    [`${malformedChild.id}.json`, 'corrupt-run'],
+    [`${malformedChild.id}.json`, 'corrupt-run'],
+    [`${malformedChild.id}.json`, 'corrupt-run'],
+    [`${malformedChild.id}.json`, 'corrupt-run'],
+  ]);
+  await assert.rejects(
+    guarded.pruneRuns({ maxRuns: 1, preview: true }),
+    error => (
+      error instanceof RunJournalError
+      && error.code === 'retention-source-uncertain'
+    )
+  );
+  assert.deepEqual(reports, [
+    [`${malformedChild.id}.json`, 'corrupt-run'],
+    [`${malformedChild.id}.json`, 'corrupt-run'],
+    [`${malformedChild.id}.json`, 'corrupt-run'],
+    [`${malformedChild.id}.json`, 'corrupt-run'],
+    [`${malformedChild.id}.json`, 'corrupt-run'],
+  ]);
+});
+
+test('retention deletes descendants before ancestors and rejects duplicate attempts', async () => {
+  const created = makeJournal();
+  const root = await startRun(created.journal);
+  await created.journal.finishRun({
+    runId: root.id,
+    status: RUN_STATUS.COMPLETED,
+    opId: 'lineage-order-root-finish',
+  });
+  const rootFile = path.join(created.dir, `${root.id}.json`);
+  const child = JSON.parse(fs.readFileSync(rootFile, 'utf8'));
+  child.id = '33333333-3333-4333-8333-333333333334';
+  child.rootRunId = root.id;
+  child.parentRunId = root.id;
+  child.attempt = 2;
+  child.startedAt = '2026-07-30T00:00:01.500Z';
+  child.updatedAt = '2026-07-30T00:00:01.750Z';
+  child.finishedAt = '2026-07-30T00:00:01.750Z';
+  writeJsonAtomic(path.join(created.dir, `${child.id}.json`), child);
+  const retained = await created.journal.startRun({
+    workflow: workflow({ id: 'wf-lineage-retained', name: 'Lineage retained' }),
+    trigger: { kind: 'manual' },
+    opId: 'lineage-order-retained-start',
+  });
+  await created.journal.finishRun({
+    runId: retained.id,
+    status: RUN_STATUS.COMPLETED,
+    opId: 'lineage-order-retained-finish',
+  });
+
+  const deleted = [];
+  const ordered = makeJournal({
+    dir: created.dir,
+    deleteRecord(file) {
+      deleted.push(path.basename(file, '.json'));
+      fs.unlinkSync(file);
+    },
+  }).journal;
+  const preview = await ordered.pruneRuns({ maxRuns: 1, preview: true });
+  assert.equal(preview.candidateCount, 2);
+  await ordered.pruneRuns({
+    maxRuns: 1,
+    preview: false,
+    previewToken: preview.previewToken,
+    opId: 'lineage-order-prune',
+  });
+  assert.deepEqual(deleted, [child.id, root.id]);
+  assert.deepEqual((await ordered.listRuns()).runs.map(run => run.id), [retained.id]);
+
+  const duplicate = makeJournal();
+  const duplicateRoot = await startRun(duplicate.journal);
+  await duplicate.journal.finishRun({
+    runId: duplicateRoot.id,
+    status: RUN_STATUS.COMPLETED,
+    opId: 'duplicate-root-finish',
+  });
+  const duplicateRootFile = path.join(duplicate.dir, `${duplicateRoot.id}.json`);
+  const duplicateChild = JSON.parse(fs.readFileSync(duplicateRootFile, 'utf8'));
+  duplicateChild.rootRunId = duplicateRoot.id;
+  duplicateChild.parentRunId = duplicateRoot.id;
+  duplicateChild.attempt = 2;
+  duplicateChild.startedAt = '2026-07-31T00:00:00.000Z';
+  duplicateChild.updatedAt = '2026-07-31T00:00:01.000Z';
+  duplicateChild.finishedAt = '2026-07-31T00:00:01.000Z';
+  for (const id of [
+    '44444444-4444-4444-8444-444444444445',
+    '55555555-5555-4555-8555-555555555556',
+  ]) {
+    writeJsonAtomic(path.join(duplicate.dir, `${id}.json`), {
+      ...structuredClone(duplicateChild),
+      id,
+    });
+  }
+  const guarded = makeJournal({ dir: duplicate.dir }).journal;
+  await assert.rejects(
+    guarded.pruneRuns({ maxRuns: 1, preview: true }),
+    error => (
+      error instanceof RunJournalError
+      && error.code === 'retention-source-uncertain'
+    )
+  );
 });
 
 test('oversized journal files are skipped before parsing and reports stay path-free', async () => {
@@ -2447,13 +3451,38 @@ test('exceeding operation capacity mid-run degrades to a truncated no-op journal
     block: { id: 'blk-prompt', index: 0, type: 'prompt', iterationPath: [] },
   });
   assert.equal(degradedVisit.truncated, true);
+  assert.equal(degradedVisit.durable, false);
   assert.equal(degradedVisit.status, BLOCK_STATUS.RUNNING);
   assert.equal(degradedVisit.blockId, 'blk-prompt');
+  const degradedReplay = await journal.startBlock({
+    runId,
+    opId: 'op-over-capacity',
+    block: { id: 'blk-prompt', index: 0, type: 'prompt', iterationPath: [] },
+  });
+  assert.deepEqual(degradedReplay, degradedVisit);
+  const conflictingDegraded = await journal.startBlock({
+    runId,
+    opId: 'op-over-capacity',
+    block: { id: 'blk-other', index: 0, type: 'prompt', iterationPath: [] },
+  });
+  assert.equal(conflictingDegraded.durable, false);
+  assert.notEqual(conflictingDegraded.visitId, degradedVisit.visitId);
 
   const afterTruncation = await journal.getRun(runId);
   assert.equal(afterTruncation.status, RUN_STATUS.RUNNING);
   assert.equal(afterTruncation.truncated.reason, 'operation-capacity');
   assert.equal(afterTruncation.blocks.length, 0, 'the over-capacity visit is not recorded');
+  await assert.rejects(
+    journal.storeControlCheckpoint({
+      runId,
+      sourceRevision: afterTruncation.revision,
+      afterVisitId: degradedVisit.visitId,
+      state: checkpointState(),
+      opId: 'op-truncated-checkpoint',
+    }),
+    error => error instanceof RunJournalError && error.code === 'invalid-state'
+  );
+  assert.equal((await journal.getRun(runId)).controlCheckpointCount, 0);
 
   const laterVisit = await journal.startBlock({
     runId,
@@ -2461,6 +3490,7 @@ test('exceeding operation capacity mid-run degrades to a truncated no-op journal
     block: { id: 'blk-prompt', index: 0, type: 'prompt', iterationPath: [] },
   });
   assert.equal(laterVisit.truncated, true);
+  assert.equal(laterVisit.durable, false);
   const laterResult = await journal.storeResult({
     runId,
     producerBlockId: 'blk-prompt',
@@ -2472,6 +3502,19 @@ test('exceeding operation capacity mid-run degrades to a truncated no-op journal
     opId: 'op-late-result',
   });
   assert.equal(laterResult.truncated, true);
+  assert.equal(laterResult.durable, false);
+  assert.equal(laterResult.storage, null);
+  const replayedResult = await journal.storeResult({
+    runId,
+    producerBlockId: 'blk-prompt',
+    visitId: degradedVisit.visitId,
+    name: 'late',
+    status: 'complete',
+    lanes: [{ laneId: 'lane-a' }],
+    body: 'dropped body',
+    opId: 'op-late-result',
+  });
+  assert.deepEqual(replayedResult, laterResult);
   const unchanged = await journal.getRun(runId);
   assert.equal(unchanged.blocks.length, 0);
   assert.equal(unchanged.results.length, 0);
@@ -2495,6 +3538,7 @@ test('exceeding operation capacity mid-run degrades to a truncated no-op journal
 test('record capacity truncates mid-run and finishRun still records terminal state', async () => {
   const { journal, run, visit, second } = await journalTruncatedByRecordCapacity();
   assert.equal(second.truncated, true);
+  assert.equal(second.durable, false);
   assert.equal(second.status, BLOCK_STATUS.RUNNING);
 
   const truncatedRun = await journal.getRun(run.id);
@@ -2509,6 +3553,7 @@ test('record capacity truncates mid-run and finishRun still records terminal sta
     opId: 'op-block-finish',
   });
   assert.equal(closed.truncated, true);
+  assert.equal(closed.durable, false);
   assert.equal(closed.status, BLOCK_STATUS.COMPLETED);
 
   const finished = await journal.finishRun({

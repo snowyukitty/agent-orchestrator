@@ -196,6 +196,19 @@ not execution authority. Recording it advances the source revision and thereby
 invalidates an older preflight. A future receipt-authorized child must still
 record its own chosen disposition under the confirmation contract below.
 
+The same data-layer checkpoint hardens evidence retention before any child can
+exist. Destructive previews are derived from a complete validation of canonical
+run records, not the public index. A confirmed multi-record prune persists one
+path-free intent and replays descendant-first deletion after a crash; retained
+descendants protect their ancestors. Cross-record lineage validation rejects a
+missing root, a missing or wrong-attempt parent, duplicate attempt siblings, and
+descendants of an invalid parent. The preview token is random, process-local,
+and expires after ten minutes; durable, bounded retention receipts carry no
+execution authority. Individual deletion also records a recoverable intent and
+removes canonical evidence before its migration backup. Capacity-degraded calls
+expose deterministic `durable: false` identities, never label a dropped result
+body as stored evidence, and cannot add a protected control checkpoint.
+
 Machine-local paths, environment values, commands, prompts, result bodies,
 session output, and account homes stay out of public checkpoint metadata.
 Checkpoint protection uses the same context-bound encrypted envelope pattern

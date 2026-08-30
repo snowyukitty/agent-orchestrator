@@ -17,6 +17,21 @@ the product story; this file keeps the history.
   checkpoints with no plaintext fallback; and audit an explicit `abort`,
   `skip`, or `retry` disposition for an uncertain boundary. No confirmation
   receipt, child-run creation, or resume execution path ships with this layer.
+- **Crash-recoverable retention**: destructive previews now come from validated
+  canonical run records rather than the derived index. The short-lived preview
+  token is opaque and process-local. Confirmation first writes a path-free
+  retention intent; startup can idempotently finish that exact deletion after
+  a crash at any record, backup, commit, or receipt boundary. Bounded durable
+  receipts preserve operation replay across later prunes and restarts.
+  Individual deletion uses the same recoverable record-first ordering.
+  Descendants are removed before ancestors, and retained descendants protect
+  their lineage from pruning or individual deletion.
+- **Truthful truncated-mode identities**: capacity-degraded block/result calls
+  return deterministic, explicitly non-durable identities for the exact call.
+  A changed payload produces a different synthetic identity instead of a
+  durable replay claim. Dropped result bodies no longer pretend to have
+  memory-backed journal storage, and truncated runs cannot accept protected
+  control checkpoints.
 
 - **Readable UI text**: the smallest interface labels moved off a 9px floor.
   Block type labels, parameter labels, run statuses, buttons, and the security

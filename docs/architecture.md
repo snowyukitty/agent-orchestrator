@@ -42,8 +42,8 @@ testable:
   termination, and public session metadata;
 - `run-journal.js` owns protected run records, deliberate schema migration,
   public lineage and boundary-review facts, encrypted control checkpoints, the
-  rebuildable public-metadata index, stable cursor pages, and preview-first
-  terminal-run retention;
+  rebuildable public-metadata index, stable cursor pages, and canonical-source,
+  crash-recoverable terminal-run retention;
 - `resume-evidence.js` classifies whether interrupted-run metadata is blocked,
   needs a decision, or contains a recorded boundary; it never authorizes
   execution;
@@ -103,7 +103,26 @@ App-owned data lives under `%APPDATA%/agent-orchestrator`:
   marker (never ciphertext or result bodies);
 - `run-journal/.migration/v1/` for rollback copies retained by the explicit,
   idempotent v1-to-v2 journal migration;
+- `run-journal/.retention/prune-v1.json` for one bounded, path-free confirmed
+  prune intent and its latest terminal state;
+- `run-journal/.retention/receipts-v1.json` for a bounded history of public-safe
+  prune operation receipts;
+- `run-journal/.retention/delete-v1.json` for one recoverable individual-delete
+  intent and its terminal state;
 - `workflows/*.json` for saved workflows.
+
+Listing may trust the rebuildable index, but destructive retention never does.
+It scans and validates every canonical run, rejects an unknowable record, and
+protects the ancestors of every retained descendant. A preview token is random,
+short-lived, and held only by the current main process. Confirmation atomically
+persists the exact candidate IDs, revisions, policy, and plan digest before the
+first deletion. Records are then removed descendant-first, migration backups
+second, and durable operation receipts last; startup can replay an accepted
+transaction idempotently. Individual deletion likewise persists intent before
+removing the canonical record, then removes its migration backup. Invalid
+transaction state fails journal admission closed; invalid receipt state fails
+retention closed. Neither is automatically quarantined because an unreadable
+coordination file may represent a human-confirmed deletion still in progress.
 
 On the first singular build, valid app-owned JSON is copied from the historical
 plural directory through a staging directory and atomically promoted. Chromium

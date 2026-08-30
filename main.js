@@ -674,6 +674,36 @@ if (!gotSingleInstanceLock) {
         const code = typeof error?.code === 'string' ? error.code : 'migration-error';
         console.warn(`[Journal] migration failed (${code})`);
       }
+      if (!journalInitializationError) {
+        try {
+          const deletion = await runJournal.recoverDelete();
+          if (deletion.recovered) {
+            console.log('[Journal] recovered a confirmed run deletion');
+          }
+        } catch (error) {
+          journalInitializationError = error;
+          const code = typeof error?.code === 'string' ? error.code : 'delete-recovery-error';
+          console.warn(`[Journal] delete recovery failed (${code})`);
+        }
+      }
+      if (!journalInitializationError) {
+        try {
+          const retention = await runJournal.recoverPrune();
+          if (retention.recovered) {
+            if (retention.result.aborted) {
+              console.warn('[Journal] discarded a stale retention intent before deletion began');
+            } else {
+              console.log(
+                `[Journal] recovered a confirmed retention transaction (${retention.result.deletedCount} run(s))`
+              );
+            }
+          }
+        } catch (error) {
+          journalInitializationError = error;
+          const code = typeof error?.code === 'string' ? error.code : 'retention-recovery-error';
+          console.warn(`[Journal] retention recovery failed (${code})`);
+        }
+      }
       try {
         const interrupted = await runJournal.recoverInterrupted();
         if (interrupted.length) {

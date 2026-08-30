@@ -114,12 +114,21 @@ const RUN_INDEX_DIRECTORY = '.index';
 const RUN_INDEX_FILE = 'runs-v2.json';
 const RUN_INDEX_DIRTY_FILE = 'dirty-v2.json';
 const LEGACY_RUN_INDEX_FILES = Object.freeze(['runs-v1.json', 'dirty-v1.json']);
+const RETENTION_DIRECTORY = '.retention';
+const RETENTION_TRANSACTION_FILE = 'prune-v1.json';
+const RETENTION_RECEIPTS_FILE = 'receipts-v1.json';
+const DELETE_TRANSACTION_FILE = 'delete-v1.json';
+const RETENTION_TRANSACTION_SCHEMA_VERSION = 1;
 const MIGRATION_DIRECTORY = '.migration';
 const V1_MIGRATION_DIRECTORY = 'v1';
 const MAX_RUN_INDEX_BYTES = 128 * 1024 * 1024;
+const MAX_RETENTION_TRANSACTION_BYTES = 64 * 1024 * 1024;
+const MAX_RETENTION_RECEIPTS_BYTES = 1024 * 1024;
+const MAX_RETENTION_RECEIPTS = 128;
 const MAX_RUN_INDEX_ENTRIES = 250_000;
 const MAX_RETENTION_RUNS = 1_000_000;
 const MAX_RETENTION_AGE_DAYS = 36_500;
+const RETENTION_PREVIEW_TTL_MS = 10 * 60 * 1000;
 const MAX_BLOCK_VISITS = 10_000;
 const MAX_RESULTS = 4096;
 const MAX_OPERATIONS = 25_000;
@@ -150,6 +159,16 @@ const BLOCK_TERMINAL_VALUES = new Set(BLOCK_TERMINAL_STATES);
 const BLOCK_FINISH_VALUES = new Set(BLOCK_FINISH_STATES);
 const RESULT_STATUS_VALUES = new Set(Object.values(RESULT_STATUS));
 const BOUNDARY_DISPOSITION_VALUES = new Set(Object.values(BOUNDARY_DISPOSITION));
+const RETENTION_TRANSACTION_STATUS = Object.freeze({
+  PREPARED: 'prepared',
+  APPLYING: 'applying',
+  COMMITTED: 'committed',
+  ABORTED: 'aborted',
+});
+const DELETE_TRANSACTION_STATUS = Object.freeze({
+  APPLYING: 'applying',
+  COMMITTED: 'committed',
+});
 const OPERATION_ACTIONS = new Set([
   'start-run',
   'start-block',
@@ -463,6 +482,27 @@ function stableJson(value, what = 'value') {
 
 function sha256(value) {
   return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function isRetentionPending(transaction) {
+  return transaction?.status === RETENTION_TRANSACTION_STATUS.PREPARED
+    || transaction?.status === RETENTION_TRANSACTION_STATUS.APPLYING;
+}
+
+function isRetentionTerminal(transaction) {
+  return transaction?.status === RETENTION_TRANSACTION_STATUS.COMMITTED
+    || transaction?.status === RETENTION_TRANSACTION_STATUS.ABORTED;
+}
+
+function deterministicUuid(value) {
+  const digest = sha256(value);
+  return [
+    digest.slice(0, 8),
+    digest.slice(8, 12),
+    `4${digest.slice(13, 16)}`,
+    `8${digest.slice(17, 20)}`,
+    digest.slice(20, 32),
+  ].join('-');
 }
 
 function normalizeEncryptionContext(context) {
@@ -1112,6 +1152,68 @@ function assertLineage(record, runId, what) {
   }
 }
 
+function lineageGraphErrors(records, code) {
+  const byId = new Map(records.map(record => [record.id, record]));
+  const errors = new Map();
+  const reject = (record, message) => {
+    if (!errors.has(record.id)) {
+      errors.set(record.id, new RunJournalError(message, code));
+    }
+  };
+
+  for (const record of records) {
+    if (record.attempt === 1) continue;
+    const root = byId.get(record.rootRunId);
+    const parent = byId.get(record.parentRunId);
+    if (!root || root.attempt !== 1 || root.rootRunId !== root.id || root.parentRunId !== null) {
+      reject(record, 'Run lineage root is missing or invalid');
+      continue;
+    }
+    if (
+      !parent
+      || parent.rootRunId !== record.rootRunId
+      || parent.attempt !== record.attempt - 1
+      || !RUN_TERMINAL_VALUES.has(parent.status)
+    ) {
+      reject(record, 'Run lineage parent is missing or invalid');
+    }
+  }
+
+  const attempts = new Map();
+  for (const record of records) {
+    const key = `${record.rootRunId}:${record.attempt}`;
+    const group = attempts.get(key) || [];
+    group.push(record);
+    attempts.set(key, group);
+  }
+  for (const group of attempts.values()) {
+    if (group.length < 2) continue;
+    for (const record of group) {
+      reject(record, 'Run lineage repeats an attempt number');
+    }
+  }
+
+  // A locally well-shaped child still belongs to an invalid graph when its
+  // parent was rejected. Propagate that fact from roots toward descendants.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const record of records) {
+      if (record.attempt === 1 || errors.has(record.id)) continue;
+      if (errors.has(record.parentRunId)) {
+        reject(record, 'Run lineage descends from an invalid parent');
+        changed = true;
+      }
+    }
+  }
+  return errors;
+}
+
+function assertLineageGraph(records, code) {
+  const errors = lineageGraphErrors(records, code);
+  if (errors.size) throw errors.values().next().value;
+}
+
 function assertMigrationMetadata(migration, what) {
   if (migration === null) return;
   asObject(migration, what);
@@ -1334,6 +1436,293 @@ function assertRunIndex(index) {
     ) {
       throw new RunJournalError('Run index order is invalid', 'corrupt-index');
     }
+  }
+  assertLineageGraph(index.runs, 'corrupt-index');
+}
+
+function assertRetentionPolicy(policy, what) {
+  asObject(policy, what);
+  assertOnlyKeys(policy, new Set(['maxRuns', 'maxAgeDays', 'cutoff']), what);
+  if (policy.maxRuns !== null) {
+    asPositiveInt(policy.maxRuns, `${what} maxRuns`, { max: MAX_RETENTION_RUNS });
+  }
+  if (policy.maxAgeDays !== null) {
+    asPositiveInt(policy.maxAgeDays, `${what} maxAgeDays`, {
+      max: MAX_RETENTION_AGE_DAYS,
+    });
+    if (!isIsoTimestamp(policy.cutoff)) {
+      throw new RunJournalError(`${what} cutoff is invalid`, 'corrupt-retention');
+    }
+  } else if (policy.cutoff !== null) {
+    throw new RunJournalError(`${what} cutoff is unexpected`, 'corrupt-retention');
+  }
+  if (policy.maxRuns === null && policy.maxAgeDays === null) {
+    throw new RunJournalError(`${what} has no limit`, 'corrupt-retention');
+  }
+}
+
+function assertRetentionTransaction(transaction) {
+  asObject(transaction, 'retention transaction');
+  assertOnlyKeys(
+    transaction,
+    new Set([
+      'schemaVersion',
+      'status',
+      'opId',
+      'fingerprint',
+      'policy',
+      'previewToken',
+      'planDigest',
+      'candidates',
+      'startedAt',
+      'committedAt',
+      'result',
+    ]),
+    'retention transaction'
+  );
+  if (transaction.schemaVersion !== RETENTION_TRANSACTION_SCHEMA_VERSION) {
+    throw new RunJournalError(
+      'Retention transaction schema is unsupported',
+      'corrupt-retention'
+    );
+  }
+  if (!Object.values(RETENTION_TRANSACTION_STATUS).includes(transaction.status)) {
+    throw new RunJournalError('Retention transaction status is invalid', 'corrupt-retention');
+  }
+  asOpId(transaction.opId);
+  asText(transaction.fingerprint, 'retention transaction fingerprint', {
+    maxBytes: 64,
+    trim: true,
+    pattern: PREVIEW_TOKEN_PATTERN,
+  });
+  assertRetentionPolicy(transaction.policy, 'retention transaction policy');
+  asText(transaction.previewToken, 'retention transaction preview token', {
+    maxBytes: 64,
+    trim: true,
+    pattern: PREVIEW_TOKEN_PATTERN,
+  });
+  asText(transaction.planDigest, 'retention transaction plan digest', {
+    maxBytes: 64,
+    trim: true,
+    pattern: PREVIEW_TOKEN_PATTERN,
+  });
+  if (
+    !Array.isArray(transaction.candidates)
+    || transaction.candidates.length > MAX_RUN_INDEX_ENTRIES
+  ) {
+    throw new RunJournalError('Retention transaction candidates are invalid', 'corrupt-retention');
+  }
+  const ids = new Set();
+  for (const candidate of transaction.candidates) {
+    asObject(candidate, 'retention transaction candidate');
+    assertOnlyKeys(
+      candidate,
+      new Set(['id', 'revision']),
+      'retention transaction candidate'
+    );
+    const id = asRunId(candidate.id, 'retention transaction candidate id');
+    asPositiveInt(candidate.revision, 'retention transaction candidate revision');
+    if (ids.has(id)) {
+      throw new RunJournalError(
+        'Retention transaction repeats a candidate',
+        'corrupt-retention'
+      );
+    }
+    ids.add(id);
+  }
+  const expectedPlanDigest = retentionPlanDigest(
+    transaction.policy,
+    transaction.candidates
+  );
+  const expectedFingerprint = operationFingerprint('prune-runs', {
+    policy: transaction.policy,
+    previewToken: transaction.previewToken,
+    planDigest: expectedPlanDigest,
+  });
+  if (
+    transaction.planDigest !== expectedPlanDigest
+    || transaction.fingerprint !== expectedFingerprint
+  ) {
+    throw new RunJournalError(
+      'Retention transaction integrity is invalid',
+      'corrupt-retention'
+    );
+  }
+  if (!isIsoTimestamp(transaction.startedAt)) {
+    throw new RunJournalError('Retention transaction timestamp is invalid', 'corrupt-retention');
+  }
+  if (
+    transaction.status === RETENTION_TRANSACTION_STATUS.PREPARED
+    || transaction.status === RETENTION_TRANSACTION_STATUS.APPLYING
+  ) {
+    if (transaction.committedAt !== null || transaction.result !== null) {
+      throw new RunJournalError('Pending retention transaction is invalid', 'corrupt-retention');
+    }
+    return;
+  }
+  if (!isIsoTimestamp(transaction.committedAt)) {
+    throw new RunJournalError('Retention commit timestamp is invalid', 'corrupt-retention');
+  }
+  asObject(transaction.result, 'retention transaction result');
+  assertOnlyKeys(
+    transaction.result,
+    new Set(['preview', 'deletedCount', 'remainingCount', 'previewToken', 'aborted']),
+    'retention transaction result'
+  );
+  if (transaction.result.preview !== false) {
+    throw new RunJournalError('Retention transaction result is invalid', 'corrupt-retention');
+  }
+  asNonNegativeInt(
+    transaction.result.deletedCount,
+    'retention transaction deleted count',
+    { max: MAX_RUN_INDEX_ENTRIES }
+  );
+  asNonNegativeInt(
+    transaction.result.remainingCount,
+    'retention transaction remaining count',
+    { max: MAX_RUN_INDEX_ENTRIES }
+  );
+  if (transaction.result.previewToken !== transaction.previewToken) {
+    throw new RunJournalError('Retention transaction result does not match', 'corrupt-retention');
+  }
+  if (transaction.status === RETENTION_TRANSACTION_STATUS.ABORTED) {
+    if (transaction.result.deletedCount !== 0 || transaction.result.aborted !== true) {
+      throw new RunJournalError('Retention abort result is invalid', 'corrupt-retention');
+    }
+  } else if (
+    transaction.status !== RETENTION_TRANSACTION_STATUS.COMMITTED
+    || transaction.result.deletedCount !== transaction.candidates.length
+    || transaction.result.aborted !== undefined
+  ) {
+    throw new RunJournalError('Retention commit result is invalid', 'corrupt-retention');
+  }
+}
+
+function assertRetentionReceiptIndex(index) {
+  asObject(index, 'retention receipt index');
+  assertOnlyKeys(index, new Set(['schemaVersion', 'receipts']), 'retention receipt index');
+  if (index.schemaVersion !== RETENTION_TRANSACTION_SCHEMA_VERSION) {
+    throw new RunJournalError('Retention receipt schema is unsupported', 'corrupt-retention');
+  }
+  if (!Array.isArray(index.receipts) || index.receipts.length > MAX_RETENTION_RECEIPTS) {
+    throw new RunJournalError('Retention receipt count is invalid', 'corrupt-retention');
+  }
+  const operationIds = new Set();
+  for (const receipt of index.receipts) {
+    asObject(receipt, 'retention receipt');
+    assertOnlyKeys(
+      receipt,
+      new Set([
+        'opId',
+        'fingerprint',
+        'policy',
+        'previewToken',
+        'planDigest',
+        'result',
+        'committedAt',
+      ]),
+      'retention receipt'
+    );
+    const opId = asOpId(receipt.opId);
+    if (operationIds.has(opId)) {
+      throw new RunJournalError('Retention receipt repeats an operation id', 'corrupt-retention');
+    }
+    operationIds.add(opId);
+    assertRetentionPolicy(receipt.policy, 'retention receipt policy');
+    for (const [value, what] of [
+      [receipt.fingerprint, 'retention receipt fingerprint'],
+      [receipt.previewToken, 'retention receipt preview token'],
+      [receipt.planDigest, 'retention receipt plan digest'],
+    ]) {
+      asText(value, what, {
+        maxBytes: 64,
+        trim: true,
+        pattern: PREVIEW_TOKEN_PATTERN,
+      });
+    }
+    if (receipt.fingerprint !== operationFingerprint('prune-runs', {
+      policy: receipt.policy,
+      previewToken: receipt.previewToken,
+      planDigest: receipt.planDigest,
+    })) {
+      throw new RunJournalError('Retention receipt integrity is invalid', 'corrupt-retention');
+    }
+    asObject(receipt.result, 'retention receipt result');
+    assertOnlyKeys(
+      receipt.result,
+      new Set(['preview', 'deletedCount', 'remainingCount', 'previewToken', 'aborted']),
+      'retention receipt result'
+    );
+    if (
+      receipt.result.preview !== false
+      || receipt.result.previewToken !== receipt.previewToken
+    ) {
+      throw new RunJournalError('Retention receipt result is invalid', 'corrupt-retention');
+    }
+    asNonNegativeInt(receipt.result.deletedCount, 'retention receipt deleted count', {
+      max: MAX_RUN_INDEX_ENTRIES,
+    });
+    asNonNegativeInt(receipt.result.remainingCount, 'retention receipt remaining count', {
+      max: MAX_RUN_INDEX_ENTRIES,
+    });
+    if (
+      Object.hasOwn(receipt.result, 'aborted')
+      && receipt.result.aborted !== true
+    ) {
+      throw new RunJournalError('Retention receipt abort marker is invalid', 'corrupt-retention');
+    }
+    if (receipt.result.aborted === true && receipt.result.deletedCount !== 0) {
+      throw new RunJournalError('Retention receipt abort count is invalid', 'corrupt-retention');
+    }
+    if (!isIsoTimestamp(receipt.committedAt)) {
+      throw new RunJournalError('Retention receipt timestamp is invalid', 'corrupt-retention');
+    }
+  }
+}
+
+function assertDeleteTransaction(transaction) {
+  asObject(transaction, 'delete transaction');
+  assertOnlyKeys(
+    transaction,
+    new Set([
+      'schemaVersion',
+      'status',
+      'runId',
+      'revision',
+      'opId',
+      'fingerprint',
+      'startedAt',
+      'committedAt',
+      'result',
+    ]),
+    'delete transaction'
+  );
+  if (transaction.schemaVersion !== RETENTION_TRANSACTION_SCHEMA_VERSION) {
+    throw new RunJournalError('Delete transaction schema is unsupported', 'corrupt-retention');
+  }
+  if (!Object.values(DELETE_TRANSACTION_STATUS).includes(transaction.status)) {
+    throw new RunJournalError('Delete transaction status is invalid', 'corrupt-retention');
+  }
+  const runId = asRunId(transaction.runId, 'delete transaction run id');
+  asPositiveInt(transaction.revision, 'delete transaction revision');
+  asOpId(transaction.opId);
+  asText(transaction.fingerprint, 'delete transaction fingerprint', {
+    maxBytes: 64,
+    trim: true,
+    pattern: PREVIEW_TOKEN_PATTERN,
+  });
+  if (transaction.fingerprint !== operationFingerprint('delete-run', { runId })) {
+    throw new RunJournalError('Delete transaction integrity is invalid', 'corrupt-retention');
+  }
+  if (!isIsoTimestamp(transaction.startedAt)) {
+    throw new RunJournalError('Delete transaction timestamp is invalid', 'corrupt-retention');
+  }
+  if (transaction.status === DELETE_TRANSACTION_STATUS.APPLYING) {
+    if (transaction.committedAt !== null || transaction.result !== null) {
+      throw new RunJournalError('Applying delete transaction is invalid', 'corrupt-retention');
+    }
+  } else if (!isIsoTimestamp(transaction.committedAt) || transaction.result !== true) {
+    throw new RunJournalError('Committed delete transaction is invalid', 'corrupt-retention');
   }
 }
 
@@ -2013,6 +2402,17 @@ function operationFingerprint(action, payload) {
   return sha256(stableJson({ action, payload }, `${action} operation`));
 }
 
+function retentionPlanDigest(policy, candidates) {
+  return sha256(stableJson({
+    version: 1,
+    policy,
+    candidates: candidates.map(candidate => ({
+      id: candidate.id,
+      revision: candidate.revision,
+    })),
+  }, 'retention preview'));
+}
+
 class RunJournal {
   constructor({
     dir,
@@ -2025,6 +2425,9 @@ class RunJournal {
     recordMaxBytes = MAX_RUN_RECORD_BYTES,
     writeRecord = writeJsonAtomic,
     writeMigrationBackup = writeJsonAtomic,
+    writeRetentionTransaction = writeJsonAtomic,
+    writeRetentionReceipts = writeJsonAtomic,
+    writeDeleteTransaction = writeJsonAtomic,
     deleteRecord = file => fs.unlinkSync(file),
     deleteMigrationBackup = file => fs.unlinkSync(file),
     deleteLegacyIndex = file => fs.unlinkSync(file),
@@ -2048,6 +2451,9 @@ class RunJournal {
     if (
       typeof writeRecord !== 'function'
       || typeof writeMigrationBackup !== 'function'
+      || typeof writeRetentionTransaction !== 'function'
+      || typeof writeRetentionReceipts !== 'function'
+      || typeof writeDeleteTransaction !== 'function'
       || typeof deleteRecord !== 'function'
       || typeof deleteMigrationBackup !== 'function'
       || typeof deleteLegacyIndex !== 'function'
@@ -2074,6 +2480,9 @@ class RunJournal {
     this.onError = onError;
     this.writeRecord = writeRecord;
     this.writeMigrationBackup = writeMigrationBackup;
+    this.writeRetentionTransaction = writeRetentionTransaction;
+    this.writeRetentionReceipts = writeRetentionReceipts;
+    this.writeDeleteTransaction = writeDeleteTransaction;
     this.deleteRecord = deleteRecord;
     this.deleteMigrationBackup = deleteMigrationBackup;
     this.deleteLegacyIndex = deleteLegacyIndex;
@@ -2084,14 +2493,16 @@ class RunJournal {
       maxEntries: memoryMaxEntries,
     });
     this._locks = new Map();
-    this._deleted = new Map();
     this._pruned = new Map();
+    this._retentionPreviews = new Map();
+    this._retentionTransactionCache = null;
+    this._deleteTransactionCache = null;
     this._index = null;
     this._indexEntries = new Map();
   }
 
   async migrateV1Records() {
-    return this._withLock('migration', async () => {
+    return this._withLock('retention', () => this._withLock('migration', async () => {
       let skippedCount = 0;
       let entries;
       try {
@@ -2235,7 +2646,7 @@ class RunJournal {
         removedLegacyIndexFiles: legacyIndexCleanup.removed,
         legacyIndexCleanupFailures: legacyIndexCleanup.failed,
       };
-    });
+    }));
   }
 
   async startRun(input) {
@@ -2250,7 +2661,10 @@ class RunJournal {
       trigger,
     });
 
-    return this._withLock('start', () => this._withLock('memory', async () => {
+    return this._withLock('retention', () => this._withLock(
+      'start',
+      () => this._withLock('memory', async () => {
+      this._assertNoPendingRetentionMutation();
       for (const run of this._loadAllRuns()) {
         const operation = run.operations.find(entry => entry.opId === opId);
         if (!operation) continue;
@@ -2321,7 +2735,8 @@ class RunJournal {
         throw error;
       }
       return publicRun(run);
-    }));
+      })
+    ));
   }
 
   async startBlock(input) {
@@ -2357,8 +2772,8 @@ class RunJournal {
         if (!visit) throw new RunJournalError('Replayed block visit is missing', 'corrupt-run');
         return publicBlock(visit);
       },
-      degraded: (run, at) => ({
-        visitId: this._newUuid(new Set(run.blocks.map(entry => entry.visitId))),
+      degraded: (run, at, context) => ({
+        visitId: context.id,
         blockId: block.blockId,
         blockIndex: block.blockIndex,
         blockType: block.blockType,
@@ -2369,6 +2784,7 @@ class RunJournal {
         finishedAt: null,
         reasonCode: null,
         truncated: true,
+        durable: false,
       }),
       apply: async (run, at) => {
         this._assertActive(run);
@@ -2438,7 +2854,7 @@ class RunJournal {
       degraded: (run, at) => {
         const visit = run.blocks.find(entry => entry.visitId === visitId);
         if (visit && visit.status !== BLOCK_STATUS.RUNNING) {
-          return { ...publicBlock(visit), truncated: true };
+          return { ...publicBlock(visit), truncated: true, durable: false };
         }
         return {
           visitId,
@@ -2452,6 +2868,7 @@ class RunJournal {
           finishedAt: at,
           reasonCode,
           truncated: true,
+          durable: false,
         };
       },
       apply: async (run, at) => {
@@ -2510,6 +2927,7 @@ class RunJournal {
       controls: true,
     });
     const byteLength = utf8ByteLength(body);
+    const opId = asOpId(raw.opId);
     const fingerprint = operationFingerprint('store-result', {
       producerBlockId,
       visitId,
@@ -2522,7 +2940,7 @@ class RunJournal {
 
     return this._mutate({
       runId,
-      opId: asOpId(raw.opId),
+      opId,
       action: 'store-result',
       fingerprint,
       replay: (run, operation) => {
@@ -2530,8 +2948,8 @@ class RunJournal {
         if (!result) throw new RunJournalError('Replayed result is missing', 'corrupt-run');
         return publicResult(result);
       },
-      degraded: (run, at) => ({
-        id: this._newUuid(new Set(run.results.map(entry => entry.id))),
+      degraded: (run, at, context) => ({
+        id: context.id,
         producerBlockId,
         visitId,
         name,
@@ -2539,8 +2957,9 @@ class RunJournal {
         lanes: clonePublic(lanes),
         createdAt: at,
         byteLength,
-        storage: STORAGE.MEMORY,
+        storage: null,
         truncated: true,
+        durable: false,
       }),
       apply: async (run, at) => {
         this._assertActive(run);
@@ -2639,6 +3058,12 @@ class RunJournal {
       },
       apply: async (run, at) => {
         this._assertActive(run);
+        if (run.truncated) {
+          throw new RunJournalError(
+            'A truncated run cannot accept a control checkpoint',
+            'invalid-state'
+          );
+        }
         if (run.revision !== sourceRevision) {
           throw new RunJournalError(
             'The source run changed before its control checkpoint was stored',
@@ -2885,6 +3310,48 @@ class RunJournal {
   }
 
   async pruneRuns(input) {
+    return this._withLock('retention', () => this._pruneRuns(input));
+  }
+
+  async recoverPrune() {
+    return this._withLock('retention', async () => {
+      const deletion = this._readDeleteTransaction();
+      if (deletion?.status === DELETE_TRANSACTION_STATUS.APPLYING) {
+        throw new RunJournalError(
+          'A confirmed delete transaction still needs recovery',
+          'delete-incomplete'
+        );
+      }
+      const transaction = this._readRetentionTransaction();
+      if (!transaction) return { recovered: false, result: null };
+      if (isRetentionTerminal(transaction)) {
+        this._recordRetentionReceipt(transaction);
+        return { recovered: false, result: clonePublic(transaction.result) };
+      }
+      const result = this._applyRetentionTransaction(transaction);
+      return { recovered: true, result };
+    });
+  }
+
+  async recoverDelete() {
+    return this._withLock('retention', async () => {
+      const transaction = this._readDeleteTransaction();
+      if (!transaction || transaction.status === DELETE_TRANSACTION_STATUS.COMMITTED) {
+        return { recovered: false, result: transaction?.result || null };
+      }
+      const result = this._applyDeleteTransaction(transaction);
+      return { recovered: true, result };
+    });
+  }
+
+  async _pruneRuns(input) {
+    const deletion = this._readDeleteTransaction();
+    if (deletion?.status === DELETE_TRANSACTION_STATUS.APPLYING) {
+      throw new RunJournalError(
+        'A confirmed delete transaction still needs recovery',
+        'delete-incomplete'
+      );
+    }
     const raw = input === undefined || input === null
       ? {}
       : asObject(input, 'pruneRuns payload');
@@ -2941,16 +3408,24 @@ class RunJournal {
     }
 
     const policy = { maxRuns, maxAgeDays, cutoff };
-    const index = this._ensureIndex();
-    const plan = this._retentionPlan(index, policy);
-    const previewToken = this._retentionPreviewToken(policy, plan.candidates);
+    const transaction = this._readRetentionTransaction();
     if (preview) {
+      if (isRetentionPending(transaction)) {
+        throw new RunJournalError(
+          'A confirmed retention transaction still needs recovery',
+          'prune-incomplete'
+        );
+      }
+      const snapshot = this._retentionSnapshot();
+      const plan = this._retentionPlan(snapshot.index, policy);
+      const previewToken = this._issueRetentionPreview(policy, plan.candidates);
       return {
         preview: true,
         candidateCount: plan.candidates.length,
         terminalCount: plan.terminalCount,
         activeCount: plan.activeCount,
-        total: index.runs.length,
+        protectedAncestorCount: plan.protectedAncestorCount,
+        total: snapshot.index.runs.length,
         cutoff,
         previewToken,
       };
@@ -2962,12 +3437,63 @@ class RunJournal {
       pattern: PREVIEW_TOKEN_PATTERN,
     });
     const opId = asOpId(raw.opId);
-    const fingerprint = operationFingerprint('prune-runs', {
-      policy,
-      previewToken: suppliedToken,
-    });
+    if (transaction?.opId === opId) {
+      const fingerprint = operationFingerprint('prune-runs', {
+        policy,
+        previewToken: suppliedToken,
+        planDigest: transaction.planDigest,
+      });
+      if (transaction.fingerprint !== fingerprint) {
+        throw new RunJournalError(
+          'Operation id was reused with a different retention plan',
+          'op-conflict'
+        );
+      }
+      if (isRetentionTerminal(transaction)) {
+        this._recordRetentionReceipt(transaction);
+        this._rememberPrune(opId, {
+          fingerprint,
+          planDigest: transaction.planDigest,
+          result: transaction.result,
+        });
+        return clonePublic(transaction.result);
+      }
+      return this._applyRetentionTransaction(transaction);
+    }
+    if (isRetentionPending(transaction)) {
+      throw new RunJournalError(
+        'A confirmed retention transaction still needs recovery',
+        'prune-incomplete'
+      );
+    }
+    if (isRetentionTerminal(transaction)) this._recordRetentionReceipt(transaction);
+    const durableReplay = this._findRetentionReceipt(opId);
+    if (durableReplay) {
+      const fingerprint = operationFingerprint('prune-runs', {
+        policy,
+        previewToken: suppliedToken,
+        planDigest: durableReplay.planDigest,
+      });
+      if (durableReplay.fingerprint !== fingerprint) {
+        throw new RunJournalError(
+          'Operation id was reused with a different retention plan',
+          'op-conflict'
+        );
+      }
+      this._rememberPrune(opId, {
+        fingerprint,
+        planDigest: durableReplay.planDigest,
+        result: durableReplay.result,
+      });
+      return clonePublic(durableReplay.result);
+    }
     const replay = this._pruned.get(opId);
     if (replay) {
+      const fingerprint = operationFingerprint('prune-runs', {
+        policy,
+        previewToken: suppliedToken,
+        planDigest: replay.planDigest,
+      });
       if (replay.fingerprint !== fingerprint) {
         throw new RunJournalError(
           'Operation id was reused with a different retention plan',
@@ -2976,64 +3502,39 @@ class RunJournal {
       }
       return clonePublic(replay.result);
     }
-    if (suppliedToken !== previewToken) {
-      throw new RunJournalError(
-        'Run history changed after the retention preview; preview again',
-        'prune-preview-stale'
-      );
-    }
 
-    // Validate every source record before deleting the first one. Terminal
-    // records are immutable, and this synchronous commit leaves no event-loop
-    // gap between validation and deletion.
-    const records = [];
-    for (const summary of plan.candidates) {
-      const run = this._readRun(summary.id, { throwOnError: true });
-      if (
-        !run
-        || !RUN_TERMINAL_VALUES.has(run.status)
-        || run.revision !== summary.revision
-      ) {
-        throw new RunJournalError(
-          'Run history changed after the retention preview; preview again',
-          'prune-preview-stale'
-        );
-      }
-      records.push(run);
-    }
-
-    this._markIndexDirty();
-    const deletedIds = new Set();
-    try {
-      for (const run of records) {
-        this._deleteV1MigrationBackup(run.id);
-        this.deleteRecord(this._filePath(run.id));
-        deletedIds.add(run.id);
-        this.memory.deletePrefix(`workflow:${run.id}`);
-        this.memory.deletePrefix(`result:${run.id}:`);
-        this.memory.deletePrefix(`operation:${run.id}:`);
-        this._rememberDeletion(run.id, { opId, fingerprint });
-      }
-    } catch (_error) {
-      this._clearIndex();
-      throw new RunJournalError(
-        'Run Journal retention could not delete every selected record; preview again',
-        'storage-delete-failed'
-      );
-    }
-
-    const nextIndex = makeSummaryIndex(
-      index.runs.filter(summary => !deletedIds.has(summary.id))
-    );
-    this._persistIndex(nextIndex);
-    const result = {
-      preview: false,
-      deletedCount: deletedIds.size,
-      remainingCount: nextIndex.runs.length,
+    const snapshot = this._retentionSnapshot();
+    const plan = this._retentionPlan(snapshot.index, policy);
+    this._assertRetentionPreview(suppliedToken, policy, plan.candidates);
+    const previewToken = suppliedToken;
+    const planDigest = this._retentionPlanDigest(policy, plan.candidates);
+    const fingerprint = operationFingerprint('prune-runs', {
+      policy,
       previewToken,
+      planDigest,
+    });
+
+    const prepared = {
+      schemaVersion: RETENTION_TRANSACTION_SCHEMA_VERSION,
+      status: RETENTION_TRANSACTION_STATUS.PREPARED,
+      opId,
+      fingerprint,
+      policy,
+      previewToken,
+      planDigest,
+      candidates: plan.candidates.map(summary => ({
+        id: summary.id,
+        revision: summary.revision,
+      })),
+      startedAt: this._timestamp(),
+      committedAt: null,
+      result: null,
     };
-    this._rememberPrune(opId, { fingerprint, result });
-    return clonePublic(result);
+    this._mutationBoundary('prune-transaction', 'before', null);
+    this._writeRetentionTransaction(prepared);
+    this._retentionPreviews.delete(previewToken);
+    this._mutationBoundary('prune-transaction', 'after', null);
+    return this._applyRetentionTransaction(prepared);
   }
 
   async getRun(input) {
@@ -3044,7 +3545,7 @@ class RunJournal {
         assertOnlyKeys(raw, new Set(['runId']), 'getRun payload');
         return asRunId(raw.runId);
       })();
-    const run = this._readRun(runId);
+    const run = this._loadAllRuns().find(entry => entry.id === runId) || null;
     return run ? publicRun(run) : null;
   }
 
@@ -3066,8 +3567,8 @@ class RunJournal {
     const runId = asRunId(raw.runId);
     const sourceRevision = asPositiveInt(raw.sourceRevision, 'sourceRevision');
 
-    return this._withLock(`run:${runId}`, async () => {
-      const run = this._readRun(runId);
+    return this._withLock('retention', () => this._withLock(`run:${runId}`, async () => {
+      const run = this._readRunWithLineage(runId);
       if (!run) throw new RunJournalError('Run was not found', 'not-found');
       if (run.revision !== sourceRevision) {
         throw new RunJournalError(
@@ -3082,7 +3583,7 @@ class RunJournal {
         resolveProfile,
         isDirectory,
       });
-    });
+    }));
   }
 
   async getResult(input) {
@@ -3090,13 +3591,15 @@ class RunJournal {
     assertOnlyKeys(raw, new Set(['runId', 'resultId']), 'getResult payload');
     const runId = asRunId(raw.runId);
     const resultId = asRunId(raw.resultId, 'resultId');
-    const run = this._readRun(runId);
-    if (!run) return null;
-    const result = run.results.find(entry => entry.id === resultId);
-    if (!result) return null;
+    return this._withLock('retention', () => this._withLock(`run:${runId}`, async () => {
+      const run = this._readRunWithLineage(runId);
+      if (!run) return null;
+      const result = run.results.find(entry => entry.id === resultId);
+      if (!result) return null;
 
-    const body = await this._readResultBody(run, result);
-    return { ...publicResult(result), body };
+      const body = await this._readResultBody(run, result);
+      return { ...publicResult(result), body };
+    }));
   }
 
   async _readWorkflowSnapshot(run) {
@@ -3258,12 +3761,16 @@ class RunJournal {
   }
 
   async recoverInterrupted() {
+    return this._withLock('retention', () => this._recoverInterrupted());
+  }
+
+  async _recoverInterrupted() {
     const recovered = [];
     let failureCount = 0;
     // Recovery already has to validate every durable record to contain an
     // unknown active run. Reuse that one sweep to refresh the derived index,
     // rather than making the first Runs view pay a second full scan.
-    this._markIndexDirty({ required: false });
+    this._markIndexDirty();
     this._clearIndex();
     // A record rejected by the initial scan could itself be a durable active
     // run. Recover every valid candidate we can, then fail containment closed
@@ -3330,50 +3837,61 @@ class RunJournal {
     const runId = asRunId(raw.runId);
     const opId = asOpId(raw.opId);
     const fingerprint = operationFingerprint('delete-run', { runId });
-    return this._withLock(`run:${runId}`, () => this._withLock('memory', async () => {
-      const tombstone = this._deleted.get(runId);
-      if (tombstone) {
-        if (tombstone.opId === opId && tombstone.fingerprint !== fingerprint) {
+    return this._withLock('retention', () => this._withLock(
+      `run:${runId}`,
+      () => this._withLock('memory', async () => {
+        const deletion = this._readDeleteTransaction();
+        if (deletion?.status === DELETE_TRANSACTION_STATUS.APPLYING) {
+          if (
+            deletion.runId === runId
+            && deletion.opId === opId
+            && deletion.fingerprint === fingerprint
+          ) {
+            return this._applyDeleteTransaction(deletion);
+          }
           throw new RunJournalError(
-            'Conflicting reuse of an operation id for a deleted run',
-            'op-conflict'
+            'A confirmed delete transaction still needs recovery',
+            'delete-incomplete'
           );
         }
-        return false;
-      }
-      const run = this._readRun(runId);
-      if (!run) return false;
-      const prior = run.operations.find(operation => operation.opId === opId);
-      if (prior) await this._assertReplay(run, prior, 'delete-run', fingerprint);
-      if (run.status === RUN_STATUS.RUNNING) {
-        throw new RunJournalError('An active run cannot be deleted', 'active-run');
-      }
-      const index = this._prepareIndexMutation();
-      this._markIndexDirty();
-      try {
-        this._deleteV1MigrationBackup(runId);
-        this.deleteRecord(this._filePath(runId));
-      } catch (error) {
-        this._clearIndex();
-        if (error?.code === 'ENOENT') return false;
-        throw new RunJournalError(
-          'Run Journal record could not be deleted',
-          'storage-delete-failed'
-        );
-      }
-      this.memory.deletePrefix(`workflow:${runId}`);
-      this.memory.deletePrefix(`result:${runId}:`);
-      this.memory.deletePrefix(`operation:${runId}:`);
-      this._rememberDeletion(runId, { opId, fingerprint });
-      if (index) {
-        this._persistIndex(makeSummaryIndex(
-          index.runs.filter(summary => summary.id !== runId)
-        ));
-      } else {
-        this._clearIndex();
-      }
-      return true;
-    }));
+        const retention = this._readRetentionTransaction();
+        if (isRetentionPending(retention)) {
+          throw new RunJournalError(
+            'A confirmed retention transaction still needs recovery',
+            'prune-incomplete'
+          );
+        }
+        const snapshot = this._retentionSnapshot();
+        const run = snapshot.runs.find(entry => entry.id === runId) || null;
+        if (!run) return false;
+        const prior = run.operations.find(operation => operation.opId === opId);
+        if (prior) await this._assertReplay(run, prior, 'delete-run', fingerprint);
+        if (run.status === RUN_STATUS.RUNNING) {
+          throw new RunJournalError('An active run cannot be deleted', 'active-run');
+        }
+        if (snapshot.runs.some(entry => entry.parentRunId === runId)) {
+          throw new RunJournalError(
+            'A run with retained descendants cannot be deleted',
+            'lineage-retained'
+          );
+        }
+        const prepared = {
+          schemaVersion: RETENTION_TRANSACTION_SCHEMA_VERSION,
+          status: DELETE_TRANSACTION_STATUS.APPLYING,
+          runId,
+          revision: run.revision,
+          opId,
+          fingerprint,
+          startedAt: this._timestamp(),
+          committedAt: null,
+          result: null,
+        };
+        this._mutationBoundary('delete-transaction', 'before', runId);
+        this._writeDeleteTransaction(prepared);
+        this._mutationBoundary('delete-transaction', 'after', runId);
+        return this._applyDeleteTransaction(prepared);
+      })
+    ));
   }
 
   async _mutate({
@@ -3386,8 +3904,11 @@ class RunJournal {
     apply,
     degraded,
   }) {
-    return this._withLock(`run:${runId}`, () => this._withLock('memory', async () => {
-      const run = this._readRun(runId);
+    return this._withLock('retention', () => this._withLock(
+      `run:${runId}`,
+      () => this._withLock('memory', async () => {
+      this._assertNoPendingRetentionMutation();
+      const run = this._readRunWithLineage(runId);
       if (!run) throw new RunJournalError('Run was not found', 'not-found');
       const operation = run.operations.find(entry => entry.opId === opId);
       if (operation) {
@@ -3398,7 +3919,12 @@ class RunJournal {
       // successful no-op: the workflow keeps running while the journal keeps
       // only what it recorded before capacity was reached.
       if (run.truncated && degraded && run.status === RUN_STATUS.RUNNING) {
-        return degraded(run, this._timestamp());
+        return this._degradedMutation(run, {
+          opId,
+          action,
+          fingerprint,
+          degraded,
+        });
       }
       try {
         if (run.operations.length >= MAX_OPERATIONS) {
@@ -3443,9 +3969,15 @@ class RunJournal {
         ) {
           throw error;
         }
-        return this._degradeTruncated(runId, error, degraded);
+        return this._degradeTruncated(runId, error, {
+          opId,
+          action,
+          fingerprint,
+          degraded,
+        });
       }
-    }));
+      })
+    ));
   }
 
   /**
@@ -3455,7 +3987,7 @@ class RunJournal {
    * answer the mutation as a successful no-op. Terminal recording via
    * finishRun/recoverInterrupted keeps working from its own reservation.
    */
-  _degradeTruncated(runId, cause, degraded) {
+  _degradeTruncated(runId, cause, mutation) {
     const run = this._readRun(runId);
     if (!run || run.status !== RUN_STATUS.RUNNING) throw cause;
     if (!run.truncated) {
@@ -3465,7 +3997,18 @@ class RunJournal {
       this._advanceRevision(run);
       this._writeRun(run);
     }
-    return degraded(run, this._timestamp());
+    return this._degradedMutation(run, mutation);
+  }
+
+  _degradedMutation(run, { opId, action, fingerprint, degraded }) {
+    const id = deterministicUuid(stableJson({
+      kind: 'truncated-operation',
+      runId: run.id,
+      opId,
+      action,
+      fingerprint,
+    }));
+    return degraded(run, run.truncated.at, { id });
   }
 
   async _assertReplay(run, operation, action, fingerprint) {
@@ -3728,6 +4271,253 @@ class RunJournal {
     );
   }
 
+  _retentionTransactionPath() {
+    return path.join(
+      this.dir,
+      RETENTION_DIRECTORY,
+      RETENTION_TRANSACTION_FILE
+    );
+  }
+
+  _retentionReceiptsPath() {
+    return path.join(this.dir, RETENTION_DIRECTORY, RETENTION_RECEIPTS_FILE);
+  }
+
+  _deleteTransactionPath() {
+    return path.join(this.dir, RETENTION_DIRECTORY, DELETE_TRANSACTION_FILE);
+  }
+
+  _retentionReportFile() {
+    return path.join(RETENTION_DIRECTORY, RETENTION_TRANSACTION_FILE);
+  }
+
+  _retentionReceiptsReportFile() {
+    return path.join(RETENTION_DIRECTORY, RETENTION_RECEIPTS_FILE);
+  }
+
+  _deleteTransactionReportFile() {
+    return path.join(RETENTION_DIRECTORY, DELETE_TRANSACTION_FILE);
+  }
+
+  _coordinationFileSignature(file) {
+    // App-owned updates use atomic rename (changing file identity); in-place
+    // changes normally move size or high-resolution timestamps. This is a
+    // cache invalidator for main-owned state, not an authenticity boundary.
+    const stats = fs.statSync(file, { bigint: true });
+    return [
+      stats.dev,
+      stats.ino,
+      stats.size,
+      stats.mtimeNs,
+      stats.ctimeNs,
+    ].join(':');
+  }
+
+  _readRetentionTransaction() {
+    const transactionPath = this._retentionTransactionPath();
+    try {
+      const before = this._coordinationFileSignature(transactionPath);
+      if (this._retentionTransactionCache?.signature === before) {
+        return this._retentionTransactionCache.transaction;
+      }
+      const transaction = readJsonStrict(transactionPath, {
+        maxFileBytes: MAX_RETENTION_TRANSACTION_BYTES,
+      });
+      try {
+        assertRetentionTransaction(transaction);
+      } catch (_error) {
+        throw new RunJournalError(
+          'Retention transaction is invalid',
+          'corrupt-retention'
+        );
+      }
+      const after = this._coordinationFileSignature(transactionPath);
+      if (before !== after) {
+        throw new RunJournalError(
+          'Retention transaction changed while it was read',
+          'corrupt-retention'
+        );
+      }
+      this._retentionTransactionCache = { signature: after, transaction };
+      return transaction;
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        this._retentionTransactionCache = null;
+        return null;
+      }
+      this._retentionTransactionCache = null;
+      this._report(this._retentionReportFile(), error);
+      if (error instanceof RunJournalError && error.code === 'corrupt-retention') {
+        throw error;
+      }
+      throw new RunJournalError(
+        'Retention transaction could not be read',
+        'corrupt-retention'
+      );
+    }
+  }
+
+  _assertNoPendingRetentionMutation() {
+    const transaction = this._readRetentionTransaction();
+    if (isRetentionPending(transaction)) {
+      throw new RunJournalError(
+        'A confirmed retention transaction still needs recovery',
+        'prune-incomplete'
+      );
+    }
+    const deletion = this._readDeleteTransaction();
+    if (deletion?.status === DELETE_TRANSACTION_STATUS.APPLYING) {
+      throw new RunJournalError(
+        'A confirmed delete transaction still needs recovery',
+        'delete-incomplete'
+      );
+    }
+  }
+
+  _readDeleteTransaction() {
+    const transactionPath = this._deleteTransactionPath();
+    try {
+      const before = this._coordinationFileSignature(transactionPath);
+      if (this._deleteTransactionCache?.signature === before) {
+        return this._deleteTransactionCache.transaction;
+      }
+      const transaction = readJsonStrict(transactionPath, {
+        maxFileBytes: 64 * 1024,
+      });
+      try {
+        assertDeleteTransaction(transaction);
+      } catch (_error) {
+        throw new RunJournalError('Delete transaction is invalid', 'corrupt-retention');
+      }
+      const after = this._coordinationFileSignature(transactionPath);
+      if (before !== after) {
+        throw new RunJournalError(
+          'Delete transaction changed while it was read',
+          'corrupt-retention'
+        );
+      }
+      this._deleteTransactionCache = { signature: after, transaction };
+      return transaction;
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        this._deleteTransactionCache = null;
+        return null;
+      }
+      this._deleteTransactionCache = null;
+      this._report(this._deleteTransactionReportFile(), error);
+      if (error instanceof RunJournalError && error.code === 'corrupt-retention') {
+        throw error;
+      }
+      throw new RunJournalError('Delete transaction could not be read', 'corrupt-retention');
+    }
+  }
+
+  _writeDeleteTransaction(transaction) {
+    assertDeleteTransaction(transaction);
+    this._deleteTransactionCache = null;
+    try {
+      this.writeDeleteTransaction(this._deleteTransactionPath(), transaction);
+    } catch (_error) {
+      throw new RunJournalError('Delete transaction could not be written', 'storage-write-failed');
+    }
+  }
+
+  _readRetentionReceipts() {
+    try {
+      const index = readJsonStrict(this._retentionReceiptsPath(), {
+        maxFileBytes: MAX_RETENTION_RECEIPTS_BYTES,
+      });
+      try {
+        assertRetentionReceiptIndex(index);
+      } catch (_error) {
+        throw new RunJournalError('Retention receipts are invalid', 'corrupt-retention');
+      }
+      return index;
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        return { schemaVersion: RETENTION_TRANSACTION_SCHEMA_VERSION, receipts: [] };
+      }
+      this._report(this._retentionReceiptsReportFile(), error);
+      if (error instanceof RunJournalError && error.code === 'corrupt-retention') {
+        throw error;
+      }
+      throw new RunJournalError('Retention receipts could not be read', 'corrupt-retention');
+    }
+  }
+
+  _writeRetentionReceipts(index) {
+    assertRetentionReceiptIndex(index);
+    if (
+      Buffer.byteLength(JSON.stringify(index, null, 2), 'utf8')
+      > MAX_RETENTION_RECEIPTS_BYTES
+    ) {
+      throw new RunJournalError('Retention receipts exceed their storage limit', 'size-limit');
+    }
+    try {
+      this.writeRetentionReceipts(this._retentionReceiptsPath(), index);
+    } catch (_error) {
+      throw new RunJournalError('Retention receipts could not be written', 'storage-write-failed');
+    }
+  }
+
+  _findRetentionReceipt(opId) {
+    return this._readRetentionReceipts().receipts.find(receipt => receipt.opId === opId) || null;
+  }
+
+  _recordRetentionReceipt(transaction) {
+    if (!isRetentionTerminal(transaction)) return false;
+    const index = this._readRetentionReceipts();
+    const existing = index.receipts.find(receipt => receipt.opId === transaction.opId);
+    if (existing) {
+      if (existing.fingerprint !== transaction.fingerprint) {
+        throw new RunJournalError(
+          'Retention receipt conflicts with its transaction',
+          'corrupt-retention'
+        );
+      }
+      return false;
+    }
+    const receipt = {
+      opId: transaction.opId,
+      fingerprint: transaction.fingerprint,
+      policy: clonePublic(transaction.policy),
+      previewToken: transaction.previewToken,
+      planDigest: transaction.planDigest,
+      result: clonePublic(transaction.result),
+      committedAt: transaction.committedAt,
+    };
+    const next = {
+      schemaVersion: RETENTION_TRANSACTION_SCHEMA_VERSION,
+      receipts: [...index.receipts, receipt].slice(-MAX_RETENTION_RECEIPTS),
+    };
+    this._mutationBoundary('prune-receipt', 'before', null);
+    this._writeRetentionReceipts(next);
+    this._mutationBoundary('prune-receipt', 'after', null);
+    return true;
+  }
+
+  _writeRetentionTransaction(transaction) {
+    assertRetentionTransaction(transaction);
+    if (
+      Buffer.byteLength(JSON.stringify(transaction, null, 2), 'utf8')
+      > MAX_RETENTION_TRANSACTION_BYTES
+    ) {
+      throw new RunJournalError(
+        'Retention transaction exceeds its storage limit',
+        'size-limit'
+      );
+    }
+    this._retentionTransactionCache = null;
+    try {
+      this.writeRetentionTransaction(this._retentionTransactionPath(), transaction);
+    } catch (_error) {
+      throw new RunJournalError(
+        'Retention transaction could not be written',
+        'storage-write-failed'
+      );
+    }
+  }
+
   _deleteV1MigrationBackup(runId) {
     try {
       this.deleteMigrationBackup(this._v1MigrationBackupPath(runId));
@@ -3910,34 +4700,314 @@ class RunJournal {
     return this._rebuildIndex();
   }
 
+  _retentionSnapshot() {
+    let recordErrors = 0;
+    const runs = this._loadAllRuns({
+      onRecordError: () => {
+        recordErrors += 1;
+      },
+    });
+    if (recordErrors > 0) {
+      throw new RunJournalError(
+        'Run Journal retention cannot prove every source record',
+        'retention-source-uncertain'
+      );
+    }
+    return { runs, index: makeRunIndex(runs) };
+  }
+
   _retentionPlan(index, { maxRuns, maxAgeDays, cutoff }) {
     const terminal = index.runs.filter(summary => RUN_TERMINAL_VALUES.has(summary.status));
     const beyondCount = maxRuns === null
       ? new Set()
       : new Set(terminal.slice(maxRuns).map(summary => summary.id));
-    const candidates = terminal.filter(summary => (
+    const initialCandidates = terminal.filter(summary => (
       beyondCount.has(summary.id)
       || (
         maxAgeDays !== null
         && summary.finishedAt.localeCompare(cutoff) < 0
       )
     ));
+    const initialIds = new Set(initialCandidates.map(summary => summary.id));
+    const byId = new Map(index.runs.map(summary => [summary.id, summary]));
+    const protectedAncestors = new Set();
+    for (const summary of index.runs) {
+      if (initialIds.has(summary.id)) continue;
+      let parentId = summary.parentRunId;
+      while (parentId !== null) {
+        protectedAncestors.add(parentId);
+        parentId = byId.get(parentId)?.parentRunId ?? null;
+      }
+    }
+    const candidates = initialCandidates
+      .filter(summary => !protectedAncestors.has(summary.id))
+      // Delete descendants before ancestors so an interrupted transaction
+      // never leaves a surviving child whose source was already removed.
+      .sort((left, right) => (
+        right.attempt - left.attempt || compareRunSummaries(left, right)
+      ));
     return {
       candidates,
       terminalCount: terminal.length,
       activeCount: index.runs.length - terminal.length,
+      protectedAncestorCount: initialCandidates.length - candidates.length,
     };
   }
 
-  _retentionPreviewToken(policy, candidates) {
-    return sha256(stableJson({
-      version: 1,
-      policy,
-      candidates: candidates.map(summary => ({
-        id: summary.id,
-        revision: summary.revision,
-      })),
-    }, 'retention preview'));
+  _retentionPlanDigest(policy, candidates) {
+    return retentionPlanDigest(policy, candidates);
+  }
+
+  _issueRetentionPreview(policy, candidates) {
+    let token;
+    do {
+      token = crypto.randomBytes(32).toString('hex');
+    } while (this._retentionPreviews.has(token));
+    this._retentionPreviews.set(token, {
+      policy: clonePublic(policy),
+      planDigest: this._retentionPlanDigest(policy, candidates),
+      issuedAt: this._timestamp(),
+    });
+    while (this._retentionPreviews.size > 128) {
+      this._retentionPreviews.delete(this._retentionPreviews.keys().next().value);
+    }
+    return token;
+  }
+
+  _assertRetentionPreview(token, policy, candidates) {
+    const preview = this._retentionPreviews.get(token);
+    if (!preview) {
+      throw new RunJournalError(
+        'The retention preview is absent or expired; preview again',
+        'prune-preview-stale'
+      );
+    }
+    const checkedAt = this._timestamp();
+    const age = Date.parse(checkedAt) - Date.parse(preview.issuedAt);
+    if (
+      age < 0
+      || age > RETENTION_PREVIEW_TTL_MS
+      || stableJson(preview.policy) !== stableJson(policy)
+      || preview.planDigest !== this._retentionPlanDigest(policy, candidates)
+    ) {
+      this._retentionPreviews.delete(token);
+      throw new RunJournalError(
+        'Run history changed after the retention preview; preview again',
+        'prune-preview-stale'
+      );
+    }
+  }
+
+  _applyDeleteTransaction(transaction) {
+    assertDeleteTransaction(transaction);
+    if (transaction.status === DELETE_TRANSACTION_STATUS.COMMITTED) return false;
+    const snapshot = this._retentionSnapshot();
+    const run = snapshot.runs.find(entry => entry.id === transaction.runId) || null;
+    if (run) {
+      if (
+        !RUN_TERMINAL_VALUES.has(run.status)
+        || run.revision !== transaction.revision
+        || snapshot.runs.some(entry => entry.parentRunId === run.id)
+      ) {
+        throw new RunJournalError(
+          'Run history changed during delete recovery',
+          'delete-stale'
+        );
+      }
+      this._markIndexDirty();
+      this._mutationBoundary('delete-record', 'before', run.id);
+      try {
+        this.deleteRecord(this._filePath(run.id));
+      } catch (error) {
+        if (error?.code !== 'ENOENT') {
+          this._clearIndex();
+          throw new RunJournalError(
+            'Run Journal record could not be deleted',
+            'storage-delete-failed'
+          );
+        }
+      }
+      this._mutationBoundary('delete-record', 'after', run.id);
+    }
+
+    this.memory.deletePrefix(`workflow:${transaction.runId}`);
+    this.memory.deletePrefix(`result:${transaction.runId}:`);
+    this.memory.deletePrefix(`operation:${transaction.runId}:`);
+    this._mutationBoundary('delete-backup', 'before', transaction.runId);
+    this._deleteV1MigrationBackup(transaction.runId);
+    this._mutationBoundary('delete-backup', 'after', transaction.runId);
+
+    const remaining = this._retentionSnapshot();
+    if (remaining.runs.some(entry => entry.id === transaction.runId)) {
+      throw new RunJournalError(
+        'Run Journal delete left its selected record behind',
+        'storage-delete-failed'
+      );
+    }
+    this._persistIndex(remaining.index);
+    const committed = {
+      ...transaction,
+      status: DELETE_TRANSACTION_STATUS.COMMITTED,
+      committedAt: this._timestamp(),
+      result: true,
+    };
+    this._mutationBoundary('delete-commit', 'before', transaction.runId);
+    this._writeDeleteTransaction(committed);
+    this._mutationBoundary('delete-commit', 'after', transaction.runId);
+    return true;
+  }
+
+  _applyRetentionTransaction(initialTransaction) {
+    let transaction = initialTransaction;
+    assertRetentionTransaction(transaction);
+    if (isRetentionTerminal(transaction)) {
+      return clonePublic(transaction.result);
+    }
+
+    const snapshot = this._retentionSnapshot();
+    const candidates = new Map(
+      transaction.candidates.map(candidate => [candidate.id, candidate])
+    );
+    const byId = new Map(snapshot.runs.map(run => [run.id, run]));
+    let stale = false;
+    for (const candidate of transaction.candidates) {
+      const run = byId.get(candidate.id);
+      if (!run) {
+        if (transaction.status === RETENTION_TRANSACTION_STATUS.PREPARED) stale = true;
+        continue;
+      }
+      if (!RUN_TERMINAL_VALUES.has(run.status) || run.revision !== candidate.revision) {
+        stale = true;
+      }
+    }
+    for (const run of snapshot.runs) {
+      if (candidates.has(run.id)) continue;
+      let parentId = run.parentRunId;
+      while (parentId !== null) {
+        if (candidates.has(parentId)) {
+          stale = true;
+          break;
+        }
+        parentId = byId.get(parentId)?.parentRunId ?? null;
+      }
+    }
+    if (stale) {
+      if (transaction.status === RETENTION_TRANSACTION_STATUS.PREPARED) {
+        return this._abortRetentionTransaction(transaction, snapshot.index.runs.length);
+      }
+      throw new RunJournalError(
+        'Run history changed during retention recovery',
+        'prune-preview-stale'
+      );
+    }
+    if (transaction.status === RETENTION_TRANSACTION_STATUS.PREPARED) {
+      const applying = {
+        ...transaction,
+        status: RETENTION_TRANSACTION_STATUS.APPLYING,
+      };
+      this._mutationBoundary('prune-apply', 'before', null);
+      this._writeRetentionTransaction(applying);
+      this._mutationBoundary('prune-apply', 'after', null);
+      transaction = applying;
+    }
+
+    this._markIndexDirty();
+    for (const candidate of transaction.candidates) {
+      const run = this._readRun(candidate.id, { throwOnError: true });
+      if (run) {
+        if (!RUN_TERMINAL_VALUES.has(run.status) || run.revision !== candidate.revision) {
+          throw new RunJournalError(
+            'Run history changed during retention recovery',
+            'prune-preview-stale'
+          );
+        }
+        this._mutationBoundary('prune-record', 'before', candidate.id);
+        try {
+          this.deleteRecord(this._filePath(candidate.id));
+        } catch (error) {
+          if (error?.code !== 'ENOENT') {
+            this._clearIndex();
+            throw new RunJournalError(
+              'Run Journal retention could not delete a selected record',
+              'storage-delete-failed'
+            );
+          }
+        }
+        this._mutationBoundary('prune-record', 'after', candidate.id);
+      }
+      this.memory.deletePrefix(`workflow:${candidate.id}`);
+      this.memory.deletePrefix(`result:${candidate.id}:`);
+      this.memory.deletePrefix(`operation:${candidate.id}:`);
+
+      this._mutationBoundary('prune-backup', 'before', candidate.id);
+      this._deleteV1MigrationBackup(candidate.id);
+      this._mutationBoundary('prune-backup', 'after', candidate.id);
+    }
+
+    const remaining = this._retentionSnapshot();
+    for (const candidate of transaction.candidates) {
+      if (remaining.runs.some(run => run.id === candidate.id)) {
+        throw new RunJournalError(
+          'Run Journal retention left a selected record behind',
+          'storage-delete-failed'
+        );
+      }
+    }
+    this._persistIndex(remaining.index);
+    const result = {
+      preview: false,
+      deletedCount: transaction.candidates.length,
+      remainingCount: remaining.index.runs.length,
+      previewToken: transaction.previewToken,
+    };
+    const committed = {
+      ...transaction,
+      status: RETENTION_TRANSACTION_STATUS.COMMITTED,
+      committedAt: this._timestamp(),
+      result,
+    };
+    this._mutationBoundary('prune-commit', 'before', null);
+    this._writeRetentionTransaction(committed);
+    this._mutationBoundary('prune-commit', 'after', null);
+    this._recordRetentionReceipt(committed);
+    this._rememberPrune(transaction.opId, {
+      fingerprint: transaction.fingerprint,
+      planDigest: transaction.planDigest,
+      result,
+    });
+    return clonePublic(result);
+  }
+
+  _abortRetentionTransaction(transaction, remainingCount) {
+    if (transaction.status !== RETENTION_TRANSACTION_STATUS.PREPARED) {
+      throw new RunJournalError(
+        'An applying retention transaction cannot be aborted',
+        'prune-preview-stale'
+      );
+    }
+    const result = {
+      preview: false,
+      deletedCount: 0,
+      remainingCount,
+      previewToken: transaction.previewToken,
+      aborted: true,
+    };
+    const aborted = {
+      ...transaction,
+      status: RETENTION_TRANSACTION_STATUS.ABORTED,
+      committedAt: this._timestamp(),
+      result,
+    };
+    this._mutationBoundary('prune-abort', 'before', null);
+    this._writeRetentionTransaction(aborted);
+    this._mutationBoundary('prune-abort', 'after', null);
+    this._recordRetentionReceipt(aborted);
+    this._rememberPrune(transaction.opId, {
+      fingerprint: transaction.fingerprint,
+      planDigest: transaction.planDigest,
+      result,
+    });
+    return clonePublic(result);
   }
 
   _workflowMemoryKey(runId) {
@@ -4036,6 +5106,12 @@ class RunJournal {
     }
   }
 
+  _readRunWithLineage(runId) {
+    const run = this._readRun(runId);
+    if (!run || run.attempt === 1) return run;
+    return this._loadAllRuns().find(candidate => candidate.id === runId) || null;
+  }
+
   _loadAllRuns({ onRecordError = null } = {}) {
     const reportRecordError = (file, error) => {
       this._report(file, error);
@@ -4068,7 +5144,11 @@ class RunJournal {
         reportRecordError(file, error);
       }
     }
-    return runs;
+    const lineageErrors = lineageGraphErrors(runs, 'corrupt-run');
+    for (const [runId, error] of lineageErrors) {
+      reportRecordError(`${runId}.json`, error);
+    }
+    return runs.filter(run => !lineageErrors.has(run.id));
   }
 
   _report(file, error) {
@@ -4091,14 +5171,6 @@ class RunJournal {
     });
   }
 
-  _rememberDeletion(runId, tombstone) {
-    this._deleted.delete(runId);
-    this._deleted.set(runId, tombstone);
-    while (this._deleted.size > 1024) {
-      this._deleted.delete(this._deleted.keys().next().value);
-    }
-  }
-
   _mutationBoundary(kind, phase, runId) {
     if (!this.onMutationBoundary) return;
     this.onMutationBoundary({ kind, phase, runId });
@@ -4108,6 +5180,7 @@ class RunJournal {
     this._pruned.delete(opId);
     this._pruned.set(opId, {
       fingerprint: entry.fingerprint,
+      planDigest: entry.planDigest,
       result: clonePublic(entry.result),
     });
     while (this._pruned.size > 128) {
