@@ -1,15 +1,18 @@
 # Interrupted-run resume design
 
-Status: accepted design; metadata gate and protected deep-inspection preflight
-implemented; confirmation and execution not implemented.
+Status: accepted design; metadata gate, protected deep-inspection preflight,
+and Journal v2 persistence groundwork implemented; confirmation and execution
+not implemented.
 
 ## Decision
 
 Agent Orchestrator will treat restart-from-evidence as a new run derived from
-an interrupted run, never as continuation of the old process. The source run
-remains immutable. A resume attempt must pass a main-owned preflight, show an
-exact preview, receive explicit confirmation, and create a new journal run
-with lineage back to its source.
+an interrupted run, never as continuation of the old process. The source is
+never revived as `running`, and its recorded visit/result history is never
+rewritten. Explicitly reviewed audit facts may be appended and advance its
+revision, but grant no execution authority. A resume attempt must pass a
+main-owned preflight, show an exact preview, receive explicit confirmation,
+and create a new journal run with lineage back to its source.
 
 An `interrupted` status alone is not permission to resume. A process may have
 completed an external side effect immediately before the journal lost the
@@ -171,23 +174,42 @@ preflight is required.
 | Versioned workflow validation | Implemented by the same Node-compatible ESM loader used by the renderer; current v2 and migratable v1 identities are covered. |
 | Control cursor proof | Implemented by reproducing `WorkflowEngine._drive` visit addresses through nested loops under the same one-million-step limit. |
 | Result bindings | Every protected body is decrypted and length-checked internally; every future handoff must have the latest verified complete producer result. |
-| Runtime reconstruction | Conservative classification implemented. Directory state and session recipes can be derived; a pending team stage or an opaque prior session dependency blocks. Protected checkpoints and actual session creation remain pending. |
+| Runtime reconstruction | Conservative classification implemented. Directory state and session recipes can be derived; a pending team stage or an opaque prior session dependency blocks. Journal v2 can persist and verify a narrow protected checkpoint, but preflight does not consume it and actual session creation remains pending. |
 | Profile authority | Every explicit referenced profile is resolved again by main. Missing profiles and observable assurance changes block. Historical full-identity fingerprints do not exist in journal v1; the report counts profiles without a baseline instead of pretending it proved identity continuity. |
 | Redacted preview | Implemented as five stage cards plus boundary/next visit. No confirmation token is issued. |
-| Confirmation, lineage, execution | Not implemented. `executionAvailable` is false in every report. |
+| Confirmation, lineage, execution | Public root/parent/attempt fields are present, but no child-run creation, confirmation receipt, or execution path is implemented. `executionAvailable` is false in every report. |
 
 ## Journal evolution
 
-The executable phase should introduce a deliberate journal schema migration,
-not silently reinterpret v1 records. The minimum additions are:
+The Journal v2 data layer introduces a deliberate schema migration rather than
+silently reinterpreting v1 records. It implements these persistence additions;
+the main-memory preflight receipt remains deliberately deferred:
 
 - public lineage IDs: root run, parent run, and attempt number;
 - a protected control checkpoint bound to the source run and last committed
   visit, containing only the state that cannot be proved from the trace;
 - a one-time preflight token/fingerprint held in main memory, never persisted
-  as authority;
+  as authority (**not implemented in this milestone**);
 - an explicit boundary disposition (`abort`, `skip`, or `retry`) when a human
   reviews an uncertain visit.
+
+The implemented source-side disposition is a one-time, append-only audit fact,
+not execution authority. Recording it advances the source revision and thereby
+invalidates an older preflight. A future receipt-authorized child must still
+record its own chosen disposition under the confirmation contract below.
+
+The same data-layer checkpoint hardens evidence retention before any child can
+exist. Destructive previews are derived from a complete validation of canonical
+run records, not the public index. A confirmed multi-record prune persists one
+path-free intent and replays descendant-first deletion after a crash; retained
+descendants protect their ancestors. Cross-record lineage validation rejects a
+missing root, a missing or wrong-attempt parent, duplicate attempt siblings, and
+descendants of an invalid parent. The preview token is random, process-local,
+and expires after ten minutes; durable, bounded retention receipts carry no
+execution authority. Individual deletion also records a recoverable intent and
+removes canonical evidence before its migration backup. Capacity-degraded calls
+expose deterministic `durable: false` identities, never label a dropped result
+body as stored evidence, and cannot add a protected control checkpoint.
 
 Machine-local paths, environment values, commands, prompts, result bodies,
 session output, and account homes stay out of public checkpoint metadata.

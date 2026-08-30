@@ -157,6 +157,57 @@ test('journal preflight rejects a stale source revision before decryption', asyn
   );
 });
 
+test('a recorded boundary disposition invalidates stale inspection but grants no preflight authority', async () => {
+  const { journal } = makeJournal();
+  const run = await journal.startRun({
+    workflow: workflow(),
+    trigger: { kind: 'manual' },
+    opId: 'disposition-preflight-start-run',
+  });
+  const visit = await journal.startBlock({
+    runId: run.id,
+    block: {
+      id: 'first',
+      index: 0,
+      type: 'log',
+      iterationPath: [],
+    },
+    opId: 'disposition-preflight-start-block',
+  });
+  const [source] = await journal.recoverInterrupted();
+  const before = await journal.preflightResume({
+    runId: source.id,
+    sourceRevision: source.revision,
+  }, { isDirectory: () => true });
+  assert.equal(before.state, 'decision-required');
+  assert.equal(before.executionAvailable, false);
+
+  await journal.recordBoundaryDisposition({
+    runId: source.id,
+    sourceRevision: source.revision,
+    visitId: visit.visitId,
+    disposition: 'skip',
+    opId: 'disposition-preflight-review',
+  });
+  const reviewed = await journal.getRun(source.id);
+  await assert.rejects(
+    journal.preflightResume({
+      runId: source.id,
+      sourceRevision: source.revision,
+    }, { isDirectory: () => true }),
+    error => error instanceof RunJournalError && error.code === 'stale-source'
+  );
+
+  const after = await journal.preflightResume({
+    runId: reviewed.id,
+    sourceRevision: reviewed.revision,
+  }, { isDirectory: () => true });
+  assert.equal(after.state, before.state);
+  assert.deepEqual(after.reasonCodes, before.reasonCodes);
+  assert.deepEqual(after.trace, before.trace);
+  assert.equal(after.executionAvailable, false);
+});
+
 test('snapshot metadata tampering blocks integrity without returning protected bytes', async () => {
   const { journal, dir } = makeJournal();
   const source = await interruptedAfterFirst(journal);

@@ -10,7 +10,7 @@ const {
 
 function interruptedRun(overrides = {}) {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: 'interrupted',
     workflow: { formatVersion: 1 },
     snapshot: { storage: 'encrypted' },
@@ -54,7 +54,7 @@ test('durable untruncated metadata records a boundary without enabling execution
 
 test('lossy or malformed metadata fails the evidence gate closed', () => {
   const result = assessResumeEvidence(interruptedRun({
-    schemaVersion: 2,
+    schemaVersion: 3,
     workflow: { formatVersion: 2 },
     snapshot: { storage: 'memory' },
     truncated: { reason: 'event-capacity' },

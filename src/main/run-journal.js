@@ -19,8 +19,10 @@ const {
 const { assessResumeEvidence } = require('./resume-evidence');
 const { inspectResumeRun } = require('./resume-preflight');
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+const LEGACY_SCHEMA_VERSION = 1;
 const ENCRYPTED_ENVELOPE_VERSION = 1;
+const CONTROL_CHECKPOINT_VERSION = 1;
 
 const RUN_STATUS = Object.freeze({
   RUNNING: 'running',
@@ -68,6 +70,11 @@ const STORAGE = Object.freeze({
   ENCRYPTED: 'encrypted',
   MEMORY: 'memory',
 });
+const BOUNDARY_DISPOSITION = Object.freeze({
+  ABORT: 'abort',
+  SKIP: 'skip',
+  RETRY: 'retry',
+});
 
 /** Renderer result protocol limits, exported so the IPC layer can agree. */
 const MAX_RESULT_BYTES_PER_LANE = 32 * 1024;
@@ -77,6 +84,7 @@ const MAX_RESULT_BYTES = 256 * 1024;
 /** Aggregate plaintext result bodies retained by one run. */
 const MAX_RUN_RESULT_BYTES = 1024 * 1024;
 const MAX_WORKFLOW_BYTES = 4 * 1024 * 1024;
+const MAX_CONTROL_CHECKPOINT_BYTES = 256 * 1024;
 
 const MAX_MEMORY_BYTES = 8 * 1024 * 1024;
 // One workflow body + every operation proof + every result body must fit when
@@ -92,6 +100,7 @@ const MAX_MEMORY_ENTRIES = 32 * 1024;
 const MAX_WORKFLOW_CIPHERTEXT_BYTES = 16 * 1024 * 1024;
 const MAX_RESULT_CIPHERTEXT_BYTES = 4 * 1024 * 1024;
 const MAX_OPERATION_CIPHERTEXT_BYTES = 4096;
+const MAX_CONTROL_CHECKPOINT_CIPHERTEXT_BYTES = 4 * 1024 * 1024;
 // A record is preflighted with the same pretty-printed representation used by
 // writeJsonAtomic, and every read stops after this many bytes. This shared
 // invariant prevents either malformed files or schema-valid metadata growth
@@ -100,20 +109,33 @@ const MAX_RUN_RECORD_BYTES = 64 * 1024 * 1024;
 // The metadata index is a rebuildable cache, never the source of truth. It is
 // deliberately separate from run records so a page can be served without
 // parsing every protected record again.
-const RUN_INDEX_SCHEMA_VERSION = 1;
+const RUN_INDEX_SCHEMA_VERSION = 2;
 const RUN_INDEX_DIRECTORY = '.index';
-const RUN_INDEX_FILE = 'runs-v1.json';
-const RUN_INDEX_DIRTY_FILE = 'dirty-v1.json';
+const RUN_INDEX_FILE = 'runs-v2.json';
+const RUN_INDEX_DIRTY_FILE = 'dirty-v2.json';
+const LEGACY_RUN_INDEX_FILES = Object.freeze(['runs-v1.json', 'dirty-v1.json']);
+const RETENTION_DIRECTORY = '.retention';
+const RETENTION_TRANSACTION_FILE = 'prune-v1.json';
+const RETENTION_RECEIPTS_FILE = 'receipts-v1.json';
+const DELETE_TRANSACTION_FILE = 'delete-v1.json';
+const RETENTION_TRANSACTION_SCHEMA_VERSION = 1;
+const MIGRATION_DIRECTORY = '.migration';
+const V1_MIGRATION_DIRECTORY = 'v1';
 const MAX_RUN_INDEX_BYTES = 128 * 1024 * 1024;
+const MAX_RETENTION_TRANSACTION_BYTES = 64 * 1024 * 1024;
+const MAX_RETENTION_RECEIPTS_BYTES = 1024 * 1024;
+const MAX_RETENTION_RECEIPTS = 128;
 const MAX_RUN_INDEX_ENTRIES = 250_000;
 const MAX_RETENTION_RUNS = 1_000_000;
 const MAX_RETENTION_AGE_DAYS = 36_500;
+const RETENTION_PREVIEW_TTL_MS = 10 * 60 * 1000;
 const MAX_BLOCK_VISITS = 10_000;
 const MAX_RESULTS = 4096;
 const MAX_OPERATIONS = 25_000;
 const MAX_EVENTS = 25_000;
 const MAX_LANES = 128;
 const MAX_ITERATION_DEPTH = 32;
+const MAX_BOUNDARY_REVIEWS = 1024;
 const TERMINAL_CAPACITY_TIMESTAMP = '9999-12-31T23:59:59.999Z';
 const TERMINAL_CAPACITY_OP_ID = 'x'.repeat(256);
 const TERMINAL_CAPACITY_CIPHERTEXT = 'A'.repeat(MAX_OPERATION_CIPHERTEXT_BYTES);
@@ -136,12 +158,25 @@ const BLOCK_STATUS_VALUES = new Set(Object.values(BLOCK_STATUS));
 const BLOCK_TERMINAL_VALUES = new Set(BLOCK_TERMINAL_STATES);
 const BLOCK_FINISH_VALUES = new Set(BLOCK_FINISH_STATES);
 const RESULT_STATUS_VALUES = new Set(Object.values(RESULT_STATUS));
+const BOUNDARY_DISPOSITION_VALUES = new Set(Object.values(BOUNDARY_DISPOSITION));
+const RETENTION_TRANSACTION_STATUS = Object.freeze({
+  PREPARED: 'prepared',
+  APPLYING: 'applying',
+  COMMITTED: 'committed',
+  ABORTED: 'aborted',
+});
+const DELETE_TRANSACTION_STATUS = Object.freeze({
+  APPLYING: 'applying',
+  COMMITTED: 'committed',
+});
 const OPERATION_ACTIONS = new Set([
   'start-run',
   'start-block',
   'finish-block',
   'store-result',
   'finish-run',
+  'store-control-checkpoint',
+  'record-boundary-disposition',
 ]);
 const EVENT_TYPES = new Set([
   'run.started',
@@ -150,6 +185,8 @@ const EVENT_TYPES = new Set([
   'result.stored',
   'run.finished',
   'run.interrupted',
+  'control.checkpoint-stored',
+  'boundary.disposition-recorded',
 ]);
 
 class RunJournalError extends Error {
@@ -447,6 +484,27 @@ function sha256(value) {
   return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
+function isRetentionPending(transaction) {
+  return transaction?.status === RETENTION_TRANSACTION_STATUS.PREPARED
+    || transaction?.status === RETENTION_TRANSACTION_STATUS.APPLYING;
+}
+
+function isRetentionTerminal(transaction) {
+  return transaction?.status === RETENTION_TRANSACTION_STATUS.COMMITTED
+    || transaction?.status === RETENTION_TRANSACTION_STATUS.ABORTED;
+}
+
+function deterministicUuid(value) {
+  const digest = sha256(value);
+  return [
+    digest.slice(0, 8),
+    digest.slice(8, 12),
+    `4${digest.slice(13, 16)}`,
+    `8${digest.slice(17, 20)}`,
+    digest.slice(20, 32),
+  ].join('-');
+}
+
 function normalizeEncryptionContext(context) {
   const raw = asObject(context, 'encryption context');
   if (raw.kind === 'workflow') {
@@ -475,6 +533,20 @@ function normalizeEncryptionContext(context) {
       kind: 'operation',
       runId: asRunId(raw.runId),
       opId: asOpId(raw.opId),
+    };
+  }
+  if (raw.kind === 'control-checkpoint') {
+    assertOnlyKeys(
+      raw,
+      new Set(['kind', 'runId', 'visitId', 'sourceRevision', 'checkpointId']),
+      'control checkpoint encryption context'
+    );
+    return {
+      kind: 'control-checkpoint',
+      runId: asRunId(raw.runId),
+      visitId: asRunId(raw.visitId, 'visitId'),
+      sourceRevision: asPositiveInt(raw.sourceRevision, 'sourceRevision'),
+      checkpointId: asRunId(raw.checkpointId, 'checkpointId'),
     };
   }
   throw new RunJournalError('Encryption context kind is invalid', 'invalid-input');
@@ -638,6 +710,117 @@ function normalizeLaneDescriptors(value) {
     }
     return normalized;
   });
+}
+
+function normalizeControlCheckpointState(value) {
+  const raw = asObject(value, 'control checkpoint state');
+  assertOnlyKeys(
+    raw,
+    new Set(['version', 'sessions', 'pendingLanes', 'pendingJoinBlockId']),
+    'control checkpoint state'
+  );
+  if (raw.version !== CONTROL_CHECKPOINT_VERSION) {
+    throw new RunJournalError('Control checkpoint version is unsupported', 'invalid-input');
+  }
+  if (!Array.isArray(raw.sessions) || raw.sessions.length > MAX_LANES) {
+    throw new RunJournalError('Control checkpoint sessions are invalid', 'invalid-input');
+  }
+  const sessionRefs = new Set();
+  const laneIds = new Set();
+  const sessions = raw.sessions.map((entry, index) => {
+    const session = asObject(entry, `control checkpoint sessions[${index}]`);
+    assertOnlyKeys(
+      session,
+      new Set(['sessionRef', 'lane', 'resultInputCapable', 'outputSeq']),
+      `control checkpoint sessions[${index}]`
+    );
+    const sessionRef = asPublicId(
+      session.sessionRef,
+      `control checkpoint sessions[${index}].sessionRef`
+    );
+    if (sessionRefs.has(sessionRef)) {
+      throw new RunJournalError('Control checkpoint repeats a session reference', 'invalid-input');
+    }
+    sessionRefs.add(sessionRef);
+    const laneInput = asObject(
+      session.lane,
+      `control checkpoint sessions[${index}].lane`
+    );
+    const lane = normalizeLaneDescriptors([laneInput])[0];
+    if (stableJson(Object.keys(laneInput).sort()) !== stableJson(Object.keys(lane).sort())) {
+      throw new RunJournalError(
+        `control checkpoint sessions[${index}].lane contains non-public fields`,
+        'invalid-input'
+      );
+    }
+    if (lane.laneId) {
+      if (laneIds.has(lane.laneId)) {
+        throw new RunJournalError(
+          'Control checkpoint repeats a lane id',
+          'invalid-input'
+        );
+      }
+      laneIds.add(lane.laneId);
+    }
+    if (typeof session.resultInputCapable !== 'boolean') {
+      throw new RunJournalError(
+        `control checkpoint sessions[${index}].resultInputCapable must be boolean`,
+        'invalid-input'
+      );
+    }
+    const outputSeq = session.outputSeq === null || session.outputSeq === undefined
+      ? null
+      : asNonNegativeInt(
+          session.outputSeq,
+          `control checkpoint sessions[${index}].outputSeq`
+        );
+    return {
+      sessionRef,
+      lane,
+      resultInputCapable: session.resultInputCapable,
+      outputSeq,
+    };
+  });
+  if (!Array.isArray(raw.pendingLanes) || raw.pendingLanes.length > MAX_LANES) {
+    throw new RunJournalError('Control checkpoint pending lanes are invalid', 'invalid-input');
+  }
+  const pendingLaneRefs = new Set();
+  const pendingLanes = raw.pendingLanes.map((value, index) => {
+    const sessionRef = asPublicId(
+      value,
+      `control checkpoint pendingLanes[${index}]`
+    );
+    if (!sessionRefs.has(sessionRef)) {
+      throw new RunJournalError(
+        'Control checkpoint pending lane references an unknown session',
+        'invalid-input'
+      );
+    }
+    if (pendingLaneRefs.has(sessionRef)) {
+      throw new RunJournalError('Control checkpoint repeats a pending lane', 'invalid-input');
+    }
+    pendingLaneRefs.add(sessionRef);
+    return sessionRef;
+  });
+  const pendingJoinBlockId = asOptionalPublicId(
+    raw.pendingJoinBlockId,
+    'control checkpoint pendingJoinBlockId'
+  );
+  const normalized = {
+    version: CONTROL_CHECKPOINT_VERSION,
+    sessions,
+    pendingLanes,
+    pendingJoinBlockId,
+  };
+  const plaintext = stableJson(normalized, 'control checkpoint state');
+  const byteLength = utf8ByteLength(plaintext);
+  if (byteLength > MAX_CONTROL_CHECKPOINT_BYTES) {
+    throw new RunJournalError(
+      `Control checkpoint is ${byteLength} UTF-8 bytes; the limit is ${MAX_CONTROL_CHECKPOINT_BYTES}`,
+      'size-limit'
+    );
+  }
+  return { state: normalized, plaintext, byteLength };
 }
 
 function normalizeIterationPath(value) {
@@ -812,6 +995,29 @@ function publicBlock(block) {
   };
 }
 
+function publicControlCheckpoint(checkpoint) {
+  if (!checkpoint) return null;
+  return {
+    id: checkpoint.id,
+    stateVersion: checkpoint.stateVersion,
+    sourceRunId: checkpoint.sourceRunId,
+    sourceRevision: checkpoint.sourceRevision,
+    afterVisitId: checkpoint.afterVisitId,
+    storage: checkpoint.storage,
+    byteLength: checkpoint.byteLength,
+    createdAt: checkpoint.createdAt,
+  };
+}
+
+function publicBoundaryReview(review) {
+  return {
+    visitId: review.visitId,
+    sourceRevision: review.sourceRevision,
+    disposition: review.disposition,
+    reviewedAt: review.reviewedAt,
+  };
+}
+
 function publicEvent(event) {
   const out = {
     seq: event.seq,
@@ -822,10 +1028,12 @@ function publicEvent(event) {
     'visitId',
     'blockId',
     'resultId',
+    'checkpointId',
     'producerBlockId',
     'status',
     'reasonCode',
     'closedVisitCount',
+    'disposition',
   ]) {
     if (event[key] !== undefined && event[key] !== null) out[key] = event[key];
   }
@@ -836,6 +1044,9 @@ function publicRun(run) {
   return {
     schemaVersion: run.schemaVersion,
     id: run.id,
+    rootRunId: run.rootRunId,
+    parentRunId: run.parentRunId,
+    attempt: run.attempt,
     revision: run.revision,
     eventSeq: run.eventSeq,
     status: run.status,
@@ -848,6 +1059,10 @@ function publicRun(run) {
       storage: run.snapshot.storage,
       byteLength: run.snapshot.byteLength,
     },
+    migration: run.migration ? clonePublic(run.migration) : null,
+    controlCheckpoint: publicControlCheckpoint(run.controlCheckpoints.at(-1)),
+    controlCheckpointCount: run.controlCheckpoints.length,
+    boundaryReviews: run.boundaryReviews.map(publicBoundaryReview),
     truncated: run.truncated ? clonePublic(run.truncated) : null,
     blocks: run.blocks.map(publicBlock),
     results: run.results.map(publicResult),
@@ -860,6 +1075,9 @@ function runSummary(run) {
   return {
     schemaVersion: run.schemaVersion,
     id: run.id,
+    rootRunId: run.rootRunId,
+    parentRunId: run.parentRunId,
+    attempt: run.attempt,
     revision: run.revision,
     eventSeq: run.eventSeq,
     status: run.status,
@@ -872,6 +1090,13 @@ function runSummary(run) {
       storage: run.snapshot.storage,
       byteLength: run.snapshot.byteLength,
     },
+    migration: run.migration ? clonePublic(run.migration) : null,
+    controlCheckpoint: publicControlCheckpoint(run.controlCheckpoints.at(-1)),
+    controlCheckpointCount: run.controlCheckpoints.length,
+    boundaryReviewCount: run.boundaryReviews.length,
+    lastBoundaryReview: run.boundaryReviews.length
+      ? publicBoundaryReview(run.boundaryReviews.at(-1))
+      : null,
     truncated: run.truncated ? clonePublic(run.truncated) : null,
     blockVisitCount: run.blocks.length,
     resultCount: run.results.length,
@@ -882,6 +1107,9 @@ function runSummary(run) {
 const RUN_SUMMARY_KEYS = new Set([
   'schemaVersion',
   'id',
+  'rootRunId',
+  'parentRunId',
+  'attempt',
   'revision',
   'eventSeq',
   'status',
@@ -891,6 +1119,11 @@ const RUN_SUMMARY_KEYS = new Set([
   'workflow',
   'trigger',
   'snapshot',
+  'migration',
+  'controlCheckpoint',
+  'controlCheckpointCount',
+  'boundaryReviewCount',
+  'lastBoundaryReview',
   'truncated',
   'blockVisitCount',
   'resultCount',
@@ -902,13 +1135,162 @@ function compareRunSummaries(left, right) {
   return byStart || right.id.localeCompare(left.id);
 }
 
+function assertLineage(record, runId, what) {
+  const rootRunId = asRunId(record.rootRunId, `${what} rootRunId`);
+  const parentRunId = record.parentRunId === null
+    ? null
+    : asRunId(record.parentRunId, `${what} parentRunId`);
+  const attempt = asPositiveInt(record.attempt, `${what} attempt`);
+  if (attempt === 1) {
+    if (rootRunId !== runId || parentRunId !== null) {
+      throw new RunJournalError(`${what} root lineage is invalid`, 'invalid-input');
+    }
+    return;
+  }
+  if (rootRunId === runId || parentRunId === null || parentRunId === runId) {
+    throw new RunJournalError(`${what} child lineage is invalid`, 'invalid-input');
+  }
+}
+
+function lineageGraphErrors(records, code) {
+  const byId = new Map(records.map(record => [record.id, record]));
+  const errors = new Map();
+  const reject = (record, message) => {
+    if (!errors.has(record.id)) {
+      errors.set(record.id, new RunJournalError(message, code));
+    }
+  };
+
+  for (const record of records) {
+    if (record.attempt === 1) continue;
+    const root = byId.get(record.rootRunId);
+    const parent = byId.get(record.parentRunId);
+    if (!root || root.attempt !== 1 || root.rootRunId !== root.id || root.parentRunId !== null) {
+      reject(record, 'Run lineage root is missing or invalid');
+      continue;
+    }
+    if (
+      !parent
+      || parent.rootRunId !== record.rootRunId
+      || parent.attempt !== record.attempt - 1
+      || !RUN_TERMINAL_VALUES.has(parent.status)
+    ) {
+      reject(record, 'Run lineage parent is missing or invalid');
+    }
+  }
+
+  const attempts = new Map();
+  for (const record of records) {
+    const key = `${record.rootRunId}:${record.attempt}`;
+    const group = attempts.get(key) || [];
+    group.push(record);
+    attempts.set(key, group);
+  }
+  for (const group of attempts.values()) {
+    if (group.length < 2) continue;
+    for (const record of group) {
+      reject(record, 'Run lineage repeats an attempt number');
+    }
+  }
+
+  // A locally well-shaped child still belongs to an invalid graph when its
+  // parent was rejected. Propagate that fact from roots toward descendants.
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const record of records) {
+      if (record.attempt === 1 || errors.has(record.id)) continue;
+      if (errors.has(record.parentRunId)) {
+        reject(record, 'Run lineage descends from an invalid parent');
+        changed = true;
+      }
+    }
+  }
+  return errors;
+}
+
+function assertLineageGraph(records, code) {
+  const errors = lineageGraphErrors(records, code);
+  if (errors.size) throw errors.values().next().value;
+}
+
+function assertMigrationMetadata(migration, what) {
+  if (migration === null) return;
+  asObject(migration, what);
+  assertOnlyKeys(
+    migration,
+    new Set(['fromSchemaVersion', 'sourceRevision', 'migratedAt']),
+    what
+  );
+  if (migration.fromSchemaVersion !== LEGACY_SCHEMA_VERSION) {
+    throw new RunJournalError(`${what} source schema is invalid`, 'invalid-input');
+  }
+  asPositiveInt(migration.sourceRevision, `${what} sourceRevision`);
+  if (!isIsoTimestamp(migration.migratedAt)) {
+    throw new RunJournalError(`${what} timestamp is invalid`, 'invalid-input');
+  }
+}
+
+function assertPublicControlCheckpoint(checkpoint, what) {
+  if (checkpoint === null) return;
+  asObject(checkpoint, what);
+  assertOnlyKeys(
+    checkpoint,
+    new Set([
+      'id',
+      'stateVersion',
+      'sourceRunId',
+      'sourceRevision',
+      'afterVisitId',
+      'storage',
+      'byteLength',
+      'createdAt',
+    ]),
+    what
+  );
+  asRunId(checkpoint.id, `${what} id`);
+  if (checkpoint.stateVersion !== CONTROL_CHECKPOINT_VERSION) {
+    throw new RunJournalError(`${what} version is invalid`, 'invalid-input');
+  }
+  asRunId(checkpoint.sourceRunId, `${what} sourceRunId`);
+  asPositiveInt(checkpoint.sourceRevision, `${what} sourceRevision`);
+  asRunId(checkpoint.afterVisitId, `${what} afterVisitId`);
+  if (checkpoint.storage !== STORAGE.ENCRYPTED) {
+    throw new RunJournalError(`${what} storage is invalid`, 'invalid-input');
+  }
+  asNonNegativeInt(checkpoint.byteLength, `${what} byteLength`, {
+    max: MAX_CONTROL_CHECKPOINT_BYTES,
+  });
+  if (!isIsoTimestamp(checkpoint.createdAt)) {
+    throw new RunJournalError(`${what} timestamp is invalid`, 'invalid-input');
+  }
+}
+
+function assertBoundaryReview(review, what) {
+  asObject(review, what);
+  assertOnlyKeys(
+    review,
+    new Set(['visitId', 'sourceRevision', 'disposition', 'reviewedAt']),
+    what
+  );
+  asRunId(review.visitId, `${what} visitId`);
+  asPositiveInt(review.sourceRevision, `${what} sourceRevision`);
+  if (!BOUNDARY_DISPOSITION_VALUES.has(review.disposition)) {
+    throw new RunJournalError(`${what} disposition is invalid`, 'invalid-input');
+  }
+  if (!isIsoTimestamp(review.reviewedAt)) {
+    throw new RunJournalError(`${what} timestamp is invalid`, 'invalid-input');
+  }
+}
+
 function assertRunSummary(summary) {
   asObject(summary, 'run summary');
   assertOnlyKeys(summary, RUN_SUMMARY_KEYS, 'run summary');
   if (summary.schemaVersion !== SCHEMA_VERSION) {
     throw new RunJournalError('Run index contains an unsupported summary', 'corrupt-index');
   }
-  asRunId(summary.id, 'run summary id');
+  const summaryId = asRunId(summary.id, 'run summary id');
+  assertLineage(summary, summaryId, 'run summary');
   asPositiveInt(summary.revision, 'run summary revision');
   asPositiveInt(summary.eventSeq, 'run summary event sequence');
   if (!RUN_STATUS_VALUES.has(summary.status)) {
@@ -968,6 +1350,38 @@ function assertRunSummary(summary) {
     'run summary snapshot byte length',
     { max: MAX_WORKFLOW_BYTES }
   );
+  assertMigrationMetadata(summary.migration, 'run summary migration');
+  assertPublicControlCheckpoint(summary.controlCheckpoint, 'run summary control checkpoint');
+  asNonNegativeInt(
+    summary.controlCheckpointCount,
+    'run summary control checkpoint count',
+    { max: MAX_BLOCK_VISITS }
+  );
+  if (
+    summary.controlCheckpoint
+    && summary.controlCheckpoint.sourceRunId !== summaryId
+  ) {
+    throw new RunJournalError('Run summary control checkpoint source is invalid', 'corrupt-index');
+  }
+  if (
+    (summary.controlCheckpoint === null && summary.controlCheckpointCount !== 0)
+    || (summary.controlCheckpoint !== null && summary.controlCheckpointCount === 0)
+  ) {
+    throw new RunJournalError('Run summary control checkpoint count is invalid', 'corrupt-index');
+  }
+  asNonNegativeInt(
+    summary.boundaryReviewCount,
+    'run summary boundary review count',
+    { max: MAX_BOUNDARY_REVIEWS }
+  );
+  if (summary.lastBoundaryReview !== null) {
+    assertBoundaryReview(summary.lastBoundaryReview, 'run summary last boundary review');
+    if (summary.boundaryReviewCount === 0) {
+      throw new RunJournalError('Run summary boundary review count is invalid', 'corrupt-index');
+    }
+  } else if (summary.boundaryReviewCount !== 0) {
+    throw new RunJournalError('Run summary omits its last boundary review', 'corrupt-index');
+  }
 
   if (summary.truncated !== null) {
     asObject(summary.truncated, 'run summary truncation');
@@ -1022,6 +1436,293 @@ function assertRunIndex(index) {
     ) {
       throw new RunJournalError('Run index order is invalid', 'corrupt-index');
     }
+  }
+  assertLineageGraph(index.runs, 'corrupt-index');
+}
+
+function assertRetentionPolicy(policy, what) {
+  asObject(policy, what);
+  assertOnlyKeys(policy, new Set(['maxRuns', 'maxAgeDays', 'cutoff']), what);
+  if (policy.maxRuns !== null) {
+    asPositiveInt(policy.maxRuns, `${what} maxRuns`, { max: MAX_RETENTION_RUNS });
+  }
+  if (policy.maxAgeDays !== null) {
+    asPositiveInt(policy.maxAgeDays, `${what} maxAgeDays`, {
+      max: MAX_RETENTION_AGE_DAYS,
+    });
+    if (!isIsoTimestamp(policy.cutoff)) {
+      throw new RunJournalError(`${what} cutoff is invalid`, 'corrupt-retention');
+    }
+  } else if (policy.cutoff !== null) {
+    throw new RunJournalError(`${what} cutoff is unexpected`, 'corrupt-retention');
+  }
+  if (policy.maxRuns === null && policy.maxAgeDays === null) {
+    throw new RunJournalError(`${what} has no limit`, 'corrupt-retention');
+  }
+}
+
+function assertRetentionTransaction(transaction) {
+  asObject(transaction, 'retention transaction');
+  assertOnlyKeys(
+    transaction,
+    new Set([
+      'schemaVersion',
+      'status',
+      'opId',
+      'fingerprint',
+      'policy',
+      'previewToken',
+      'planDigest',
+      'candidates',
+      'startedAt',
+      'committedAt',
+      'result',
+    ]),
+    'retention transaction'
+  );
+  if (transaction.schemaVersion !== RETENTION_TRANSACTION_SCHEMA_VERSION) {
+    throw new RunJournalError(
+      'Retention transaction schema is unsupported',
+      'corrupt-retention'
+    );
+  }
+  if (!Object.values(RETENTION_TRANSACTION_STATUS).includes(transaction.status)) {
+    throw new RunJournalError('Retention transaction status is invalid', 'corrupt-retention');
+  }
+  asOpId(transaction.opId);
+  asText(transaction.fingerprint, 'retention transaction fingerprint', {
+    maxBytes: 64,
+    trim: true,
+    pattern: PREVIEW_TOKEN_PATTERN,
+  });
+  assertRetentionPolicy(transaction.policy, 'retention transaction policy');
+  asText(transaction.previewToken, 'retention transaction preview token', {
+    maxBytes: 64,
+    trim: true,
+    pattern: PREVIEW_TOKEN_PATTERN,
+  });
+  asText(transaction.planDigest, 'retention transaction plan digest', {
+    maxBytes: 64,
+    trim: true,
+    pattern: PREVIEW_TOKEN_PATTERN,
+  });
+  if (
+    !Array.isArray(transaction.candidates)
+    || transaction.candidates.length > MAX_RUN_INDEX_ENTRIES
+  ) {
+    throw new RunJournalError('Retention transaction candidates are invalid', 'corrupt-retention');
+  }
+  const ids = new Set();
+  for (const candidate of transaction.candidates) {
+    asObject(candidate, 'retention transaction candidate');
+    assertOnlyKeys(
+      candidate,
+      new Set(['id', 'revision']),
+      'retention transaction candidate'
+    );
+    const id = asRunId(candidate.id, 'retention transaction candidate id');
+    asPositiveInt(candidate.revision, 'retention transaction candidate revision');
+    if (ids.has(id)) {
+      throw new RunJournalError(
+        'Retention transaction repeats a candidate',
+        'corrupt-retention'
+      );
+    }
+    ids.add(id);
+  }
+  const expectedPlanDigest = retentionPlanDigest(
+    transaction.policy,
+    transaction.candidates
+  );
+  const expectedFingerprint = operationFingerprint('prune-runs', {
+    policy: transaction.policy,
+    previewToken: transaction.previewToken,
+    planDigest: expectedPlanDigest,
+  });
+  if (
+    transaction.planDigest !== expectedPlanDigest
+    || transaction.fingerprint !== expectedFingerprint
+  ) {
+    throw new RunJournalError(
+      'Retention transaction integrity is invalid',
+      'corrupt-retention'
+    );
+  }
+  if (!isIsoTimestamp(transaction.startedAt)) {
+    throw new RunJournalError('Retention transaction timestamp is invalid', 'corrupt-retention');
+  }
+  if (
+    transaction.status === RETENTION_TRANSACTION_STATUS.PREPARED
+    || transaction.status === RETENTION_TRANSACTION_STATUS.APPLYING
+  ) {
+    if (transaction.committedAt !== null || transaction.result !== null) {
+      throw new RunJournalError('Pending retention transaction is invalid', 'corrupt-retention');
+    }
+    return;
+  }
+  if (!isIsoTimestamp(transaction.committedAt)) {
+    throw new RunJournalError('Retention commit timestamp is invalid', 'corrupt-retention');
+  }
+  asObject(transaction.result, 'retention transaction result');
+  assertOnlyKeys(
+    transaction.result,
+    new Set(['preview', 'deletedCount', 'remainingCount', 'previewToken', 'aborted']),
+    'retention transaction result'
+  );
+  if (transaction.result.preview !== false) {
+    throw new RunJournalError('Retention transaction result is invalid', 'corrupt-retention');
+  }
+  asNonNegativeInt(
+    transaction.result.deletedCount,
+    'retention transaction deleted count',
+    { max: MAX_RUN_INDEX_ENTRIES }
+  );
+  asNonNegativeInt(
+    transaction.result.remainingCount,
+    'retention transaction remaining count',
+    { max: MAX_RUN_INDEX_ENTRIES }
+  );
+  if (transaction.result.previewToken !== transaction.previewToken) {
+    throw new RunJournalError('Retention transaction result does not match', 'corrupt-retention');
+  }
+  if (transaction.status === RETENTION_TRANSACTION_STATUS.ABORTED) {
+    if (transaction.result.deletedCount !== 0 || transaction.result.aborted !== true) {
+      throw new RunJournalError('Retention abort result is invalid', 'corrupt-retention');
+    }
+  } else if (
+    transaction.status !== RETENTION_TRANSACTION_STATUS.COMMITTED
+    || transaction.result.deletedCount !== transaction.candidates.length
+    || transaction.result.aborted !== undefined
+  ) {
+    throw new RunJournalError('Retention commit result is invalid', 'corrupt-retention');
+  }
+}
+
+function assertRetentionReceiptIndex(index) {
+  asObject(index, 'retention receipt index');
+  assertOnlyKeys(index, new Set(['schemaVersion', 'receipts']), 'retention receipt index');
+  if (index.schemaVersion !== RETENTION_TRANSACTION_SCHEMA_VERSION) {
+    throw new RunJournalError('Retention receipt schema is unsupported', 'corrupt-retention');
+  }
+  if (!Array.isArray(index.receipts) || index.receipts.length > MAX_RETENTION_RECEIPTS) {
+    throw new RunJournalError('Retention receipt count is invalid', 'corrupt-retention');
+  }
+  const operationIds = new Set();
+  for (const receipt of index.receipts) {
+    asObject(receipt, 'retention receipt');
+    assertOnlyKeys(
+      receipt,
+      new Set([
+        'opId',
+        'fingerprint',
+        'policy',
+        'previewToken',
+        'planDigest',
+        'result',
+        'committedAt',
+      ]),
+      'retention receipt'
+    );
+    const opId = asOpId(receipt.opId);
+    if (operationIds.has(opId)) {
+      throw new RunJournalError('Retention receipt repeats an operation id', 'corrupt-retention');
+    }
+    operationIds.add(opId);
+    assertRetentionPolicy(receipt.policy, 'retention receipt policy');
+    for (const [value, what] of [
+      [receipt.fingerprint, 'retention receipt fingerprint'],
+      [receipt.previewToken, 'retention receipt preview token'],
+      [receipt.planDigest, 'retention receipt plan digest'],
+    ]) {
+      asText(value, what, {
+        maxBytes: 64,
+        trim: true,
+        pattern: PREVIEW_TOKEN_PATTERN,
+      });
+    }
+    if (receipt.fingerprint !== operationFingerprint('prune-runs', {
+      policy: receipt.policy,
+      previewToken: receipt.previewToken,
+      planDigest: receipt.planDigest,
+    })) {
+      throw new RunJournalError('Retention receipt integrity is invalid', 'corrupt-retention');
+    }
+    asObject(receipt.result, 'retention receipt result');
+    assertOnlyKeys(
+      receipt.result,
+      new Set(['preview', 'deletedCount', 'remainingCount', 'previewToken', 'aborted']),
+      'retention receipt result'
+    );
+    if (
+      receipt.result.preview !== false
+      || receipt.result.previewToken !== receipt.previewToken
+    ) {
+      throw new RunJournalError('Retention receipt result is invalid', 'corrupt-retention');
+    }
+    asNonNegativeInt(receipt.result.deletedCount, 'retention receipt deleted count', {
+      max: MAX_RUN_INDEX_ENTRIES,
+    });
+    asNonNegativeInt(receipt.result.remainingCount, 'retention receipt remaining count', {
+      max: MAX_RUN_INDEX_ENTRIES,
+    });
+    if (
+      Object.hasOwn(receipt.result, 'aborted')
+      && receipt.result.aborted !== true
+    ) {
+      throw new RunJournalError('Retention receipt abort marker is invalid', 'corrupt-retention');
+    }
+    if (receipt.result.aborted === true && receipt.result.deletedCount !== 0) {
+      throw new RunJournalError('Retention receipt abort count is invalid', 'corrupt-retention');
+    }
+    if (!isIsoTimestamp(receipt.committedAt)) {
+      throw new RunJournalError('Retention receipt timestamp is invalid', 'corrupt-retention');
+    }
+  }
+}
+
+function assertDeleteTransaction(transaction) {
+  asObject(transaction, 'delete transaction');
+  assertOnlyKeys(
+    transaction,
+    new Set([
+      'schemaVersion',
+      'status',
+      'runId',
+      'revision',
+      'opId',
+      'fingerprint',
+      'startedAt',
+      'committedAt',
+      'result',
+    ]),
+    'delete transaction'
+  );
+  if (transaction.schemaVersion !== RETENTION_TRANSACTION_SCHEMA_VERSION) {
+    throw new RunJournalError('Delete transaction schema is unsupported', 'corrupt-retention');
+  }
+  if (!Object.values(DELETE_TRANSACTION_STATUS).includes(transaction.status)) {
+    throw new RunJournalError('Delete transaction status is invalid', 'corrupt-retention');
+  }
+  const runId = asRunId(transaction.runId, 'delete transaction run id');
+  asPositiveInt(transaction.revision, 'delete transaction revision');
+  asOpId(transaction.opId);
+  asText(transaction.fingerprint, 'delete transaction fingerprint', {
+    maxBytes: 64,
+    trim: true,
+    pattern: PREVIEW_TOKEN_PATTERN,
+  });
+  if (transaction.fingerprint !== operationFingerprint('delete-run', { runId })) {
+    throw new RunJournalError('Delete transaction integrity is invalid', 'corrupt-retention');
+  }
+  if (!isIsoTimestamp(transaction.startedAt)) {
+    throw new RunJournalError('Delete transaction timestamp is invalid', 'corrupt-retention');
+  }
+  if (transaction.status === DELETE_TRANSACTION_STATUS.APPLYING) {
+    if (transaction.committedAt !== null || transaction.result !== null) {
+      throw new RunJournalError('Applying delete transaction is invalid', 'corrupt-retention');
+    }
+  } else if (!isIsoTimestamp(transaction.committedAt) || transaction.result !== true) {
+    throw new RunJournalError('Committed delete transaction is invalid', 'corrupt-retention');
   }
 }
 
@@ -1103,6 +1804,9 @@ function assertStoredRun(run) {
     new Set([
       'schemaVersion',
       'id',
+      'rootRunId',
+      'parentRunId',
+      'attempt',
       'revision',
       'eventSeq',
       'status',
@@ -1112,6 +1816,9 @@ function assertStoredRun(run) {
       'workflow',
       'trigger',
       'snapshot',
+      'migration',
+      'controlCheckpoints',
+      'boundaryReviews',
       'truncated',
       'blocks',
       'results',
@@ -1123,7 +1830,8 @@ function assertStoredRun(run) {
   if (run.schemaVersion !== SCHEMA_VERSION) {
     throw new RunJournalError('Unsupported Run Journal schema', 'unsupported-schema');
   }
-  asRunId(run.id, 'run.id');
+  const runId = asRunId(run.id, 'run.id');
+  assertLineage(run, runId, 'run');
   asPositiveInt(run.revision, 'run.revision');
   asPositiveInt(run.eventSeq, 'run.eventSeq');
   if (!RUN_STATUS_VALUES.has(run.status)) {
@@ -1141,6 +1849,10 @@ function assertStoredRun(run) {
   }
   if (RUN_TERMINAL_VALUES.has(run.status) && run.finishedAt === null) {
     throw new RunJournalError('Terminal run is missing its finish timestamp', 'corrupt-run');
+  }
+  assertMigrationMetadata(run.migration, 'run.migration');
+  if (run.migration && run.migration.sourceRevision >= run.revision) {
+    throw new RunJournalError('Run migration revision is invalid', 'corrupt-run');
   }
   if (Object.hasOwn(run, 'truncated')) {
     asObject(run.truncated, 'run.truncated');
@@ -1184,6 +1896,79 @@ function assertStoredRun(run) {
     );
   } else if (Object.hasOwn(run.snapshot, 'ciphertext')) {
     throw new RunJournalError('Memory snapshot contains ciphertext', 'corrupt-run');
+  }
+
+  if (!Array.isArray(run.controlCheckpoints) || run.controlCheckpoints.length > MAX_BLOCK_VISITS) {
+    throw new RunJournalError('Run control checkpoints are invalid', 'corrupt-run');
+  }
+  const checkpointIds = new Set();
+  const checkpointVisitIds = new Set();
+  let priorCheckpointRevision = 0;
+  for (let index = 0; index < run.controlCheckpoints.length; index++) {
+    const checkpoint = asObject(
+      run.controlCheckpoints[index],
+      `run.controlCheckpoints[${index}]`
+    );
+    assertOnlyKeys(
+      checkpoint,
+      new Set([
+        'id',
+        'stateVersion',
+        'sourceRunId',
+        'sourceRevision',
+        'afterVisitId',
+        'storage',
+        'byteLength',
+        'createdAt',
+        'ciphertext',
+      ]),
+      `run.controlCheckpoints[${index}]`
+    );
+    assertPublicControlCheckpoint(
+      publicControlCheckpoint(checkpoint),
+      `run.controlCheckpoints[${index}]`
+    );
+    if (checkpointIds.has(checkpoint.id)) {
+      throw new RunJournalError('Run repeats a control checkpoint id', 'corrupt-run');
+    }
+    checkpointIds.add(checkpoint.id);
+    if (checkpointVisitIds.has(checkpoint.afterVisitId)) {
+      throw new RunJournalError('Run repeats a control checkpoint visit', 'corrupt-run');
+    }
+    checkpointVisitIds.add(checkpoint.afterVisitId);
+    if (checkpoint.sourceRunId !== runId || checkpoint.sourceRevision >= run.revision) {
+      throw new RunJournalError('Control checkpoint source binding is invalid', 'corrupt-run');
+    }
+    if (checkpoint.sourceRevision <= priorCheckpointRevision) {
+      throw new RunJournalError('Control checkpoint revisions are not ordered', 'corrupt-run');
+    }
+    priorCheckpointRevision = checkpoint.sourceRevision;
+    assertCiphertext(
+      checkpoint.ciphertext,
+      'stored control checkpoint encryption',
+      MAX_CONTROL_CHECKPOINT_CIPHERTEXT_BYTES
+    );
+  }
+
+  if (!Array.isArray(run.boundaryReviews) || run.boundaryReviews.length > MAX_BOUNDARY_REVIEWS) {
+    throw new RunJournalError('Run boundary reviews are invalid', 'corrupt-run');
+  }
+  const reviewedVisitIds = new Set();
+  let priorReviewRevision = 0;
+  for (let index = 0; index < run.boundaryReviews.length; index++) {
+    const review = run.boundaryReviews[index];
+    assertBoundaryReview(review, `run.boundaryReviews[${index}]`);
+    if (review.sourceRevision >= run.revision) {
+      throw new RunJournalError('Boundary review source revision is invalid', 'corrupt-run');
+    }
+    if (reviewedVisitIds.has(review.visitId)) {
+      throw new RunJournalError('Run repeats a boundary review visit', 'corrupt-run');
+    }
+    reviewedVisitIds.add(review.visitId);
+    if (review.sourceRevision <= priorReviewRevision) {
+      throw new RunJournalError('Boundary review revisions are not ordered', 'corrupt-run');
+    }
+    priorReviewRevision = review.sourceRevision;
   }
 
   if (!Array.isArray(run.blocks) || run.blocks.length > MAX_BLOCK_VISITS) {
@@ -1253,6 +2038,24 @@ function assertStoredRun(run) {
     && run.blocks.some(block => block.status === BLOCK_STATUS.RUNNING)
   ) {
     throw new RunJournalError('Terminal run contains an active block visit', 'corrupt-run');
+  }
+  for (const checkpoint of run.controlCheckpoints) {
+    const checkpointVisit = run.blocks.find(
+      block => block.visitId === checkpoint.afterVisitId
+    );
+    if (!checkpointVisit || !BLOCK_TERMINAL_VALUES.has(checkpointVisit.status)) {
+      throw new RunJournalError('Control checkpoint visit binding is invalid', 'corrupt-run');
+    }
+  }
+  for (const review of run.boundaryReviews) {
+    const visit = run.blocks.find(block => block.visitId === review.visitId);
+    if (!visit || ![
+      BLOCK_STATUS.FAILED,
+      BLOCK_STATUS.CANCELLED,
+      BLOCK_STATUS.INTERRUPTED,
+    ].includes(visit.status)) {
+      throw new RunJournalError('Boundary review does not reference an uncertain visit', 'corrupt-run');
+    }
   }
 
   if (!Array.isArray(run.results) || run.results.length > MAX_RESULTS) {
@@ -1368,18 +2171,23 @@ function assertStoredRun(run) {
     if (operation.refId !== null) {
       const refId = asRunId(operation.refId, 'operation.refId');
       const expectsVisit = operation.action === 'start-block'
-        || operation.action === 'finish-block';
+        || operation.action === 'finish-block'
+        || operation.action === 'record-boundary-disposition';
       const expectsResult = operation.action === 'store-result';
+      const expectsCheckpoint = operation.action === 'store-control-checkpoint';
       if (
         (expectsVisit && !visitIds.has(refId))
         || (expectsResult && !resultIds.has(refId))
-        || (!expectsVisit && !expectsResult)
+        || (expectsCheckpoint && !checkpointIds.has(refId))
+        || (!expectsVisit && !expectsResult && !expectsCheckpoint)
       ) {
         throw new RunJournalError('Operation points to an unknown record', 'corrupt-run');
       }
     } else if (
       operation.action === 'start-block'
       || operation.action === 'finish-block'
+      || operation.action === 'store-control-checkpoint'
+      || operation.action === 'record-boundary-disposition'
       || operation.action === 'store-result'
     ) {
       throw new RunJournalError('Operation is missing its record reference', 'corrupt-run');
@@ -1404,10 +2212,12 @@ function assertStoredRun(run) {
         'visitId',
         'blockId',
         'resultId',
+        'checkpointId',
         'producerBlockId',
         'status',
         'reasonCode',
         'closedVisitCount',
+        'disposition',
       ]),
       'event'
     );
@@ -1430,6 +2240,12 @@ function assertStoredRun(run) {
         throw new RunJournalError('Event points to an unknown result', 'corrupt-run');
       }
     }
+    if (event.checkpointId !== undefined) {
+      const checkpointId = asRunId(event.checkpointId, 'event.checkpointId');
+      if (!checkpointIds.has(checkpointId)) {
+        throw new RunJournalError('Event points to an unknown control checkpoint', 'corrupt-run');
+      }
+    }
     if (event.blockId !== undefined) asPublicId(event.blockId, 'event.blockId');
     if (event.producerBlockId !== undefined) {
       asPublicId(event.producerBlockId, 'event.producerBlockId');
@@ -1443,6 +2259,12 @@ function assertStoredRun(run) {
       throw new RunJournalError('Event status is invalid', 'corrupt-run');
     }
     if (event.reasonCode !== undefined) asSlug(event.reasonCode, 'event.reasonCode');
+    if (
+      event.disposition !== undefined
+      && !BOUNDARY_DISPOSITION_VALUES.has(event.disposition)
+    ) {
+      throw new RunJournalError('Event disposition is invalid', 'corrupt-run');
+    }
     if (event.closedVisitCount !== undefined) {
       asNonNegativeInt(
         event.closedVisitCount,
@@ -1452,6 +2274,59 @@ function assertStoredRun(run) {
     }
   }
   return run;
+}
+
+const V1_RUN_KEYS = new Set([
+  'schemaVersion',
+  'id',
+  'revision',
+  'eventSeq',
+  'status',
+  'startedAt',
+  'updatedAt',
+  'finishedAt',
+  'workflow',
+  'trigger',
+  'snapshot',
+  'truncated',
+  'blocks',
+  'results',
+  'operations',
+  'events',
+]);
+
+function migrateStoredRunV1(run, migratedAt) {
+  if (!isPlainObject(run) || run.schemaVersion !== LEGACY_SCHEMA_VERSION) {
+    throw new RunJournalError('Run is not a v1 journal record', 'unsupported-schema');
+  }
+  assertOnlyKeys(run, V1_RUN_KEYS, 'v1 run record');
+  const sourceRevision = asPositiveInt(run.revision, 'v1 run revision');
+  if (sourceRevision >= Number.MAX_SAFE_INTEGER) {
+    throw new RunJournalError('V1 run revision cannot be migrated', 'size-limit');
+  }
+  if (!isIsoTimestamp(migratedAt)) {
+    throw new RunJournalError('Migration timestamp is invalid', 'clock-error');
+  }
+  const runId = asRunId(run.id, 'v1 run id');
+  const migrated = {
+    ...run,
+    schemaVersion: SCHEMA_VERSION,
+    rootRunId: runId,
+    parentRunId: null,
+    attempt: 1,
+    revision: sourceRevision + 1,
+    updatedAt: migratedAt,
+    migration: {
+      fromSchemaVersion: LEGACY_SCHEMA_VERSION,
+      sourceRevision,
+      migratedAt,
+    },
+    controlCheckpoints: [],
+    boundaryReviews: [],
+  };
+  if (migrated.truncated === null) delete migrated.truncated;
+  assertStoredRun(migrated);
+  return migrated;
 }
 
 function appendEvent(run, type, at, fields = {}) {
@@ -1527,6 +2402,17 @@ function operationFingerprint(action, payload) {
   return sha256(stableJson({ action, payload }, `${action} operation`));
 }
 
+function retentionPlanDigest(policy, candidates) {
+  return sha256(stableJson({
+    version: 1,
+    policy,
+    candidates: candidates.map(candidate => ({
+      id: candidate.id,
+      revision: candidate.revision,
+    })),
+  }, 'retention preview'));
+}
+
 class RunJournal {
   constructor({
     dir,
@@ -1538,7 +2424,14 @@ class RunJournal {
     memoryMaxEntries = MAX_MEMORY_ENTRIES,
     recordMaxBytes = MAX_RUN_RECORD_BYTES,
     writeRecord = writeJsonAtomic,
+    writeMigrationBackup = writeJsonAtomic,
+    writeRetentionTransaction = writeJsonAtomic,
+    writeRetentionReceipts = writeJsonAtomic,
+    writeDeleteTransaction = writeJsonAtomic,
     deleteRecord = file => fs.unlinkSync(file),
+    deleteMigrationBackup = file => fs.unlinkSync(file),
+    deleteLegacyIndex = file => fs.unlinkSync(file),
+    onMutationBoundary = null,
   } = {}) {
     if (typeof dir !== 'string' || !dir.trim()) {
       throw new RunJournalError('Run Journal dir is required', 'invalid-input');
@@ -1549,7 +2442,22 @@ class RunJournal {
     if (onError !== null && typeof onError !== 'function') {
       throw new RunJournalError('Run Journal onError must be a function', 'invalid-input');
     }
-    if (typeof writeRecord !== 'function' || typeof deleteRecord !== 'function') {
+    if (onMutationBoundary !== null && typeof onMutationBoundary !== 'function') {
+      throw new RunJournalError(
+        'Run Journal mutation boundary hook must be a function',
+        'invalid-input'
+      );
+    }
+    if (
+      typeof writeRecord !== 'function'
+      || typeof writeMigrationBackup !== 'function'
+      || typeof writeRetentionTransaction !== 'function'
+      || typeof writeRetentionReceipts !== 'function'
+      || typeof writeDeleteTransaction !== 'function'
+      || typeof deleteRecord !== 'function'
+      || typeof deleteMigrationBackup !== 'function'
+      || typeof deleteLegacyIndex !== 'function'
+    ) {
       throw new RunJournalError(
         'Run Journal storage adapters must be functions',
         'invalid-input'
@@ -1571,17 +2479,174 @@ class RunJournal {
     this.randomUUID = randomUUID;
     this.onError = onError;
     this.writeRecord = writeRecord;
+    this.writeMigrationBackup = writeMigrationBackup;
+    this.writeRetentionTransaction = writeRetentionTransaction;
+    this.writeRetentionReceipts = writeRetentionReceipts;
+    this.writeDeleteTransaction = writeDeleteTransaction;
     this.deleteRecord = deleteRecord;
+    this.deleteMigrationBackup = deleteMigrationBackup;
+    this.deleteLegacyIndex = deleteLegacyIndex;
+    this.onMutationBoundary = onMutationBoundary;
     this.recordMaxBytes = recordMaxBytes;
     this.memory = new BoundedMemoryStore({
       maxBytes: memoryMaxBytes,
       maxEntries: memoryMaxEntries,
     });
     this._locks = new Map();
-    this._deleted = new Map();
     this._pruned = new Map();
+    this._retentionPreviews = new Map();
+    this._retentionTransactionCache = null;
+    this._deleteTransactionCache = null;
     this._index = null;
     this._indexEntries = new Map();
+  }
+
+  async migrateV1Records() {
+    return this._withLock('retention', () => this._withLock('migration', async () => {
+      let skippedCount = 0;
+      let entries;
+      try {
+        entries = readJsonDir(
+          this.dir,
+          (file, error) => {
+            this._report(file, error);
+            skippedCount += 1;
+          },
+          { maxFileBytes: this.recordMaxBytes }
+        );
+      } catch (_error) {
+        throw new RunJournalError(
+          'Run Journal records could not be listed for migration',
+          'migration-failed'
+        );
+      }
+
+      const migratedRunIds = [];
+      for (const { file, data } of entries) {
+        if (!isPlainObject(data)) {
+          skippedCount += 1;
+          this._report(
+            file,
+            new RunJournalError('Run Journal migration found an invalid record', 'corrupt-run')
+          );
+          continue;
+        }
+        if (data.schemaVersion === SCHEMA_VERSION) {
+          try {
+            assertStoredRun(data);
+            if (file !== `${data.id}.json`) {
+              throw new RunJournalError('Run id does not match its filename', 'corrupt-run');
+            }
+          } catch (error) {
+            skippedCount += 1;
+            this._report(file, error);
+          }
+          continue;
+        }
+        if (data.schemaVersion !== LEGACY_SCHEMA_VERSION) {
+          skippedCount += 1;
+          this._report(
+            file,
+            new RunJournalError(
+              'Run Journal migration found an unsupported schema',
+              'unsupported-schema'
+            )
+          );
+          continue;
+        }
+
+        const migratedAt = this._timestamp();
+        let migrated;
+        try {
+          migrated = migrateStoredRunV1(data, migratedAt);
+          if (file !== `${migrated.id}.json`) {
+            throw new RunJournalError('V1 run id does not match its filename', 'corrupt-run');
+          }
+        } catch (error) {
+          skippedCount += 1;
+          this._report(file, error);
+          continue;
+        }
+
+        await this._withLock(`run:${migrated.id}`, async () => {
+          let current;
+          try {
+            current = readJsonStrict(this._filePath(migrated.id), {
+              maxFileBytes: this.recordMaxBytes,
+            });
+          } catch (_error) {
+            throw new RunJournalError(
+              'The v1 Run Journal record changed during migration',
+              'migration-failed'
+            );
+          }
+          if (stableJson(current) !== stableJson(data)) {
+            throw new RunJournalError(
+              'The v1 Run Journal record changed during migration',
+              'migration-failed'
+            );
+          }
+
+          const backupPath = this._v1MigrationBackupPath(migrated.id);
+          if (fs.existsSync(backupPath)) {
+            let backup;
+            try {
+              backup = readJsonStrict(backupPath, { maxFileBytes: this.recordMaxBytes });
+            } catch (_error) {
+              throw new RunJournalError(
+                'The existing v1 migration backup is unreadable',
+                'migration-failed'
+              );
+            }
+            if (stableJson(backup) !== stableJson(data)) {
+              throw new RunJournalError(
+                'The existing v1 migration backup does not match its source record',
+                'migration-failed'
+              );
+            }
+          } else {
+            this._mutationBoundary('migration-backup', 'before', migrated.id);
+            try {
+              this.writeMigrationBackup(backupPath, data);
+            } catch (_error) {
+              throw new RunJournalError(
+                'The v1 Run Journal backup could not be written',
+                'migration-failed'
+              );
+            }
+            this._mutationBoundary('migration-backup', 'after', migrated.id);
+          }
+
+          this._markIndexDirty();
+          this._mutationBoundary('migration-record', 'before', migrated.id);
+          try {
+            this.writeRecord(this._filePath(migrated.id), migrated);
+          } catch (_error) {
+            throw new RunJournalError(
+              'The v2 Run Journal record could not be written',
+              'migration-failed'
+            );
+          }
+          this._mutationBoundary('migration-record', 'after', migrated.id);
+        });
+        migratedRunIds.push(migrated.id);
+      }
+
+      if (migratedRunIds.length) {
+        this._clearIndex();
+        this._rebuildIndex();
+      }
+      const legacyIndexCleanup = this._removeLegacyIndexFiles();
+      return {
+        fromSchemaVersion: LEGACY_SCHEMA_VERSION,
+        toSchemaVersion: SCHEMA_VERSION,
+        migratedRunIds,
+        migratedCount: migratedRunIds.length,
+        skippedCount,
+        removedLegacyIndexFiles: legacyIndexCleanup.removed,
+        legacyIndexCleanupFailures: legacyIndexCleanup.failed,
+      };
+    }));
   }
 
   async startRun(input) {
@@ -1596,7 +2661,10 @@ class RunJournal {
       trigger,
     });
 
-    return this._withLock('start', () => this._withLock('memory', async () => {
+    return this._withLock('retention', () => this._withLock(
+      'start',
+      () => this._withLock('memory', async () => {
+      this._assertNoPendingRetentionMutation();
       for (const run of this._loadAllRuns()) {
         const operation = run.operations.find(entry => entry.opId === opId);
         if (!operation) continue;
@@ -1625,6 +2693,9 @@ class RunJournal {
       const run = {
         schemaVersion: SCHEMA_VERSION,
         id: runId,
+        rootRunId: runId,
+        parentRunId: null,
+        attempt: 1,
         revision: 1,
         eventSeq: 0,
         status: RUN_STATUS.RUNNING,
@@ -1638,6 +2709,9 @@ class RunJournal {
           byteLength: workflow.byteLength,
           ...(secured.ciphertext ? { ciphertext: secured.ciphertext } : {}),
         },
+        migration: null,
+        controlCheckpoints: [],
+        boundaryReviews: [],
         blocks: [],
         results: [],
         operations: [{
@@ -1661,7 +2735,8 @@ class RunJournal {
         throw error;
       }
       return publicRun(run);
-    }));
+      })
+    ));
   }
 
   async startBlock(input) {
@@ -1697,8 +2772,8 @@ class RunJournal {
         if (!visit) throw new RunJournalError('Replayed block visit is missing', 'corrupt-run');
         return publicBlock(visit);
       },
-      degraded: (run, at) => ({
-        visitId: this._newUuid(new Set(run.blocks.map(entry => entry.visitId))),
+      degraded: (run, at, context) => ({
+        visitId: context.id,
         blockId: block.blockId,
         blockIndex: block.blockIndex,
         blockType: block.blockType,
@@ -1709,6 +2784,7 @@ class RunJournal {
         finishedAt: null,
         reasonCode: null,
         truncated: true,
+        durable: false,
       }),
       apply: async (run, at) => {
         this._assertActive(run);
@@ -1778,7 +2854,7 @@ class RunJournal {
       degraded: (run, at) => {
         const visit = run.blocks.find(entry => entry.visitId === visitId);
         if (visit && visit.status !== BLOCK_STATUS.RUNNING) {
-          return { ...publicBlock(visit), truncated: true };
+          return { ...publicBlock(visit), truncated: true, durable: false };
         }
         return {
           visitId,
@@ -1792,6 +2868,7 @@ class RunJournal {
           finishedAt: at,
           reasonCode,
           truncated: true,
+          durable: false,
         };
       },
       apply: async (run, at) => {
@@ -1850,6 +2927,7 @@ class RunJournal {
       controls: true,
     });
     const byteLength = utf8ByteLength(body);
+    const opId = asOpId(raw.opId);
     const fingerprint = operationFingerprint('store-result', {
       producerBlockId,
       visitId,
@@ -1862,7 +2940,7 @@ class RunJournal {
 
     return this._mutate({
       runId,
-      opId: asOpId(raw.opId),
+      opId,
       action: 'store-result',
       fingerprint,
       replay: (run, operation) => {
@@ -1870,8 +2948,8 @@ class RunJournal {
         if (!result) throw new RunJournalError('Replayed result is missing', 'corrupt-run');
         return publicResult(result);
       },
-      degraded: (run, at) => ({
-        id: this._newUuid(new Set(run.results.map(entry => entry.id))),
+      degraded: (run, at, context) => ({
+        id: context.id,
         producerBlockId,
         visitId,
         name,
@@ -1879,8 +2957,9 @@ class RunJournal {
         lanes: clonePublic(lanes),
         createdAt: at,
         byteLength,
-        storage: STORAGE.MEMORY,
+        storage: null,
         truncated: true,
+        durable: false,
       }),
       apply: async (run, at) => {
         this._assertActive(run);
@@ -1941,6 +3020,212 @@ class RunJournal {
           refId: resultId,
           rollback: secured.rollback,
           value: () => publicResult(result),
+        };
+      },
+    });
+  }
+
+  async storeControlCheckpoint(input) {
+    const raw = asObject(input, 'storeControlCheckpoint payload');
+    assertOnlyKeys(
+      raw,
+      new Set(['runId', 'sourceRevision', 'afterVisitId', 'state', 'opId']),
+      'storeControlCheckpoint payload'
+    );
+    const runId = asRunId(raw.runId);
+    const sourceRevision = asPositiveInt(raw.sourceRevision, 'sourceRevision');
+    const afterVisitId = asRunId(raw.afterVisitId, 'afterVisitId');
+    const opId = asOpId(raw.opId);
+    const checkpoint = normalizeControlCheckpointState(raw.state);
+    const fingerprint = operationFingerprint('store-control-checkpoint', {
+      sourceRevision,
+      afterVisitId,
+      state: checkpoint.plaintext,
+    });
+
+    return this._mutate({
+      runId,
+      opId,
+      action: 'store-control-checkpoint',
+      mutationKind: 'control-checkpoint',
+      fingerprint,
+      replay: (run, operation) => {
+        const stored = run.controlCheckpoints.find(entry => entry.id === operation.refId);
+        if (!stored) {
+          throw new RunJournalError('Replayed control checkpoint is missing', 'corrupt-run');
+        }
+        return publicControlCheckpoint(stored);
+      },
+      apply: async (run, at) => {
+        this._assertActive(run);
+        if (run.truncated) {
+          throw new RunJournalError(
+            'A truncated run cannot accept a control checkpoint',
+            'invalid-state'
+          );
+        }
+        if (run.revision !== sourceRevision) {
+          throw new RunJournalError(
+            'The source run changed before its control checkpoint was stored',
+            'stale-source'
+          );
+        }
+        if (run.controlCheckpoints.length >= MAX_BLOCK_VISITS) {
+          throw new RunJournalError('Control checkpoint capacity has been reached', 'size-limit');
+        }
+        const visit = run.blocks.find(entry => entry.visitId === afterVisitId);
+        if (
+          !visit
+          || !BLOCK_TERMINAL_VALUES.has(visit.status)
+          || run.blocks.at(-1)?.visitId !== afterVisitId
+        ) {
+          throw new RunJournalError(
+            'Control checkpoint must follow the last committed block visit',
+            'invalid-state'
+          );
+        }
+        if (run.controlCheckpoints.some(entry => entry.afterVisitId === afterVisitId)) {
+          throw new RunJournalError(
+            'The last committed visit already has a control checkpoint',
+            'invalid-state'
+          );
+        }
+        const checkpointId = this._newUuid(
+          new Set([
+            run.id,
+            ...run.blocks.map(entry => entry.visitId),
+            ...run.results.map(entry => entry.id),
+            ...run.controlCheckpoints.map(entry => entry.id),
+          ])
+        );
+        const context = {
+          kind: 'control-checkpoint',
+          runId,
+          visitId: afterVisitId,
+          sourceRevision,
+          checkpointId,
+        };
+        const secured = await this._secureEncryptedPayload(
+          checkpoint.plaintext,
+          context,
+          MAX_CONTROL_CHECKPOINT_CIPHERTEXT_BYTES
+        );
+        const stored = {
+          id: checkpointId,
+          stateVersion: CONTROL_CHECKPOINT_VERSION,
+          sourceRunId: runId,
+          sourceRevision,
+          afterVisitId,
+          storage: STORAGE.ENCRYPTED,
+          byteLength: checkpoint.byteLength,
+          createdAt: at,
+          ciphertext: secured.ciphertext,
+        };
+        run.controlCheckpoints.push(stored);
+        appendEvent(run, 'control.checkpoint-stored', at, {
+          visitId: afterVisitId,
+          checkpointId,
+        });
+        return {
+          refId: checkpointId,
+          value: () => publicControlCheckpoint(stored),
+        };
+      },
+    });
+  }
+
+  async recordBoundaryDisposition(input) {
+    const raw = asObject(input, 'recordBoundaryDisposition payload');
+    assertOnlyKeys(
+      raw,
+      new Set(['runId', 'sourceRevision', 'visitId', 'disposition', 'opId']),
+      'recordBoundaryDisposition payload'
+    );
+    const runId = asRunId(raw.runId);
+    const sourceRevision = asPositiveInt(raw.sourceRevision, 'sourceRevision');
+    const visitId = asRunId(raw.visitId, 'visitId');
+    if (!BOUNDARY_DISPOSITION_VALUES.has(raw.disposition)) {
+      throw new RunJournalError(
+        'Boundary disposition must be abort, skip, or retry',
+        'invalid-input'
+      );
+    }
+    const disposition = raw.disposition;
+    const opId = asOpId(raw.opId);
+    const fingerprint = operationFingerprint('record-boundary-disposition', {
+      sourceRevision,
+      visitId,
+      disposition,
+    });
+
+    return this._mutate({
+      runId,
+      opId,
+      action: 'record-boundary-disposition',
+      mutationKind: 'boundary-disposition',
+      fingerprint,
+      replay: (run, operation) => {
+        const review = run.boundaryReviews.find(entry => (
+          entry.visitId === operation.refId
+          && entry.sourceRevision === sourceRevision
+          && entry.disposition === disposition
+        ));
+        if (!review) {
+          throw new RunJournalError('Replayed boundary review is missing', 'corrupt-run');
+        }
+        return publicBoundaryReview(review);
+      },
+      apply: async (run, at) => {
+        if (run.revision !== sourceRevision) {
+          throw new RunJournalError(
+            'The source run changed before its boundary disposition was recorded',
+            'stale-source'
+          );
+        }
+        if (run.status !== RUN_STATUS.INTERRUPTED) {
+          throw new RunJournalError(
+            'Boundary disposition requires an interrupted source run',
+            'invalid-state'
+          );
+        }
+        if (run.boundaryReviews.length >= MAX_BOUNDARY_REVIEWS) {
+          throw new RunJournalError('Boundary review capacity has been reached', 'size-limit');
+        }
+        if (run.boundaryReviews.some(review => review.visitId === visitId)) {
+          throw new RunJournalError(
+            'The uncertain visit already has a boundary disposition',
+            'invalid-state'
+          );
+        }
+        const visit = run.blocks.find(entry => entry.visitId === visitId);
+        if (
+          !visit
+          || run.blocks.at(-1)?.visitId !== visitId
+          || ![
+            BLOCK_STATUS.FAILED,
+            BLOCK_STATUS.CANCELLED,
+            BLOCK_STATUS.INTERRUPTED,
+          ].includes(visit.status)
+        ) {
+          throw new RunJournalError(
+            'Boundary disposition requires the final uncertain visit',
+            'invalid-state'
+          );
+        }
+        const review = {
+          visitId,
+          sourceRevision,
+          disposition,
+          reviewedAt: at,
+        };
+        run.boundaryReviews.push(review);
+        appendEvent(run, 'boundary.disposition-recorded', at, {
+          visitId,
+          disposition,
+        });
+        return {
+          refId: visitId,
+          value: () => publicBoundaryReview(review),
         };
       },
     });
@@ -2025,6 +3310,48 @@ class RunJournal {
   }
 
   async pruneRuns(input) {
+    return this._withLock('retention', () => this._pruneRuns(input));
+  }
+
+  async recoverPrune() {
+    return this._withLock('retention', async () => {
+      const deletion = this._readDeleteTransaction();
+      if (deletion?.status === DELETE_TRANSACTION_STATUS.APPLYING) {
+        throw new RunJournalError(
+          'A confirmed delete transaction still needs recovery',
+          'delete-incomplete'
+        );
+      }
+      const transaction = this._readRetentionTransaction();
+      if (!transaction) return { recovered: false, result: null };
+      if (isRetentionTerminal(transaction)) {
+        this._recordRetentionReceipt(transaction);
+        return { recovered: false, result: clonePublic(transaction.result) };
+      }
+      const result = this._applyRetentionTransaction(transaction);
+      return { recovered: true, result };
+    });
+  }
+
+  async recoverDelete() {
+    return this._withLock('retention', async () => {
+      const transaction = this._readDeleteTransaction();
+      if (!transaction || transaction.status === DELETE_TRANSACTION_STATUS.COMMITTED) {
+        return { recovered: false, result: transaction?.result || null };
+      }
+      const result = this._applyDeleteTransaction(transaction);
+      return { recovered: true, result };
+    });
+  }
+
+  async _pruneRuns(input) {
+    const deletion = this._readDeleteTransaction();
+    if (deletion?.status === DELETE_TRANSACTION_STATUS.APPLYING) {
+      throw new RunJournalError(
+        'A confirmed delete transaction still needs recovery',
+        'delete-incomplete'
+      );
+    }
     const raw = input === undefined || input === null
       ? {}
       : asObject(input, 'pruneRuns payload');
@@ -2081,16 +3408,24 @@ class RunJournal {
     }
 
     const policy = { maxRuns, maxAgeDays, cutoff };
-    const index = this._ensureIndex();
-    const plan = this._retentionPlan(index, policy);
-    const previewToken = this._retentionPreviewToken(policy, plan.candidates);
+    const transaction = this._readRetentionTransaction();
     if (preview) {
+      if (isRetentionPending(transaction)) {
+        throw new RunJournalError(
+          'A confirmed retention transaction still needs recovery',
+          'prune-incomplete'
+        );
+      }
+      const snapshot = this._retentionSnapshot();
+      const plan = this._retentionPlan(snapshot.index, policy);
+      const previewToken = this._issueRetentionPreview(policy, plan.candidates);
       return {
         preview: true,
         candidateCount: plan.candidates.length,
         terminalCount: plan.terminalCount,
         activeCount: plan.activeCount,
-        total: index.runs.length,
+        protectedAncestorCount: plan.protectedAncestorCount,
+        total: snapshot.index.runs.length,
         cutoff,
         previewToken,
       };
@@ -2102,12 +3437,63 @@ class RunJournal {
       pattern: PREVIEW_TOKEN_PATTERN,
     });
     const opId = asOpId(raw.opId);
-    const fingerprint = operationFingerprint('prune-runs', {
-      policy,
-      previewToken: suppliedToken,
-    });
+    if (transaction?.opId === opId) {
+      const fingerprint = operationFingerprint('prune-runs', {
+        policy,
+        previewToken: suppliedToken,
+        planDigest: transaction.planDigest,
+      });
+      if (transaction.fingerprint !== fingerprint) {
+        throw new RunJournalError(
+          'Operation id was reused with a different retention plan',
+          'op-conflict'
+        );
+      }
+      if (isRetentionTerminal(transaction)) {
+        this._recordRetentionReceipt(transaction);
+        this._rememberPrune(opId, {
+          fingerprint,
+          planDigest: transaction.planDigest,
+          result: transaction.result,
+        });
+        return clonePublic(transaction.result);
+      }
+      return this._applyRetentionTransaction(transaction);
+    }
+    if (isRetentionPending(transaction)) {
+      throw new RunJournalError(
+        'A confirmed retention transaction still needs recovery',
+        'prune-incomplete'
+      );
+    }
+    if (isRetentionTerminal(transaction)) this._recordRetentionReceipt(transaction);
+    const durableReplay = this._findRetentionReceipt(opId);
+    if (durableReplay) {
+      const fingerprint = operationFingerprint('prune-runs', {
+        policy,
+        previewToken: suppliedToken,
+        planDigest: durableReplay.planDigest,
+      });
+      if (durableReplay.fingerprint !== fingerprint) {
+        throw new RunJournalError(
+          'Operation id was reused with a different retention plan',
+          'op-conflict'
+        );
+      }
+      this._rememberPrune(opId, {
+        fingerprint,
+        planDigest: durableReplay.planDigest,
+        result: durableReplay.result,
+      });
+      return clonePublic(durableReplay.result);
+    }
     const replay = this._pruned.get(opId);
     if (replay) {
+      const fingerprint = operationFingerprint('prune-runs', {
+        policy,
+        previewToken: suppliedToken,
+        planDigest: replay.planDigest,
+      });
       if (replay.fingerprint !== fingerprint) {
         throw new RunJournalError(
           'Operation id was reused with a different retention plan',
@@ -2116,63 +3502,39 @@ class RunJournal {
       }
       return clonePublic(replay.result);
     }
-    if (suppliedToken !== previewToken) {
-      throw new RunJournalError(
-        'Run history changed after the retention preview; preview again',
-        'prune-preview-stale'
-      );
-    }
 
-    // Validate every source record before deleting the first one. Terminal
-    // records are immutable, and this synchronous commit leaves no event-loop
-    // gap between validation and deletion.
-    const records = [];
-    for (const summary of plan.candidates) {
-      const run = this._readRun(summary.id, { throwOnError: true });
-      if (
-        !run
-        || !RUN_TERMINAL_VALUES.has(run.status)
-        || run.revision !== summary.revision
-      ) {
-        throw new RunJournalError(
-          'Run history changed after the retention preview; preview again',
-          'prune-preview-stale'
-        );
-      }
-      records.push(run);
-    }
-
-    this._markIndexDirty();
-    const deletedIds = new Set();
-    try {
-      for (const run of records) {
-        this.deleteRecord(this._filePath(run.id));
-        deletedIds.add(run.id);
-        this.memory.deletePrefix(`workflow:${run.id}`);
-        this.memory.deletePrefix(`result:${run.id}:`);
-        this.memory.deletePrefix(`operation:${run.id}:`);
-        this._rememberDeletion(run.id, { opId, fingerprint });
-      }
-    } catch (_error) {
-      this._clearIndex();
-      throw new RunJournalError(
-        'Run Journal retention could not delete every selected record; preview again',
-        'storage-delete-failed'
-      );
-    }
-
-    const nextIndex = makeSummaryIndex(
-      index.runs.filter(summary => !deletedIds.has(summary.id))
-    );
-    this._persistIndex(nextIndex);
-    const result = {
-      preview: false,
-      deletedCount: deletedIds.size,
-      remainingCount: nextIndex.runs.length,
+    const snapshot = this._retentionSnapshot();
+    const plan = this._retentionPlan(snapshot.index, policy);
+    this._assertRetentionPreview(suppliedToken, policy, plan.candidates);
+    const previewToken = suppliedToken;
+    const planDigest = this._retentionPlanDigest(policy, plan.candidates);
+    const fingerprint = operationFingerprint('prune-runs', {
+      policy,
       previewToken,
+      planDigest,
+    });
+
+    const prepared = {
+      schemaVersion: RETENTION_TRANSACTION_SCHEMA_VERSION,
+      status: RETENTION_TRANSACTION_STATUS.PREPARED,
+      opId,
+      fingerprint,
+      policy,
+      previewToken,
+      planDigest,
+      candidates: plan.candidates.map(summary => ({
+        id: summary.id,
+        revision: summary.revision,
+      })),
+      startedAt: this._timestamp(),
+      committedAt: null,
+      result: null,
     };
-    this._rememberPrune(opId, { fingerprint, result });
-    return clonePublic(result);
+    this._mutationBoundary('prune-transaction', 'before', null);
+    this._writeRetentionTransaction(prepared);
+    this._retentionPreviews.delete(previewToken);
+    this._mutationBoundary('prune-transaction', 'after', null);
+    return this._applyRetentionTransaction(prepared);
   }
 
   async getRun(input) {
@@ -2183,8 +3545,10 @@ class RunJournal {
         assertOnlyKeys(raw, new Set(['runId']), 'getRun payload');
         return asRunId(raw.runId);
       })();
-    const run = this._readRun(runId);
-    return run ? publicRun(run) : null;
+    return this._withLock('retention', () => {
+      const run = this._readRunWithLineage(runId);
+      return run ? publicRun(run) : null;
+    });
   }
 
   /**
@@ -2205,8 +3569,8 @@ class RunJournal {
     const runId = asRunId(raw.runId);
     const sourceRevision = asPositiveInt(raw.sourceRevision, 'sourceRevision');
 
-    return this._withLock(`run:${runId}`, async () => {
-      const run = this._readRun(runId);
+    return this._withLock('retention', () => this._withLock(`run:${runId}`, async () => {
+      const run = this._readRunWithLineage(runId);
       if (!run) throw new RunJournalError('Run was not found', 'not-found');
       if (run.revision !== sourceRevision) {
         throw new RunJournalError(
@@ -2221,7 +3585,7 @@ class RunJournal {
         resolveProfile,
         isDirectory,
       });
-    });
+    }));
   }
 
   async getResult(input) {
@@ -2229,13 +3593,15 @@ class RunJournal {
     assertOnlyKeys(raw, new Set(['runId', 'resultId']), 'getResult payload');
     const runId = asRunId(raw.runId);
     const resultId = asRunId(raw.resultId, 'resultId');
-    const run = this._readRun(runId);
-    if (!run) return null;
-    const result = run.results.find(entry => entry.id === resultId);
-    if (!result) return null;
+    return this._withLock('retention', () => this._withLock(`run:${runId}`, async () => {
+      const run = this._readRunWithLineage(runId);
+      if (!run) return null;
+      const result = run.results.find(entry => entry.id === resultId);
+      if (!result) return null;
 
-    const body = await this._readResultBody(run, result);
-    return { ...publicResult(result), body };
+      const body = await this._readResultBody(run, result);
+      return { ...publicResult(result), body };
+    }));
   }
 
   async _readWorkflowSnapshot(run) {
@@ -2338,13 +3704,75 @@ class RunJournal {
     return body;
   }
 
+  async _readControlCheckpoint(run, checkpoint) {
+    if (checkpoint.storage !== STORAGE.ENCRYPTED) {
+      throw new RunJournalError(
+        'Control checkpoint is not durably protected',
+        'body-unavailable'
+      );
+    }
+    if (!await this._encryptionAvailable({ decrypt: true })) {
+      throw new RunJournalError(
+        'Encrypted control checkpoint is unavailable on this system',
+        'body-unavailable'
+      );
+    }
+
+    const context = {
+      kind: 'control-checkpoint',
+      runId: run.id,
+      visitId: checkpoint.afterVisitId,
+      sourceRevision: checkpoint.sourceRevision,
+      checkpointId: checkpoint.id,
+    };
+    let body;
+    try {
+      const decrypted = await this.encryption.decrypt(
+        checkpoint.ciphertext,
+        context
+      );
+      body = decodeEncryptedEnvelope(decrypted, context);
+    } catch (_error) {
+      throw new RunJournalError(
+        'Encrypted control checkpoint could not be decrypted',
+        'decrypt-failed'
+      );
+    }
+    if (utf8ByteLength(body) !== checkpoint.byteLength) {
+      throw new RunJournalError(
+        'Control checkpoint failed its integrity check',
+        'integrity-failed'
+      );
+    }
+
+    try {
+      const normalized = normalizeControlCheckpointState(JSON.parse(body));
+      if (
+        normalized.plaintext !== body
+        || normalized.state.version !== checkpoint.stateVersion
+      ) {
+        throw new Error('control checkpoint metadata mismatch');
+      }
+      return normalized.state;
+    } catch (_error) {
+      throw new RunJournalError(
+        'Control checkpoint failed its integrity check',
+        'integrity-failed'
+      );
+    }
+  }
+
   async recoverInterrupted() {
+    return this._withLock('retention', () => this._recoverInterrupted());
+  }
+
+  async _recoverInterrupted() {
     const recovered = [];
     let failureCount = 0;
     // Recovery already has to validate every durable record to contain an
     // unknown active run. Reuse that one sweep to refresh the derived index,
     // rather than making the first Runs view pay a second full scan.
-    this._markIndexDirty({ required: false });
+    this._markIndexDirty();
     this._clearIndex();
     // A record rejected by the initial scan could itself be a durable active
     // run. Recover every valid candidate we can, then fail containment closed
@@ -2411,62 +3839,78 @@ class RunJournal {
     const runId = asRunId(raw.runId);
     const opId = asOpId(raw.opId);
     const fingerprint = operationFingerprint('delete-run', { runId });
-    return this._withLock(`run:${runId}`, () => this._withLock('memory', async () => {
-      const tombstone = this._deleted.get(runId);
-      if (tombstone) {
-        if (tombstone.opId === opId && tombstone.fingerprint !== fingerprint) {
+    return this._withLock('retention', () => this._withLock(
+      `run:${runId}`,
+      () => this._withLock('memory', async () => {
+        const deletion = this._readDeleteTransaction();
+        if (deletion?.status === DELETE_TRANSACTION_STATUS.APPLYING) {
+          if (
+            deletion.runId === runId
+            && deletion.opId === opId
+            && deletion.fingerprint === fingerprint
+          ) {
+            return this._applyDeleteTransaction(deletion);
+          }
           throw new RunJournalError(
-            'Conflicting reuse of an operation id for a deleted run',
-            'op-conflict'
+            'A confirmed delete transaction still needs recovery',
+            'delete-incomplete'
           );
         }
-        return false;
-      }
-      const run = this._readRun(runId);
-      if (!run) return false;
-      const prior = run.operations.find(operation => operation.opId === opId);
-      if (prior) await this._assertReplay(run, prior, 'delete-run', fingerprint);
-      if (run.status === RUN_STATUS.RUNNING) {
-        throw new RunJournalError('An active run cannot be deleted', 'active-run');
-      }
-      const index = this._prepareIndexMutation();
-      this._markIndexDirty();
-      try {
-        this.deleteRecord(this._filePath(runId));
-      } catch (error) {
-        this._clearIndex();
-        if (error?.code === 'ENOENT') return false;
-        throw new RunJournalError(
-          'Run Journal record could not be deleted',
-          'storage-delete-failed'
-        );
-      }
-      this.memory.deletePrefix(`workflow:${runId}`);
-      this.memory.deletePrefix(`result:${runId}:`);
-      this.memory.deletePrefix(`operation:${runId}:`);
-      this._rememberDeletion(runId, { opId, fingerprint });
-      if (index) {
-        this._persistIndex(makeSummaryIndex(
-          index.runs.filter(summary => summary.id !== runId)
-        ));
-      } else {
-        this._clearIndex();
-      }
-      return true;
-    }));
+        const retention = this._readRetentionTransaction();
+        if (isRetentionPending(retention)) {
+          throw new RunJournalError(
+            'A confirmed retention transaction still needs recovery',
+            'prune-incomplete'
+          );
+        }
+        const snapshot = this._retentionSnapshot();
+        const run = snapshot.runs.find(entry => entry.id === runId) || null;
+        if (!run) return false;
+        const prior = run.operations.find(operation => operation.opId === opId);
+        if (prior) await this._assertReplay(run, prior, 'delete-run', fingerprint);
+        if (run.status === RUN_STATUS.RUNNING) {
+          throw new RunJournalError('An active run cannot be deleted', 'active-run');
+        }
+        if (snapshot.runs.some(entry => entry.parentRunId === runId)) {
+          throw new RunJournalError(
+            'A run with retained descendants cannot be deleted',
+            'lineage-retained'
+          );
+        }
+        const prepared = {
+          schemaVersion: RETENTION_TRANSACTION_SCHEMA_VERSION,
+          status: DELETE_TRANSACTION_STATUS.APPLYING,
+          runId,
+          revision: run.revision,
+          opId,
+          fingerprint,
+          startedAt: this._timestamp(),
+          committedAt: null,
+          result: null,
+        };
+        this._mutationBoundary('delete-transaction', 'before', runId);
+        this._writeDeleteTransaction(prepared);
+        this._mutationBoundary('delete-transaction', 'after', runId);
+        return this._applyDeleteTransaction(prepared);
+      })
+    ));
   }
 
   async _mutate({
     runId,
     opId,
     action,
+    mutationKind = null,
     fingerprint,
     replay,
     apply,
     degraded,
   }) {
-    return this._withLock(`run:${runId}`, () => this._withLock('memory', async () => {
-      const run = this._readRun(runId);
+    return this._withLock('retention', () => this._withLock(
+      `run:${runId}`,
+      () => this._withLock('memory', async () => {
+      this._assertNoPendingRetentionMutation();
+      const run = this._readRunWithLineage(runId);
       if (!run) throw new RunJournalError('Run was not found', 'not-found');
       const operation = run.operations.find(entry => entry.opId === opId);
       if (operation) {
@@ -2477,7 +3921,12 @@ class RunJournal {
       // successful no-op: the workflow keeps running while the journal keeps
       // only what it recorded before capacity was reached.
       if (run.truncated && degraded && run.status === RUN_STATUS.RUNNING) {
-        return degraded(run, this._timestamp());
+        return this._degradedMutation(run, {
+          opId,
+          action,
+          fingerprint,
+          degraded,
+        });
       }
       try {
         if (run.operations.length >= MAX_OPERATIONS) {
@@ -2505,7 +3954,9 @@ class RunJournal {
           });
           run.updatedAt = at;
           this._advanceRevision(run);
+          if (mutationKind) this._mutationBoundary(mutationKind, 'before', runId);
           this._writeRun(run);
+          if (mutationKind) this._mutationBoundary(mutationKind, 'after', runId);
         } catch (error) {
           if (proof.rollback) proof.rollback();
           if (mutation.rollback) mutation.rollback();
@@ -2520,9 +3971,15 @@ class RunJournal {
         ) {
           throw error;
         }
-        return this._degradeTruncated(runId, error, degraded);
+        return this._degradeTruncated(runId, error, {
+          opId,
+          action,
+          fingerprint,
+          degraded,
+        });
       }
-    }));
+      })
+    ));
   }
 
   /**
@@ -2532,7 +3989,7 @@ class RunJournal {
    * answer the mutation as a successful no-op. Terminal recording via
    * finishRun/recoverInterrupted keeps working from its own reservation.
    */
-  _degradeTruncated(runId, cause, degraded) {
+  _degradeTruncated(runId, cause, mutation) {
     const run = this._readRun(runId);
     if (!run || run.status !== RUN_STATUS.RUNNING) throw cause;
     if (!run.truncated) {
@@ -2542,7 +3999,18 @@ class RunJournal {
       this._advanceRevision(run);
       this._writeRun(run);
     }
-    return degraded(run, this._timestamp());
+    return this._degradedMutation(run, mutation);
+  }
+
+  _degradedMutation(run, { opId, action, fingerprint, degraded }) {
+    const id = deterministicUuid(stableJson({
+      kind: 'truncated-operation',
+      runId: run.id,
+      opId,
+      action,
+      fingerprint,
+    }));
+    return degraded(run, run.truncated.at, { id });
   }
 
   async _assertReplay(run, operation, action, fingerprint) {
@@ -2640,6 +4108,34 @@ class RunJournal {
       return await adapter.isAvailable() === true;
     } catch (_error) {
       return false;
+    }
+  }
+
+  async _secureEncryptedPayload(plaintext, context, maxCiphertextBytes) {
+    const normalizedContext = normalizeEncryptionContext(context);
+    if (!await this._encryptionAvailable()) {
+      throw new RunJournalError(
+        'OS-backed encryption is required for control checkpoints',
+        'encryption-unavailable'
+      );
+    }
+    const envelope = encodeEncryptedEnvelope(plaintext, normalizedContext);
+    try {
+      const ciphertext = await this.encryption.encrypt(envelope, normalizedContext);
+      return {
+        storage: STORAGE.ENCRYPTED,
+        ciphertext: assertCiphertext(
+          ciphertext,
+          `${normalizedContext.kind} encryption`,
+          maxCiphertextBytes
+        ),
+      };
+    } catch (error) {
+      if (error instanceof RunJournalError) throw error;
+      throw new RunJournalError(
+        'Control checkpoint encryption failed',
+        'encryption-failed'
+      );
     }
   }
 
@@ -2768,8 +4264,301 @@ class RunJournal {
     return path.join(this.dir, `${runId}.json`);
   }
 
+  _v1MigrationBackupPath(runId) {
+    return path.join(
+      this.dir,
+      MIGRATION_DIRECTORY,
+      V1_MIGRATION_DIRECTORY,
+      `${runId}.json`
+    );
+  }
+
+  _retentionTransactionPath() {
+    return path.join(
+      this.dir,
+      RETENTION_DIRECTORY,
+      RETENTION_TRANSACTION_FILE
+    );
+  }
+
+  _retentionReceiptsPath() {
+    return path.join(this.dir, RETENTION_DIRECTORY, RETENTION_RECEIPTS_FILE);
+  }
+
+  _deleteTransactionPath() {
+    return path.join(this.dir, RETENTION_DIRECTORY, DELETE_TRANSACTION_FILE);
+  }
+
+  _retentionReportFile() {
+    return path.join(RETENTION_DIRECTORY, RETENTION_TRANSACTION_FILE);
+  }
+
+  _retentionReceiptsReportFile() {
+    return path.join(RETENTION_DIRECTORY, RETENTION_RECEIPTS_FILE);
+  }
+
+  _deleteTransactionReportFile() {
+    return path.join(RETENTION_DIRECTORY, DELETE_TRANSACTION_FILE);
+  }
+
+  _coordinationFileSignature(file) {
+    // App-owned updates use atomic rename (changing file identity); in-place
+    // changes normally move size or high-resolution timestamps. This is a
+    // cache invalidator for main-owned state, not an authenticity boundary.
+    const stats = fs.statSync(file, { bigint: true });
+    return [
+      stats.dev,
+      stats.ino,
+      stats.size,
+      stats.mtimeNs,
+      stats.ctimeNs,
+    ].join(':');
+  }
+
+  _readRetentionTransaction() {
+    const transactionPath = this._retentionTransactionPath();
+    try {
+      const before = this._coordinationFileSignature(transactionPath);
+      if (this._retentionTransactionCache?.signature === before) {
+        return this._retentionTransactionCache.transaction;
+      }
+      const transaction = readJsonStrict(transactionPath, {
+        maxFileBytes: MAX_RETENTION_TRANSACTION_BYTES,
+      });
+      try {
+        assertRetentionTransaction(transaction);
+      } catch (_error) {
+        throw new RunJournalError(
+          'Retention transaction is invalid',
+          'corrupt-retention'
+        );
+      }
+      const after = this._coordinationFileSignature(transactionPath);
+      if (before !== after) {
+        throw new RunJournalError(
+          'Retention transaction changed while it was read',
+          'corrupt-retention'
+        );
+      }
+      this._retentionTransactionCache = { signature: after, transaction };
+      return transaction;
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        this._retentionTransactionCache = null;
+        return null;
+      }
+      this._retentionTransactionCache = null;
+      this._report(this._retentionReportFile(), error);
+      if (error instanceof RunJournalError && error.code === 'corrupt-retention') {
+        throw error;
+      }
+      throw new RunJournalError(
+        'Retention transaction could not be read',
+        'corrupt-retention'
+      );
+    }
+  }
+
+  _assertNoPendingRetentionMutation() {
+    const transaction = this._readRetentionTransaction();
+    if (isRetentionPending(transaction)) {
+      throw new RunJournalError(
+        'A confirmed retention transaction still needs recovery',
+        'prune-incomplete'
+      );
+    }
+    const deletion = this._readDeleteTransaction();
+    if (deletion?.status === DELETE_TRANSACTION_STATUS.APPLYING) {
+      throw new RunJournalError(
+        'A confirmed delete transaction still needs recovery',
+        'delete-incomplete'
+      );
+    }
+  }
+
+  _readDeleteTransaction() {
+    const transactionPath = this._deleteTransactionPath();
+    try {
+      const before = this._coordinationFileSignature(transactionPath);
+      if (this._deleteTransactionCache?.signature === before) {
+        return this._deleteTransactionCache.transaction;
+      }
+      const transaction = readJsonStrict(transactionPath, {
+        maxFileBytes: 64 * 1024,
+      });
+      try {
+        assertDeleteTransaction(transaction);
+      } catch (_error) {
+        throw new RunJournalError('Delete transaction is invalid', 'corrupt-retention');
+      }
+      const after = this._coordinationFileSignature(transactionPath);
+      if (before !== after) {
+        throw new RunJournalError(
+          'Delete transaction changed while it was read',
+          'corrupt-retention'
+        );
+      }
+      this._deleteTransactionCache = { signature: after, transaction };
+      return transaction;
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        this._deleteTransactionCache = null;
+        return null;
+      }
+      this._deleteTransactionCache = null;
+      this._report(this._deleteTransactionReportFile(), error);
+      if (error instanceof RunJournalError && error.code === 'corrupt-retention') {
+        throw error;
+      }
+      throw new RunJournalError('Delete transaction could not be read', 'corrupt-retention');
+    }
+  }
+
+  _writeDeleteTransaction(transaction) {
+    assertDeleteTransaction(transaction);
+    this._deleteTransactionCache = null;
+    try {
+      this.writeDeleteTransaction(this._deleteTransactionPath(), transaction);
+    } catch (_error) {
+      throw new RunJournalError('Delete transaction could not be written', 'storage-write-failed');
+    }
+  }
+
+  _readRetentionReceipts() {
+    try {
+      const index = readJsonStrict(this._retentionReceiptsPath(), {
+        maxFileBytes: MAX_RETENTION_RECEIPTS_BYTES,
+      });
+      try {
+        assertRetentionReceiptIndex(index);
+      } catch (_error) {
+        throw new RunJournalError('Retention receipts are invalid', 'corrupt-retention');
+      }
+      return index;
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        return { schemaVersion: RETENTION_TRANSACTION_SCHEMA_VERSION, receipts: [] };
+      }
+      this._report(this._retentionReceiptsReportFile(), error);
+      if (error instanceof RunJournalError && error.code === 'corrupt-retention') {
+        throw error;
+      }
+      throw new RunJournalError('Retention receipts could not be read', 'corrupt-retention');
+    }
+  }
+
+  _writeRetentionReceipts(index) {
+    assertRetentionReceiptIndex(index);
+    if (
+      Buffer.byteLength(JSON.stringify(index, null, 2), 'utf8')
+      > MAX_RETENTION_RECEIPTS_BYTES
+    ) {
+      throw new RunJournalError('Retention receipts exceed their storage limit', 'size-limit');
+    }
+    try {
+      this.writeRetentionReceipts(this._retentionReceiptsPath(), index);
+    } catch (_error) {
+      throw new RunJournalError('Retention receipts could not be written', 'storage-write-failed');
+    }
+  }
+
+  _findRetentionReceipt(opId) {
+    return this._readRetentionReceipts().receipts.find(receipt => receipt.opId === opId) || null;
+  }
+
+  _recordRetentionReceipt(transaction) {
+    if (!isRetentionTerminal(transaction)) return false;
+    const index = this._readRetentionReceipts();
+    const existing = index.receipts.find(receipt => receipt.opId === transaction.opId);
+    if (existing) {
+      if (existing.fingerprint !== transaction.fingerprint) {
+        throw new RunJournalError(
+          'Retention receipt conflicts with its transaction',
+          'corrupt-retention'
+        );
+      }
+      return false;
+    }
+    const receipt = {
+      opId: transaction.opId,
+      fingerprint: transaction.fingerprint,
+      policy: clonePublic(transaction.policy),
+      previewToken: transaction.previewToken,
+      planDigest: transaction.planDigest,
+      result: clonePublic(transaction.result),
+      committedAt: transaction.committedAt,
+    };
+    const next = {
+      schemaVersion: RETENTION_TRANSACTION_SCHEMA_VERSION,
+      receipts: [...index.receipts, receipt].slice(-MAX_RETENTION_RECEIPTS),
+    };
+    this._mutationBoundary('prune-receipt', 'before', null);
+    this._writeRetentionReceipts(next);
+    this._mutationBoundary('prune-receipt', 'after', null);
+    return true;
+  }
+
+  _writeRetentionTransaction(transaction) {
+    assertRetentionTransaction(transaction);
+    if (
+      Buffer.byteLength(JSON.stringify(transaction, null, 2), 'utf8')
+      > MAX_RETENTION_TRANSACTION_BYTES
+    ) {
+      throw new RunJournalError(
+        'Retention transaction exceeds its storage limit',
+        'size-limit'
+      );
+    }
+    this._retentionTransactionCache = null;
+    try {
+      this.writeRetentionTransaction(this._retentionTransactionPath(), transaction);
+    } catch (_error) {
+      throw new RunJournalError(
+        'Retention transaction could not be written',
+        'storage-write-failed'
+      );
+    }
+  }
+
+  _deleteV1MigrationBackup(runId) {
+    try {
+      this.deleteMigrationBackup(this._v1MigrationBackupPath(runId));
+    } catch (error) {
+      if (error?.code === 'ENOENT') return false;
+      throw new RunJournalError(
+        'Run Journal migration backup could not be deleted',
+        'storage-delete-failed'
+      );
+    }
+    return true;
+  }
+
   _indexDirectoryPath() {
     return path.join(this.dir, RUN_INDEX_DIRECTORY);
+  }
+
+  _removeLegacyIndexFiles() {
+    this._mutationBoundary('migration-index-cleanup', 'before', null);
+    let removed = 0;
+    let failed = 0;
+    for (const file of LEGACY_RUN_INDEX_FILES) {
+      try {
+        this.deleteLegacyIndex(path.join(this._indexDirectoryPath(), file));
+        removed += 1;
+      } catch (error) {
+        if (error?.code === 'ENOENT') continue;
+        failed += 1;
+        this._report(
+          this._indexReportFile(file),
+          new RunJournalError(
+            'A rebuildable legacy Run Journal index could not be removed',
+            'storage-delete-failed'
+          )
+        );
+      }
+    }
+    this._mutationBoundary('migration-index-cleanup', 'after', null);
+    return { removed, failed };
   }
 
   _indexFilePath() {
@@ -2913,34 +4702,314 @@ class RunJournal {
     return this._rebuildIndex();
   }
 
+  _retentionSnapshot() {
+    let recordErrors = 0;
+    const runs = this._loadAllRuns({
+      onRecordError: () => {
+        recordErrors += 1;
+      },
+    });
+    if (recordErrors > 0) {
+      throw new RunJournalError(
+        'Run Journal retention cannot prove every source record',
+        'retention-source-uncertain'
+      );
+    }
+    return { runs, index: makeRunIndex(runs) };
+  }
+
   _retentionPlan(index, { maxRuns, maxAgeDays, cutoff }) {
     const terminal = index.runs.filter(summary => RUN_TERMINAL_VALUES.has(summary.status));
     const beyondCount = maxRuns === null
       ? new Set()
       : new Set(terminal.slice(maxRuns).map(summary => summary.id));
-    const candidates = terminal.filter(summary => (
+    const initialCandidates = terminal.filter(summary => (
       beyondCount.has(summary.id)
       || (
         maxAgeDays !== null
         && summary.finishedAt.localeCompare(cutoff) < 0
       )
     ));
+    const initialIds = new Set(initialCandidates.map(summary => summary.id));
+    const byId = new Map(index.runs.map(summary => [summary.id, summary]));
+    const protectedAncestors = new Set();
+    for (const summary of index.runs) {
+      if (initialIds.has(summary.id)) continue;
+      let parentId = summary.parentRunId;
+      while (parentId !== null) {
+        protectedAncestors.add(parentId);
+        parentId = byId.get(parentId)?.parentRunId ?? null;
+      }
+    }
+    const candidates = initialCandidates
+      .filter(summary => !protectedAncestors.has(summary.id))
+      // Delete descendants before ancestors so an interrupted transaction
+      // never leaves a surviving child whose source was already removed.
+      .sort((left, right) => (
+        right.attempt - left.attempt || compareRunSummaries(left, right)
+      ));
     return {
       candidates,
       terminalCount: terminal.length,
       activeCount: index.runs.length - terminal.length,
+      protectedAncestorCount: initialCandidates.length - candidates.length,
     };
   }
 
-  _retentionPreviewToken(policy, candidates) {
-    return sha256(stableJson({
-      version: 1,
-      policy,
-      candidates: candidates.map(summary => ({
-        id: summary.id,
-        revision: summary.revision,
-      })),
-    }, 'retention preview'));
+  _retentionPlanDigest(policy, candidates) {
+    return retentionPlanDigest(policy, candidates);
+  }
+
+  _issueRetentionPreview(policy, candidates) {
+    let token;
+    do {
+      token = crypto.randomBytes(32).toString('hex');
+    } while (this._retentionPreviews.has(token));
+    this._retentionPreviews.set(token, {
+      policy: clonePublic(policy),
+      planDigest: this._retentionPlanDigest(policy, candidates),
+      issuedAt: this._timestamp(),
+    });
+    while (this._retentionPreviews.size > 128) {
+      this._retentionPreviews.delete(this._retentionPreviews.keys().next().value);
+    }
+    return token;
+  }
+
+  _assertRetentionPreview(token, policy, candidates) {
+    const preview = this._retentionPreviews.get(token);
+    if (!preview) {
+      throw new RunJournalError(
+        'The retention preview is absent or expired; preview again',
+        'prune-preview-stale'
+      );
+    }
+    const checkedAt = this._timestamp();
+    const age = Date.parse(checkedAt) - Date.parse(preview.issuedAt);
+    if (
+      age < 0
+      || age > RETENTION_PREVIEW_TTL_MS
+      || stableJson(preview.policy) !== stableJson(policy)
+      || preview.planDigest !== this._retentionPlanDigest(policy, candidates)
+    ) {
+      this._retentionPreviews.delete(token);
+      throw new RunJournalError(
+        'Run history changed after the retention preview; preview again',
+        'prune-preview-stale'
+      );
+    }
+  }
+
+  _applyDeleteTransaction(transaction) {
+    assertDeleteTransaction(transaction);
+    if (transaction.status === DELETE_TRANSACTION_STATUS.COMMITTED) return false;
+    const snapshot = this._retentionSnapshot();
+    const run = snapshot.runs.find(entry => entry.id === transaction.runId) || null;
+    if (run) {
+      if (
+        !RUN_TERMINAL_VALUES.has(run.status)
+        || run.revision !== transaction.revision
+        || snapshot.runs.some(entry => entry.parentRunId === run.id)
+      ) {
+        throw new RunJournalError(
+          'Run history changed during delete recovery',
+          'delete-stale'
+        );
+      }
+      this._markIndexDirty();
+      this._mutationBoundary('delete-record', 'before', run.id);
+      try {
+        this.deleteRecord(this._filePath(run.id));
+      } catch (error) {
+        if (error?.code !== 'ENOENT') {
+          this._clearIndex();
+          throw new RunJournalError(
+            'Run Journal record could not be deleted',
+            'storage-delete-failed'
+          );
+        }
+      }
+      this._mutationBoundary('delete-record', 'after', run.id);
+    }
+
+    this.memory.deletePrefix(`workflow:${transaction.runId}`);
+    this.memory.deletePrefix(`result:${transaction.runId}:`);
+    this.memory.deletePrefix(`operation:${transaction.runId}:`);
+    this._mutationBoundary('delete-backup', 'before', transaction.runId);
+    this._deleteV1MigrationBackup(transaction.runId);
+    this._mutationBoundary('delete-backup', 'after', transaction.runId);
+
+    const remaining = this._retentionSnapshot();
+    if (remaining.runs.some(entry => entry.id === transaction.runId)) {
+      throw new RunJournalError(
+        'Run Journal delete left its selected record behind',
+        'storage-delete-failed'
+      );
+    }
+    this._persistIndex(remaining.index);
+    const committed = {
+      ...transaction,
+      status: DELETE_TRANSACTION_STATUS.COMMITTED,
+      committedAt: this._timestamp(),
+      result: true,
+    };
+    this._mutationBoundary('delete-commit', 'before', transaction.runId);
+    this._writeDeleteTransaction(committed);
+    this._mutationBoundary('delete-commit', 'after', transaction.runId);
+    return true;
+  }
+
+  _applyRetentionTransaction(initialTransaction) {
+    let transaction = initialTransaction;
+    assertRetentionTransaction(transaction);
+    if (isRetentionTerminal(transaction)) {
+      return clonePublic(transaction.result);
+    }
+
+    const snapshot = this._retentionSnapshot();
+    const candidates = new Map(
+      transaction.candidates.map(candidate => [candidate.id, candidate])
+    );
+    const byId = new Map(snapshot.runs.map(run => [run.id, run]));
+    let stale = false;
+    for (const candidate of transaction.candidates) {
+      const run = byId.get(candidate.id);
+      if (!run) {
+        if (transaction.status === RETENTION_TRANSACTION_STATUS.PREPARED) stale = true;
+        continue;
+      }
+      if (!RUN_TERMINAL_VALUES.has(run.status) || run.revision !== candidate.revision) {
+        stale = true;
+      }
+    }
+    for (const run of snapshot.runs) {
+      if (candidates.has(run.id)) continue;
+      let parentId = run.parentRunId;
+      while (parentId !== null) {
+        if (candidates.has(parentId)) {
+          stale = true;
+          break;
+        }
+        parentId = byId.get(parentId)?.parentRunId ?? null;
+      }
+    }
+    if (stale) {
+      if (transaction.status === RETENTION_TRANSACTION_STATUS.PREPARED) {
+        return this._abortRetentionTransaction(transaction, snapshot.index.runs.length);
+      }
+      throw new RunJournalError(
+        'Run history changed during retention recovery',
+        'prune-preview-stale'
+      );
+    }
+    if (transaction.status === RETENTION_TRANSACTION_STATUS.PREPARED) {
+      const applying = {
+        ...transaction,
+        status: RETENTION_TRANSACTION_STATUS.APPLYING,
+      };
+      this._mutationBoundary('prune-apply', 'before', null);
+      this._writeRetentionTransaction(applying);
+      this._mutationBoundary('prune-apply', 'after', null);
+      transaction = applying;
+    }
+
+    this._markIndexDirty();
+    for (const candidate of transaction.candidates) {
+      const run = this._readRun(candidate.id, { throwOnError: true });
+      if (run) {
+        if (!RUN_TERMINAL_VALUES.has(run.status) || run.revision !== candidate.revision) {
+          throw new RunJournalError(
+            'Run history changed during retention recovery',
+            'prune-preview-stale'
+          );
+        }
+        this._mutationBoundary('prune-record', 'before', candidate.id);
+        try {
+          this.deleteRecord(this._filePath(candidate.id));
+        } catch (error) {
+          if (error?.code !== 'ENOENT') {
+            this._clearIndex();
+            throw new RunJournalError(
+              'Run Journal retention could not delete a selected record',
+              'storage-delete-failed'
+            );
+          }
+        }
+        this._mutationBoundary('prune-record', 'after', candidate.id);
+      }
+      this.memory.deletePrefix(`workflow:${candidate.id}`);
+      this.memory.deletePrefix(`result:${candidate.id}:`);
+      this.memory.deletePrefix(`operation:${candidate.id}:`);
+
+      this._mutationBoundary('prune-backup', 'before', candidate.id);
+      this._deleteV1MigrationBackup(candidate.id);
+      this._mutationBoundary('prune-backup', 'after', candidate.id);
+    }
+
+    const remaining = this._retentionSnapshot();
+    for (const candidate of transaction.candidates) {
+      if (remaining.runs.some(run => run.id === candidate.id)) {
+        throw new RunJournalError(
+          'Run Journal retention left a selected record behind',
+          'storage-delete-failed'
+        );
+      }
+    }
+    this._persistIndex(remaining.index);
+    const result = {
+      preview: false,
+      deletedCount: transaction.candidates.length,
+      remainingCount: remaining.index.runs.length,
+      previewToken: transaction.previewToken,
+    };
+    const committed = {
+      ...transaction,
+      status: RETENTION_TRANSACTION_STATUS.COMMITTED,
+      committedAt: this._timestamp(),
+      result,
+    };
+    this._mutationBoundary('prune-commit', 'before', null);
+    this._writeRetentionTransaction(committed);
+    this._mutationBoundary('prune-commit', 'after', null);
+    this._recordRetentionReceipt(committed);
+    this._rememberPrune(transaction.opId, {
+      fingerprint: transaction.fingerprint,
+      planDigest: transaction.planDigest,
+      result,
+    });
+    return clonePublic(result);
+  }
+
+  _abortRetentionTransaction(transaction, remainingCount) {
+    if (transaction.status !== RETENTION_TRANSACTION_STATUS.PREPARED) {
+      throw new RunJournalError(
+        'An applying retention transaction cannot be aborted',
+        'prune-preview-stale'
+      );
+    }
+    const result = {
+      preview: false,
+      deletedCount: 0,
+      remainingCount,
+      previewToken: transaction.previewToken,
+      aborted: true,
+    };
+    const aborted = {
+      ...transaction,
+      status: RETENTION_TRANSACTION_STATUS.ABORTED,
+      committedAt: this._timestamp(),
+      result,
+    };
+    this._mutationBoundary('prune-abort', 'before', null);
+    this._writeRetentionTransaction(aborted);
+    this._mutationBoundary('prune-abort', 'after', null);
+    this._recordRetentionReceipt(aborted);
+    this._rememberPrune(transaction.opId, {
+      fingerprint: transaction.fingerprint,
+      planDigest: transaction.planDigest,
+      result,
+    });
+    return clonePublic(result);
   }
 
   _workflowMemoryKey(runId) {
@@ -3039,6 +5108,12 @@ class RunJournal {
     }
   }
 
+  _readRunWithLineage(runId) {
+    const run = this._readRun(runId);
+    if (!run || run.attempt === 1) return run;
+    return this._loadAllRuns().find(candidate => candidate.id === runId) || null;
+  }
+
   _loadAllRuns({ onRecordError = null } = {}) {
     const reportRecordError = (file, error) => {
       this._report(file, error);
@@ -3071,7 +5146,11 @@ class RunJournal {
         reportRecordError(file, error);
       }
     }
-    return runs;
+    const lineageErrors = lineageGraphErrors(runs, 'corrupt-run');
+    for (const [runId, error] of lineageErrors) {
+      reportRecordError(`${runId}.json`, error);
+    }
+    return runs.filter(run => !lineageErrors.has(run.id));
   }
 
   _report(file, error) {
@@ -3094,18 +5173,16 @@ class RunJournal {
     });
   }
 
-  _rememberDeletion(runId, tombstone) {
-    this._deleted.delete(runId);
-    this._deleted.set(runId, tombstone);
-    while (this._deleted.size > 1024) {
-      this._deleted.delete(this._deleted.keys().next().value);
-    }
+  _mutationBoundary(kind, phase, runId) {
+    if (!this.onMutationBoundary) return;
+    this.onMutationBoundary({ kind, phase, runId });
   }
 
   _rememberPrune(opId, entry) {
     this._pruned.delete(opId);
     this._pruned.set(opId, {
       fingerprint: entry.fingerprint,
+      planDigest: entry.planDigest,
       result: clonePublic(entry.result),
     });
     while (this._pruned.size > 128) {
@@ -3116,7 +5193,9 @@ class RunJournal {
 
 module.exports = {
   SCHEMA_VERSION,
+  LEGACY_SCHEMA_VERSION,
   ENCRYPTED_ENVELOPE_VERSION,
+  CONTROL_CHECKPOINT_VERSION,
   RUN_STATUS,
   RUN_TERMINAL_STATES,
   RUN_FINISH_STATES,
@@ -3125,11 +5204,13 @@ module.exports = {
   BLOCK_FINISH_STATES,
   RESULT_STATUS,
   STORAGE,
+  BOUNDARY_DISPOSITION,
   MAX_RESULT_BYTES_PER_LANE,
   MAX_HANDOFF_BYTES,
   MAX_RESULT_BYTES,
   MAX_RUN_RESULT_BYTES,
   MAX_WORKFLOW_BYTES,
+  MAX_CONTROL_CHECKPOINT_BYTES,
   MAX_MEMORY_BYTES,
   MAX_RUN_RECORD_BYTES,
   MAX_MEMORY_ENTRIES,
@@ -3148,7 +5229,9 @@ module.exports = {
   normalizeWorkflowSnapshot,
   normalizeTrigger,
   normalizeLaneDescriptors,
+  normalizeControlCheckpointState,
   normalizeIterationPath,
+  migrateStoredRunV1,
   assertStoredRun,
   publicRun,
   publicResult,

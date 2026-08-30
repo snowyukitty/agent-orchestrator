@@ -657,18 +657,77 @@ if (!gotSingleInstanceLock) {
     // should fail closed via requireRunJournal() instead.
     if (!isSmokeTest && !isSelfTest) {
       runJournal = createRunJournal();
+      let journalInitializationError = null;
+      try {
+        const migration = await runJournal.migrateV1Records();
+        if (migration.migratedCount) {
+          console.log(`[Journal] migrated ${migration.migratedCount} v1 run record(s) to v2`);
+        }
+        if (migration.skippedCount) {
+          console.warn(`[Journal] migration skipped ${migration.skippedCount} unreadable or unsupported record(s)`);
+        }
+        if (migration.legacyIndexCleanupFailures) {
+          console.warn(`[Journal] could not remove ${migration.legacyIndexCleanupFailures} obsolete index file(s); cleanup will retry next launch`);
+        }
+      } catch (error) {
+        journalInitializationError = error;
+        const code = typeof error?.code === 'string' ? error.code : 'migration-error';
+        console.warn(`[Journal] migration failed (${code})`);
+      }
+      if (!journalInitializationError) {
+        try {
+          const deletion = await runJournal.recoverDelete();
+          if (deletion.recovered) {
+            console.log('[Journal] recovered a confirmed run deletion');
+          }
+        } catch (error) {
+          journalInitializationError = error;
+          const code = typeof error?.code === 'string' ? error.code : 'delete-recovery-error';
+          console.warn(`[Journal] delete recovery failed (${code})`);
+        }
+      }
+      if (!journalInitializationError) {
+        try {
+          const retention = await runJournal.recoverPrune();
+          if (retention.recovered) {
+            if (retention.result.aborted) {
+              console.warn('[Journal] discarded a stale retention intent before deletion began');
+            } else {
+              console.log(
+                `[Journal] recovered a confirmed retention transaction (${retention.result.deletedCount} run(s))`
+              );
+            }
+          }
+        } catch (error) {
+          journalInitializationError = error;
+          const code = typeof error?.code === 'string' ? error.code : 'retention-recovery-error';
+          console.warn(`[Journal] retention recovery failed (${code})`);
+        }
+      }
       try {
         const interrupted = await runJournal.recoverInterrupted();
         if (interrupted.length) {
           console.log(`[Journal] recovered ${interrupted.length} interrupted run(s)`);
         }
-        if (isVisualTest || promoCapture) {
-          const fixture = await seedVisualRunJournal(runJournal);
-          console.log(`[Journal] prepared ${fixture.recoveredCount} visual resume scenario(s)`);
-        }
       } catch (error) {
+        journalInitializationError ||= error;
         const code = typeof error?.code === 'string' ? error.code : 'recovery-error';
         console.warn(`[Journal] recovery failed (${code})`);
+      }
+      if (journalInitializationError) {
+        try {
+          await rendererContainment.contain(
+            'startup journal initialization failed',
+            { advanceEpoch: false, newIncident: true }
+          );
+        } catch (_error) {
+          // The coordinator latches the failure and blocks every later journal
+          // mutation and session admission until a fresh containment succeeds.
+        }
+      }
+      if (!rendererContainment.failed && (isVisualTest || promoCapture)) {
+        const fixture = await seedVisualRunJournal(runJournal);
+        console.log(`[Journal] prepared ${fixture.recoveredCount} visual resume scenario(s)`);
       }
     }
     createWindow();
