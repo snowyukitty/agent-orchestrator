@@ -7,10 +7,12 @@ not implemented.
 ## Decision
 
 Agent Orchestrator will treat restart-from-evidence as a new run derived from
-an interrupted run, never as continuation of the old process. The source run
-remains immutable. A resume attempt must pass a main-owned preflight, show an
-exact preview, receive explicit confirmation, and create a new journal run
-with lineage back to its source.
+an interrupted run, never as continuation of the old process. The source is
+never revived as `running`, and its recorded visit/result history is never
+rewritten. Explicitly reviewed audit facts may be appended and advance its
+revision, but grant no execution authority. A resume attempt must pass a
+main-owned preflight, show an exact preview, receive explicit confirmation,
+and create a new journal run with lineage back to its source.
 
 An `interrupted` status alone is not permission to resume. A process may have
 completed an external side effect immediately before the journal lost the

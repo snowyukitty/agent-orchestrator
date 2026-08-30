@@ -3545,8 +3545,10 @@ class RunJournal {
         assertOnlyKeys(raw, new Set(['runId']), 'getRun payload');
         return asRunId(raw.runId);
       })();
-    const run = this._loadAllRuns().find(entry => entry.id === runId) || null;
-    return run ? publicRun(run) : null;
+    return this._withLock('retention', () => {
+      const run = this._readRunWithLineage(runId);
+      return run ? publicRun(run) : null;
+    });
   }
 
   /**

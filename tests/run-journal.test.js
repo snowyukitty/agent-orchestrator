@@ -2074,10 +2074,7 @@ test('recoverInterrupted sweeps valid active runs then rejects an unreadable sca
   );
   assert.deepEqual(reports, [['unknown.json', 'SyntaxError']]);
   assert.equal((await journal.getRun(active.id)).status, RUN_STATUS.INTERRUPTED);
-  assert.deepEqual(reports, [
-    ['unknown.json', 'SyntaxError'],
-    ['unknown.json', 'SyntaxError'],
-  ]);
+  assert.deepEqual(reports, [['unknown.json', 'SyntaxError']]);
 });
 
 test('recoverInterrupted tolerates an active record removed after its scan', async () => {
@@ -2089,7 +2086,7 @@ test('recoverInterrupted tolerates an active record removed after its scan', asy
   assert.deepEqual(await recovering, []);
 });
 
-test('list/get skip corrupt and future files while omitting ciphertext and bodies', async () => {
+test('list skips bad siblings while attempt-1 detail reads only its target', async () => {
   const errors = [];
   const dir = tmpDir();
   const { journal } = makeJournal({
@@ -2124,12 +2121,14 @@ test('list/get skip corrupt and future files while omitting ciphertext and bodie
   assert.equal(Object.hasOwn(listed[0].snapshot, 'hash'), false);
   assert.equal(Object.hasOwn(listed[0], 'operations'), false);
 
+  const reportsAfterList = errors.length;
   const detail = await journal.getRun(run.id);
   assert.equal(detail.results[0].id, result.id);
   assert.equal(Object.hasOwn(detail.results[0], 'ciphertext'), false);
   assert.equal(Object.hasOwn(detail.results[0], 'body'), false);
   assert.equal(Object.hasOwn(detail.results[0], 'hash'), false);
   assert.equal(Object.hasOwn(detail, 'operations'), false);
+  assert.equal(errors.length, reportsAfterList);
   assert.equal(await journal.getRun(futureId), null);
   assert.ok(errors.some(([file]) => file === 'corrupt.json'));
   assert.ok(errors.some(([file]) => file === `${futureId}.json`));
