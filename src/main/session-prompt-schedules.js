@@ -1,15 +1,16 @@
-// Durable, fail-closed schedules for prompts bound to one live PTY incarnation.
+// Durable, fail-closed schedules for prompts bound to one live session incarnation.
 //
 // This store is intentionally separate from workflow files. A workflow schedule
 // launches new work; these records may only continue the exact direct-agent PTY
-// whose main-owned identity was captured at creation time.
+// whose backend-owned identity was captured at creation time.
 
 const fs = require('fs');
 const { randomUUID } = require('crypto');
 
 const { readJsonStrict, writeJsonAtomic } = require('./store');
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
+const LEGACY_SCHEMA_VERSION = 1;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_SCHEDULES = 100;
 const MAX_PROMPT_CHARS = 16_000;
@@ -19,6 +20,12 @@ const ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/;
 const AGENT_PATTERN = /^[a-z][a-z0-9-]{0,31}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const RESULT_VALUES = new Set(['sent', 'busy', 'unavailable', 'session_changed', 'error']);
+const RECORD_KEYS = new Set([
+  'id', 'backendId', 'sessionId', 'sessionIncarnationId', 'expectedProfileId',
+  'expectedAgent', 'prompt', 'nextOccurrenceAt', 'repeatIntervalMinutes', 'enabled',
+  'createdAt', 'updatedAt', 'lastResult', 'deliveryClaim',
+]);
+const LEGACY_RECORD_KEYS = new Set([...RECORD_KEYS].filter(key => key !== 'backendId'));
 
 class SessionPromptScheduleError extends Error {
   constructor(message, code = 'invalid-input') {
@@ -126,16 +133,13 @@ function normalizeLastResult(raw) {
   };
 }
 
-function normalizeStoredRecord(raw, now) {
+function normalizeStoredRecord(raw, now, { legacyBackendId = null } = {}) {
   const record = assertObject(raw, 'Schedule record');
-  assertOnlyKeys(record, new Set([
-    'id', 'sessionId', 'sessionIncarnationId', 'expectedProfileId', 'expectedAgent',
-    'prompt', 'nextOccurrenceAt', 'repeatIntervalMinutes', 'enabled', 'createdAt',
-    'updatedAt', 'lastResult', 'deliveryClaim',
-  ]), 'Schedule record');
+  assertOnlyKeys(record, legacyBackendId ? LEGACY_RECORD_KEYS : RECORD_KEYS, 'Schedule record');
 
   const normalized = {
     id: asUuid(record.id, 'Schedule id'),
+    backendId: asId(legacyBackendId || record.backendId, 'Continuation backend id'),
     sessionId: asId(record.sessionId, 'Session id'),
     sessionIncarnationId: null,
     expectedProfileId: asId(record.expectedProfileId, 'Expected profile id'),
@@ -185,13 +189,43 @@ function validateFile(raw, now) {
   return { schemaVersion: SCHEMA_VERSION, schedules };
 }
 
+function migrateLegacyFile(raw, now, backendId) {
+  const file = assertObject(raw, 'Schedule store');
+  assertOnlyKeys(file, new Set(['schemaVersion', 'schedules']), 'Schedule store');
+  if (file.schemaVersion !== LEGACY_SCHEMA_VERSION) {
+    fail('Schedule store schema is unsupported', 'store-unsupported');
+  }
+  if (!Array.isArray(file.schedules) || file.schedules.length > MAX_SCHEDULES) {
+    fail('Schedule store record count is invalid', 'store-corrupt');
+  }
+  const legacyBackendId = asId(backendId, 'Legacy backend id');
+  const schedules = file.schedules.map(record => (
+    normalizeStoredRecord(record, now, { legacyBackendId })
+  ));
+  const ids = new Set();
+  for (const schedule of schedules) {
+    if (ids.has(schedule.id)) fail('Schedule store repeats an id', 'store-corrupt');
+    ids.add(schedule.id);
+  }
+  return { schemaVersion: SCHEMA_VERSION, schedules };
+}
+
 function bindingMatches(schedule, binding) {
   return !!binding &&
+    binding.backendId === schedule.backendId &&
     binding.sessionId === schedule.sessionId &&
     binding.incarnationId === schedule.sessionIncarnationId &&
     binding.profileId === schedule.expectedProfileId &&
     binding.agent === schedule.expectedAgent &&
     binding.sessionMode === 'direct-agent';
+}
+
+function bindingInspection(schedule, inspection) {
+  if (!inspection || typeof inspection !== 'object') return 'unavailable';
+  if (inspection.status === 'unavailable') return 'unavailable';
+  if (inspection.status === 'session_changed') return 'session_changed';
+  if (inspection.status !== 'matched') return 'unavailable';
+  return bindingMatches(schedule, inspection.binding) ? 'matched' : 'session_changed';
 }
 
 function advanceOccurrence(schedule, status, now) {
@@ -256,20 +290,47 @@ class SessionPromptScheduleStore {
       this._diagnostic = null;
       return parsed;
     } catch (error) {
-      const code = error?.code === 'store-unsupported' ? 'store_unsupported' : 'store_corrupt';
-      this._diagnostic = {
-        code,
-        message: code === 'store_unsupported'
-          ? 'Scheduled prompts are unavailable because the local store uses an unsupported schema.'
-          : 'Scheduled prompts are unavailable because the local store is unreadable. The original file was preserved.',
-      };
-      throw new SessionPromptScheduleError(this._diagnostic.message, code);
+      throw this._diagnose(error);
     }
+  }
+
+  _diagnose(error) {
+    const code = error?.code === 'store-unsupported' ? 'store_unsupported' : 'store_corrupt';
+    this._diagnostic = {
+      code,
+      message: code === 'store_unsupported'
+        ? 'Scheduled prompts are unavailable because the local store uses an unsupported schema.'
+        : 'Scheduled prompts are unavailable because the local store is unreadable. The original file was preserved.',
+    };
+    return new SessionPromptScheduleError(this._diagnostic.message, code);
   }
 
   _write(file) {
     writeJsonAtomic(this.filePath, file);
     this._onChange?.();
+  }
+
+  async migrateV1(backendId) {
+    return this._serialize(() => {
+      if (!fs.existsSync(this.filePath)) {
+        this._diagnostic = null;
+        return { migrated: false, migratedCount: 0 };
+      }
+      try {
+        const raw = readJsonStrict(this.filePath, { maxFileBytes: MAX_FILE_BYTES });
+        if (raw?.schemaVersion === SCHEMA_VERSION) {
+          validateFile(raw, this._now());
+          this._diagnostic = null;
+          return { migrated: false, migratedCount: 0 };
+        }
+        const migrated = migrateLegacyFile(raw, this._now(), backendId);
+        this._write(migrated);
+        this._diagnostic = null;
+        return { migrated: true, migratedCount: migrated.schedules.length };
+      } catch (error) {
+        throw this._diagnose(error);
+      }
+    });
   }
 
   async list() {
@@ -298,6 +359,7 @@ class SessionPromptScheduleStore {
       if (file.schedules.length >= MAX_SCHEDULES) fail(`At most ${MAX_SCHEDULES} schedules are allowed`, 'limit');
       const schedule = {
         id: asUuid(this._uuid(), 'Schedule id'),
+        backendId: asId(input?.backendId, 'Continuation backend id'),
         sessionId: asId(input?.sessionId, 'Session id'),
         sessionIncarnationId: asUuid(input?.sessionIncarnationId, 'Session incarnation'),
         expectedProfileId: asId(input?.expectedProfileId, 'Expected profile id'),
@@ -315,8 +377,8 @@ class SessionPromptScheduleStore {
     });
   }
 
-  async setEnabled(id, enabled, bindingOrInspector = null) {
-    return this._serialize(() => {
+  async setEnabled(id, enabled, inspectBinding = null) {
+    return this._serialize(async () => {
       const scheduleId = asUuid(id, 'Schedule id');
       if (typeof enabled !== 'boolean') fail('Enabled state must be a boolean');
       const file = this._read();
@@ -330,10 +392,17 @@ class SessionPromptScheduleStore {
         if (isConsumedOneShot(current)) {
           fail('This one-shot occurrence was consumed; create a new future schedule', 'occurrence-consumed');
         }
-        const binding = typeof bindingOrInspector === 'function'
-          ? bindingOrInspector(current.sessionId)
-          : bindingOrInspector;
-        if (current.lastResult?.status === 'session_changed' || !bindingMatches(current, binding)) {
+        if (current.lastResult?.status === 'session_changed') {
+          fail('The original session changed; recreate this schedule', 'session_changed');
+        }
+        const inspection = typeof inspectBinding === 'function'
+          ? await inspectBinding(current)
+          : inspectBinding;
+        const inspectionStatus = bindingInspection(current, inspection);
+        if (inspectionStatus === 'unavailable') {
+          fail('The continuation backend is temporarily unavailable', 'backend-unavailable');
+        }
+        if (inspectionStatus === 'session_changed') {
           fail('The original session changed; recreate this schedule', 'session_changed');
         }
         if (current.repeatIntervalMinutes && current.nextOccurrenceAt <= now) {
@@ -367,25 +436,32 @@ class SessionPromptScheduleStore {
   }
 
   async prepareTick(inspectBinding) {
-    return this._serialize(() => {
+    return this._serialize(async () => {
       const now = this._now();
       const file = this._read();
       let changed = false;
-      file.schedules = file.schedules.map((schedule) => {
+      const reconciled = [];
+      for (const schedule of file.schedules) {
         if (
           schedule.deliveryClaim &&
           !this._ownedClaimTokens.has(schedule.deliveryClaim.token) &&
           now - schedule.deliveryClaim.startedAt >= CLAIM_STALE_MS
         ) {
           changed = true;
-          return advanceOccurrence(schedule, 'error', now);
+          reconciled.push(advanceOccurrence(schedule, 'error', now));
+          continue;
         }
-        if (schedule.enabled && !schedule.deliveryClaim && !bindingMatches(schedule, inspectBinding(schedule.sessionId))) {
-          changed = true;
-          return advanceOccurrence(schedule, 'session_changed', now);
+        if (schedule.enabled && !schedule.deliveryClaim) {
+          const status = bindingInspection(schedule, await inspectBinding(schedule));
+          if (status === 'session_changed') {
+            changed = true;
+            reconciled.push(advanceOccurrence(schedule, 'session_changed', now));
+            continue;
+          }
         }
-        return schedule;
-      });
+        reconciled.push(schedule);
+      }
+      file.schedules = reconciled;
       if (changed) this._write(file);
       return file.schedules
         .filter(schedule => schedule.enabled && !schedule.deliveryClaim && schedule.nextOccurrenceAt <= now)
@@ -444,11 +520,14 @@ module.exports = {
   MAX_PROMPT_CHARS,
   MAX_REPEAT_MINUTES,
   MAX_SCHEDULES,
+  LEGACY_SCHEMA_VERSION,
   SCHEMA_VERSION,
   SessionPromptScheduleError,
   SessionPromptScheduleStore,
   advanceOccurrence,
+  bindingInspection,
   bindingMatches,
+  migrateLegacyFile,
   normalizePrompt,
   validateFile,
 };

@@ -20,8 +20,11 @@ function publicSchedule(schedule) {
   return { ...publicRecord, deliveryInFlight: !!deliveryClaim };
 }
 
-function createSessionPromptHandlers({ store, registry }) {
-  if (!store || !registry) throw new TypeError('Scheduled-prompt handlers need store and registry');
+function createSessionPromptHandlers({ store, continuation, defaultBackendId }) {
+  if (!store || !continuation || typeof continuation.getScheduleTarget !== 'function') {
+    throw new TypeError('Scheduled-prompt handlers need store and continuation core');
+  }
+  const fallbackBackendId = asId(defaultBackendId, 'default continuation backend id');
   return {
     async list(raw = {}) {
       const payload = asPlainObject(raw, 'session prompt list payload');
@@ -36,19 +39,23 @@ function createSessionPromptHandlers({ store, registry }) {
     async create(raw) {
       const payload = asPlainObject(raw, 'session prompt create payload');
       assertOnlyKeys(payload, new Set([
-        'sessionId', 'sessionIncarnationId', 'prompt', 'nextOccurrenceAt',
+        'backendId', 'sessionId', 'sessionIncarnationId', 'prompt', 'nextOccurrenceAt',
         'repeatIntervalMinutes',
       ]), 'session prompt create payload');
+      const backendId = payload.backendId === undefined
+        ? fallbackBackendId
+        : asId(payload.backendId, 'continuation backend id');
       const sessionId = asId(payload.sessionId, 'session id');
-      const target = registry.scheduleTarget(sessionId);
+      const target = await continuation.getScheduleTarget(backendId, sessionId);
       if (!target || target.incarnationId !== payload.sessionIncarnationId) {
         const error = new Error(
-          'The selected direct-agent session changed or is not lifecycle-confirmed'
+          'The selected exact session changed or its backend cannot prove readiness'
         );
         error.code = 'session-unavailable';
         throw error;
       }
       return publicSchedule(await store.create({
+        backendId: target.backendId,
         sessionId,
         sessionIncarnationId: target.incarnationId,
         expectedProfileId: target.profileId,
@@ -65,7 +72,7 @@ function createSessionPromptHandlers({ store, registry }) {
       const scheduleId = asId(payload.scheduleId, 'schedule id');
       if (typeof payload.enabled !== 'boolean') throw new Error('enabled must be a boolean');
       const inspectBinding = payload.enabled
-        ? sessionId => registry.scheduleBinding(sessionId)
+        ? schedule => continuation.inspectSchedule(schedule)
         : null;
       return publicSchedule(await store.setEnabled(scheduleId, payload.enabled, inspectBinding));
     },

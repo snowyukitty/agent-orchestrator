@@ -111,6 +111,7 @@ test('incarnations are random per PTY creation and safely exposed without privat
   const firstMeta = h.registry.describe(first.id);
   assert.match(firstMeta.incarnationId, /^[0-9a-f-]{36}$/);
   assert.equal(firstMeta.sessionMode, 'direct-agent');
+  assert.equal(firstMeta.scheduledPrompt.backendId, 'orchestrator-pty');
   assert.equal(firstMeta.scheduledPrompt.supported, true);
   const serialized = JSON.stringify(firstMeta);
   assert.ok(!serialized.includes('synthetic-pipe'));

@@ -13,7 +13,7 @@ ai-agent-entrypoint                 Agent Orchestrator
         |                                      |
         | doctor --all --json                  | local env-only profiles
         | codex shell <alias>                  | native shell
-        | target run codex:<alias> --          | exact-session scheduler
+        | target run codex:<alias> --          | continuation core
         v                                      v
   routed child shell  <-----------  main-process SessionRegistry
                                                |
@@ -43,6 +43,10 @@ testable:
   termination, and public session metadata;
 - `codex-lifecycle.js` owns the capability-authenticated, process-local receipt channel
   used to prove that a direct Codex turn completed;
+- `session-continuation-core.js` routes exact-session operations by durable
+  backend namespace and gates adapters on explicit proof capabilities;
+- `orchestrator-pty-continuation-backend.js` preserves `SessionRegistry` as
+  the identity, readiness, and PTY-input authority for app-owned sessions;
 - `session-prompt-schedules.js` validates the bounded durable record and
   serializes every read-modify-write mutation;
 - `session-prompt-scheduler.js` owns the non-overlapping due loop;
@@ -112,7 +116,8 @@ ai-agent-entrypoint's public `target run codex:<alias> --` contract. The PTY
 ends with the provider rather than falling back to a shell.
 
 Every PTY creation receives a fresh random incarnation UUID. A schedule binds
-that incarnation plus the exact session, profile, and agent identities. Main
+the durable backend namespace, that incarnation, and the exact session,
+profile, and agent identities. Main
 also gives each direct Codex child a random capability for an app-owned named
 pipe. Codex's provider `notify` callback reports only
 `agent-turn-complete`; the helper forwards only the capability, incarnation,

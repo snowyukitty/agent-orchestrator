@@ -78,7 +78,9 @@ The **Schedules** panel now makes two different operations explicit:
 Exact-session prompt text is stored locally in plaintext. Never put passwords,
 tokens, credentials, or other secrets in a scheduled prompt. The full delivery
 and crash contract is in
-[`docs/session-prompt-scheduling.md`](docs/session-prompt-scheduling.md).
+[`docs/session-prompt-scheduling.md`](docs/session-prompt-scheduling.md); the
+authority-preserving adapter boundary is in
+[`docs/session-continuation-backends.md`](docs/session-continuation-backends.md).
 
 ## Multi-account agent control
 
@@ -148,6 +150,7 @@ The full list, with the reasoning, is in
 | [Feature reference](docs/features.md) | Everything that ships, and why it is built that way |
 | [Architecture and safety model](docs/architecture.md) | Process boundaries, assurance levels, persistence |
 | [Exact-session prompt scheduling](docs/session-prompt-scheduling.md) | Identity binding, readiness proof, claims, crash and restart behavior |
+| [Session continuation backends](docs/session-continuation-backends.md) | Capability gate, backend authority, migration, and adapter review contract |
 | [Interrupted-run resume design](docs/resume-design.md) | The accepted evidence-without-replay contract |
 | [Five-hour window](docs/five-hour-window.md) | The scheduling trick, tuned |
 | [Limits and unfinished work](docs/limitations.md) | Stated boundaries |

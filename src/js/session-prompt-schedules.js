@@ -77,7 +77,12 @@ export class SessionPromptSchedulesUI {
   selectActiveTarget() {
     const session = this._getActiveSession();
     this._target = session?.id && session?.incarnationId
-      ? { sessionId: session.id, incarnationId: session.incarnationId, label: session.label }
+      ? {
+          backendId: session.scheduledPrompt?.backendId,
+          sessionId: session.id,
+          incarnationId: session.incarnationId,
+          label: session.label,
+        }
       : null;
     this.render();
     return !!this._target;
@@ -109,6 +114,7 @@ export class SessionPromptSchedulesUI {
 
     if (
       !target || !session || session.incarnationId !== target.incarnationId ||
+      session.scheduledPrompt?.backendId !== target.backendId ||
       session.status !== 'running' ||
       !session?.scheduledPrompt?.supported || !session.scheduledPrompt.confirmed ||
       !session.scheduledPrompt.bracketedPaste || !session.scheduledPrompt.ready
@@ -133,6 +139,7 @@ export class SessionPromptSchedulesUI {
     setError(null);
     try {
       await this._api.createSessionPrompt({
+        backendId: target.backendId,
         sessionId: session.id,
         sessionIncarnationId: target.incarnationId,
         prompt,
@@ -191,7 +198,7 @@ export class SessionPromptSchedulesUI {
         <div class="sched-info">
           <div class="sched-name">${escapeHtml(schedule.expectedAgent)} · ${escapeHtml(schedule.expectedProfileId)}</div>
           <div class="sched-time">${escapeHtml(new Date(schedule.nextOccurrenceAt).toLocaleString())} · ${repeat}</div>
-          <div class="session-prompt-binding">Exact session ${escapeHtml(schedule.sessionId)} · ${escapeHtml(schedule.sessionIncarnationId || 'legacy/unbound')}</div>
+          <div class="session-prompt-binding">Backend ${escapeHtml(schedule.backendId || 'legacy/unbound')} · exact session ${escapeHtml(schedule.sessionId)} · ${escapeHtml(schedule.sessionIncarnationId || 'legacy/unbound')}</div>
           <pre class="session-prompt-preview">${prompt}</pre>
         </div>
         <div class="sched-right">
@@ -213,7 +220,9 @@ export class SessionPromptSchedulesUI {
     if (!target) return;
     const selected = this._target;
     const session = selected ? this._getSession(selected.sessionId) : null;
-    const exactMatch = !!session && session.incarnationId === selected?.incarnationId;
+    const exactMatch = !!session &&
+      session.incarnationId === selected?.incarnationId &&
+      session.scheduledPrompt?.backendId === selected?.backendId;
     let message = 'No target locked. Activate a session, then choose Use active session.';
     let available = false;
     if (selected && !exactMatch) {

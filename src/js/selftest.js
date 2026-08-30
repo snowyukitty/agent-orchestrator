@@ -1192,6 +1192,7 @@ async function testSessionPromptManagement(eq, ok) {
     label: 'Codex A · direct',
     status: 'running',
     scheduledPrompt: {
+      backendId: 'orchestrator-pty',
       supported: true,
       confirmed: true,
       ready: true,
@@ -1202,6 +1203,7 @@ async function testSessionPromptManagement(eq, ok) {
   const sessions = new Map([[original.id, original]]);
   const otherSchedule = {
     id: 'bad" data-injected="yes',
+    backendId: 'orchestrator-pty',
     sessionId: 'other-session',
     sessionIncarnationId: '90000000-0000-4000-8000-000000000001',
     expectedProfileId: 'codex:b',
@@ -1246,6 +1248,7 @@ async function testSessionPromptManagement(eq, ok) {
   await ui.refresh();
   const row = document.querySelector('[data-session-prompt-id]');
   ok('session-prompt-ui-lists-other-session', row?.textContent.includes('other-session'));
+  ok('session-prompt-ui-shows-authority-backend', row?.textContent.includes('orchestrator-pty'));
   ok('session-prompt-ui-escapes-prompt-html', !row?.querySelector('review'));
   eq('session-prompt-ui-escapes-attribute-quotes', row?.dataset.sessionPromptId,
     otherSchedule.id);
@@ -1260,6 +1263,16 @@ async function testSessionPromptManagement(eq, ok) {
       ?.querySelector('[data-session-prompt-action="resume"]')?.disabled);
   ok('lifecycle-confirmed-direct-session-can-schedule',
     !document.getElementById('btn-create-session-prompt')?.disabled);
+
+  sessions.set(original.id, {
+    ...original,
+    scheduledPrompt: { ...original.scheduledPrompt, backendId: 'replacement-backend' },
+  });
+  ui.render();
+  ok('session-prompt-target-detects-backend-authority-change',
+    document.getElementById('btn-create-session-prompt')?.disabled);
+  sessions.set(original.id, original);
+  ui.render();
 
   active = {
     ...original,
@@ -1278,6 +1291,7 @@ async function testSessionPromptManagement(eq, ok) {
   document.getElementById('session-prompt-repeat').value = '300';
   eq('session-prompt-ui-create-result', await ui.create(), true);
   eq('session-prompt-ui-exact-create-guard', created, [{
+    backendId: 'orchestrator-pty',
     sessionId: 'active-session',
     sessionIncarnationId: original.incarnationId,
     prompt: 'Continue safely.',

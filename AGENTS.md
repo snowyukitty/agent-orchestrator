@@ -67,6 +67,8 @@ src/main/            Main-process modules, CommonJS, unit-tested with node --tes
   agents.js            profile model, entrypoint discovery, launch specs
   sessions.js          PTY session registry (spawn, route, kill-tree)
   codex-lifecycle.js    authenticated direct-agent turn-complete receipts
+  session-continuation-core.js backend capability and authority routing
+  orchestrator-pty-continuation-backend.js app-owned PTY adapter
   session-prompt-*.js  durable exact-session schedules, IPC, and scheduler
   scheduled-prompt-delivery.js guarded main-owned PTY prompt delivery
   settings.js          persisted preferences

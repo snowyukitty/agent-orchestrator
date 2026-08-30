@@ -32,6 +32,14 @@ the product story; this file keeps the history.
   or future schedule store is preserved and disables delivery instead of being
   replaced with an empty file. Prompt text is deliberately local plaintext and
   the UI warns never to include secrets.
+- **Authority-preserving continuation backends**: exact-session scheduling now
+  routes through a provider-neutral main-process core. Schema v2 durably adds
+  the backend namespace, with an explicit atomic and idempotent migration of
+  existing app-owned rows to `orchestrator-pty`. A backend is eligible only
+  when it owns exact identity, agent-readiness, protected-input, and
+  claim-bound delivery proofs. Missing, partial, timed-out, or failed adapters
+  remain `unavailable`; only the owning backend may declare `session_changed`,
+  and the core never falls back to a same-named session in another transport.
 
 - **Deliberate Run Journal v2 migration**: startup validates each v1 record,
   preserves a rollback copy, and atomically writes an explicit v2 record rather

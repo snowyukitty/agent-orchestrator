@@ -20,11 +20,15 @@ const {
   BRACKETED_PASTE_END,
   BRACKETED_PASTE_START,
   QUIET_PERIOD_MS,
-  deliverScheduledPrompt,
 } = require('../src/main/scheduled-prompt-delivery');
 const { createSessionPromptHandlers } = require('../src/main/session-prompt-ipc');
 const { SessionPromptScheduler } = require('../src/main/session-prompt-scheduler');
 const { SessionPromptScheduleStore } = require('../src/main/session-prompt-schedules');
+const { SessionContinuationCore } = require('../src/main/session-continuation-core');
+const {
+  ORCHESTRATOR_PTY_BACKEND_ID,
+  createOrchestratorPtyContinuationBackend,
+} = require('../src/main/orchestrator-pty-continuation-backend');
 const { SessionRegistry } = require('../src/main/sessions');
 
 const CONFIRM_FLAG = '--confirm-live';
@@ -458,7 +462,14 @@ async function main() {
     stage = 'schedule';
     const scheduled = fragments('SCHEDULED');
     const store = new SessionPromptScheduleStore({ filePath: storePath });
-    const handlers = createSessionPromptHandlers({ store, registry });
+    const continuation = new SessionContinuationCore({
+      backends: [createOrchestratorPtyContinuationBackend({ registry })],
+    });
+    const handlers = createSessionPromptHandlers({
+      store,
+      continuation,
+      defaultBackendId: ORCHESTRATOR_PTY_BACKEND_ID,
+    });
     const meta = registry.describe(SESSION_ID);
     const createdSchedule = await handlers.create({
       sessionId: SESSION_ID,
@@ -474,8 +485,8 @@ async function main() {
 
     scheduler = new SessionPromptScheduler({
       store,
-      inspectBinding: id => registry.scheduleBinding(id),
-      deliver: schedule => deliverScheduledPrompt(schedule, { registry }),
+      inspectBinding: schedule => continuation.inspectSchedule(schedule),
+      deliver: schedule => continuation.deliverClaimed(schedule),
       log: () => {},
     });
     probe.armed = true;

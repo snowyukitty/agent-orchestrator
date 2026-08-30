@@ -23,8 +23,12 @@ const { SessionRegistry } = require('./src/main/sessions');
 const { CodexLifecycleBroker } = require('./src/main/codex-lifecycle');
 const { SessionPromptScheduleStore } = require('./src/main/session-prompt-schedules');
 const { SessionPromptScheduler } = require('./src/main/session-prompt-scheduler');
-const { deliverScheduledPrompt } = require('./src/main/scheduled-prompt-delivery');
 const { createSessionPromptHandlers } = require('./src/main/session-prompt-ipc');
+const { SessionContinuationCore } = require('./src/main/session-continuation-core');
+const {
+  ORCHESTRATOR_PTY_BACKEND_ID,
+  createOrchestratorPtyContinuationBackend,
+} = require('./src/main/orchestrator-pty-continuation-backend');
 const agentProfiles = require('./src/main/agents');
 const { writeJsonAtomic, readJsonStrict, readJsonDir, ensureDir } = require('./src/main/store');
 const { loadSettings, saveSettings } = require('./src/main/settings');
@@ -129,6 +133,7 @@ let codexLifecycleBroker = null;
 let sessionPromptStore = null;
 let sessionPromptScheduler = null;
 let sessionPromptHandlers = null;
+let sessionContinuation = null;
 let testDataCleanupScheduled = false;
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 const isDev = process.argv.includes('--dev');
@@ -221,6 +226,7 @@ function createSessionRegistry() {
   return new SessionRegistry({
     pty,
     lifecycleBroker: codexLifecycleBroker,
+    continuationBackendId: ORCHESTRATOR_PTY_BACKEND_ID,
     // On Windows, request whole-tree termination before touching the outer
     // ConPTY root. Once that pwsh exits, nested routed children can be
     // reparented and a later taskkill /T can no longer discover them.
@@ -251,9 +257,9 @@ function codexNotifyScriptPath() {
 }
 
 async function reconcileSessionPromptBindings() {
-  if (!sessionPromptStore || !sessions) return;
+  if (!sessionPromptStore || !sessionContinuation) return;
   try {
-    await sessionPromptStore.prepareTick(id => sessions.scheduleBinding(id));
+    await sessionPromptStore.prepareTick(schedule => sessionContinuation.inspectSchedule(schedule));
     return true;
   } catch (error) {
     console.warn(`[Session prompts] binding reconciliation failed (${error.code || 'error'})`);
@@ -692,15 +698,30 @@ if (!gotSingleInstanceLock) {
       codexLifecycleBroker = null;
     }
     sessions = createSessionRegistry();
+    sessionContinuation = new SessionContinuationCore({
+      backends: [createOrchestratorPtyContinuationBackend({ registry: sessions })],
+    });
     sessionPromptStore = new SessionPromptScheduleStore({
       filePath: sessionPromptFile(),
       onChange: () => sendToRenderer('session-prompt-schedules-changed'),
     });
-    sessionPromptHandlers = createSessionPromptHandlers({ store: sessionPromptStore, registry: sessions });
+    try {
+      const migration = await sessionPromptStore.migrateV1(ORCHESTRATOR_PTY_BACKEND_ID);
+      if (migration.migrated) {
+        console.log(`[Session prompts] migrated ${migration.migratedCount} schedule(s) to backend-bound schema v2`);
+      }
+    } catch (error) {
+      console.warn(`[Session prompts] store migration unavailable (${error.code || 'error'})`);
+    }
+    sessionPromptHandlers = createSessionPromptHandlers({
+      store: sessionPromptStore,
+      continuation: sessionContinuation,
+      defaultBackendId: ORCHESTRATOR_PTY_BACKEND_ID,
+    });
     sessionPromptScheduler = new SessionPromptScheduler({
       store: sessionPromptStore,
-      inspectBinding: id => sessions?.scheduleBinding(id) || null,
-      deliver: schedule => deliverScheduledPrompt(schedule, { registry: sessions }),
+      inspectBinding: schedule => sessionContinuation?.inspectSchedule(schedule) || { status: 'unavailable' },
+      deliver: schedule => sessionContinuation?.deliverClaimed(schedule) || 'unavailable',
       log: message => console.warn(`[Session prompts] ${message}`),
     });
     sessionPromptScheduler.start();

@@ -101,6 +101,7 @@ and profile. A renderer may display the UUID, but it cannot choose it.
 The bounded schedule record stores:
 
 - schedule UUID;
+- durable continuation backend id;
 - exact session id and incarnation UUID;
 - expected profile and agent identities captured by main;
 - plaintext prompt;
@@ -126,6 +127,14 @@ original file is preserved rather than overwritten with an empty store.
 
 A legacy row with no incarnation is never rebound. It remains visible as
 disabled `session_changed` evidence and must be explicitly recreated.
+
+Schema v2 adds the backend id to the durable binding. Existing schema-v1 rows
+were necessarily created by the app-owned PTY registry, so startup performs an
+explicit atomic migration to `orchestrator-pty`. The migration is idempotent;
+corrupt and future schemas remain preserved and unavailable. The
+[continuation backend contract](session-continuation-backends.md) defines the
+capability gate and the difference between temporary backend unavailability
+and authoritative session replacement.
 
 ## Readiness and delivery proof
 

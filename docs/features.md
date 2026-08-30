@@ -62,10 +62,12 @@ form for people deciding whether a specific behavior exists.
   routed Codex direct-agent PTY. It supports one-shot local times, optional
   repeating intervals, +1h/+5h/+24h shortcuts, and list/pause/resume/delete
   controls across every session. A random incarnation binds each row to the
-  original PTY; restart, exit, identity drift, or reuse disables it as
+  original PTY, while a durable backend namespace prevents same-named sessions
+  in other transports from becoming fallbacks. Restart, exit, identity drift, or reuse disables it as
   `session_changed` instead of retargeting or launching work. Prompt text is
   app-owned local plaintext and must not contain secrets. See the
-  [delivery contract](session-prompt-scheduling.md).
+  [delivery contract](session-prompt-scheduling.md) and
+  [backend contract](session-continuation-backends.md).
 - **Schedule Defaults**: Default and newly added Schedule blocks use the current local system time as their trigger time, with a one-click control to reset back to now. Loaded workflows preserve their saved schedule values.
 - **Delayed Hibernate (power saving)**: A **💤 Hibernate PC** block arms a delayed system hibernate (`shutdown /h`) after a configurable delay — e.g. ping an agent, then hibernate to save power once it's done. The timer lives in the main process so it fires reliably even when the window is minimized to the tray or the screen is locked. While armed, a top banner shows a **live countdown** with a **✕ Cancel hibernate** button to force-abort it. Arming is non-blocking, so it can sit at the end of a workflow.
 - **Timestamped Logs**: Every renderer Log line and every main-process console line is prefixed with an `HH:MM:SS.mmm` timestamp.
@@ -90,6 +92,11 @@ form for people deciding whether a specific behavior exists.
   time, and input revision. It sends one sanitized bracketed paste, revalidates,
   then sends exactly one Enter. A possible partial write consumes that
   occurrence; it is never blindly replayed.
+- **Continuation backends preserve authority.** A provider-neutral main-process
+  core routes a schedule only to its durable backend id. An adapter is eligible
+  only when it proves exact identity, agent readiness, protected input, and
+  claim-bound revalidation. Missing or partial adapters remain unavailable;
+  the core never falls back to another terminal with the same session id.
 - **Structured result input is a main-owned capability.** Main grants it only
   to routed Codex workflow sessions and local workflow sessions whose profile
   is one conservative direct invocation of its declared agent. Shell profiles,

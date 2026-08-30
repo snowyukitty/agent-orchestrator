@@ -4,7 +4,9 @@ const assert = require('node:assert/strict');
 const { createSessionPromptHandlers } = require('../src/main/session-prompt-ipc');
 
 const SCHEDULE_ID = '50000000-0000-4000-8000-000000000001';
+const BACKEND_ID = 'orchestrator-pty';
 const TARGET = {
+  backendId: BACKEND_ID,
   sessionId: 'sess-1',
   incarnationId: '60000000-0000-4000-8000-000000000001',
   profileId: 'codex:a',
@@ -16,6 +18,7 @@ function harness({ available = true } = {}) {
   const calls = [];
   const record = {
     id: SCHEDULE_ID,
+    backendId: BACKEND_ID,
     sessionId: TARGET.sessionId,
     sessionIncarnationId: TARGET.incarnationId,
     expectedProfileId: TARGET.profileId,
@@ -30,20 +33,36 @@ function harness({ available = true } = {}) {
     list: async () => ({ schedules: [record], diagnostic: null }),
     create: async input => { calls.push(['create', input]); return { ...record, ...input }; },
     get: async id => id === SCHEDULE_ID ? record : null,
-    setEnabled: async (id, enabled, bindingOrInspector) => {
-      const binding = typeof bindingOrInspector === 'function'
-        ? bindingOrInspector(record.sessionId)
-        : bindingOrInspector;
-      calls.push(['enabled', id, enabled, binding]);
+    setEnabled: async (id, enabled, inspectBinding) => {
+      const inspection = typeof inspectBinding === 'function'
+        ? await inspectBinding(record)
+        : inspectBinding;
+      calls.push(['enabled', id, enabled, inspection]);
       return { ...record, enabled };
     },
     delete: async id => { calls.push(['delete', id]); return true; },
   };
-  const registry = {
-    scheduleTarget: id => available && id === TARGET.sessionId ? TARGET : null,
-    scheduleBinding: id => id === TARGET.sessionId ? TARGET : null,
+  const continuation = {
+    getScheduleTarget: async (backendId, id) => (
+      available && backendId === BACKEND_ID && id === TARGET.sessionId ? TARGET : null
+    ),
+    inspectSchedule: async schedule => ({ status: 'matched', binding: {
+      backendId: schedule.backendId,
+      sessionId: TARGET.sessionId,
+      incarnationId: TARGET.incarnationId,
+      profileId: TARGET.profileId,
+      agent: TARGET.agent,
+      sessionMode: TARGET.sessionMode,
+    } }),
   };
-  return { handlers: createSessionPromptHandlers({ store, registry }), calls };
+  return {
+    handlers: createSessionPromptHandlers({
+      store,
+      continuation,
+      defaultBackendId: BACKEND_ID,
+    }),
+    calls,
+  };
 }
 
 test('create binds identity from main-owned session state and rejects extra IPC fields', async () => {
@@ -57,6 +76,7 @@ test('create binds identity from main-owned session state and rejects extra IPC 
   });
   assert.equal(created.sessionIncarnationId, TARGET.incarnationId);
   assert.deepEqual(calls[0], ['create', {
+    backendId: BACKEND_ID,
     sessionId: TARGET.sessionId,
     sessionIncarnationId: TARGET.incarnationId,
     expectedProfileId: TARGET.profileId,
@@ -73,6 +93,11 @@ test('create binds identity from main-owned session state and rejects extra IPC 
     sessionId: 'sess-1', prompt: 'x', nextOccurrenceAt: 9_000,
     expectedProfileId: 'codex:b',
   }), /unknown field/);
+  await assert.rejects(handlers.create({
+    backendId: 'unknown-backend',
+    sessionId: 'sess-1', prompt: 'x', nextOccurrenceAt: 9_000,
+    sessionIncarnationId: TARGET.incarnationId,
+  }), error => error.code === 'session-unavailable');
 });
 
 test('create fails closed when lifecycle-confirmed direct-agent proof is absent', async () => {
@@ -106,7 +131,17 @@ test('pause, resume, delete, and list validate exact payloads', async () => {
   assert.equal(await handlers.delete({ scheduleId: SCHEDULE_ID }), true);
   assert.deepEqual(calls, [
     ['enabled', SCHEDULE_ID, false, null],
-    ['enabled', SCHEDULE_ID, true, TARGET],
+    ['enabled', SCHEDULE_ID, true, {
+      status: 'matched',
+      binding: {
+        backendId: BACKEND_ID,
+        sessionId: TARGET.sessionId,
+        incarnationId: TARGET.incarnationId,
+        profileId: TARGET.profileId,
+        agent: TARGET.agent,
+        sessionMode: TARGET.sessionMode,
+      },
+    }],
     ['delete', SCHEDULE_ID],
   ]);
 

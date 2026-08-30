@@ -455,6 +455,7 @@ class SessionRegistry {
    *                                            termination while root is alive
    * @param {function} [deps.killTree]   (pid) => void, force-kill a process tree
    * @param {function} [deps.log]        (message) => void
+   * @param {string} [deps.continuationBackendId] public scheduling backend id
    */
   constructor({
     pty,
@@ -466,6 +467,7 @@ class SessionRegistry {
     log,
     terminationTimeoutMs = TERMINATION_TIMEOUT_MS,
     lifecycleBroker = null,
+    continuationBackendId = 'orchestrator-pty',
     now = Date.now,
     uuid = randomUUID,
   } = {}) {
@@ -478,6 +480,7 @@ class SessionRegistry {
     this._log = log || (() => {});
     this._terminationTimeoutMs = terminationTimeoutMs;
     this._lifecycleBroker = lifecycleBroker;
+    this._continuationBackendId = continuationBackendId;
     this._now = now;
     this._uuid = uuid;
     /** @type {Map<string, object>} id → session record */
@@ -1452,6 +1455,7 @@ class SessionRegistry {
       resultInputCapable: s.resultInputCapable,
       sessionMode: s.sessionMode,
       scheduledPrompt: {
+        backendId: this._continuationBackendId,
         supported: s.sessionMode === 'direct-agent' && s.agent === 'codex',
         confirmed: !!s.lifecycleConfirmedAt,
         ready: s.sessionMode === 'direct-agent' && s.agent === 'codex' &&

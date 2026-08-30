@@ -8,6 +8,7 @@ const {
   CLAIM_STALE_MS,
   MAX_PROMPT_CHARS,
   MAX_SCHEDULES,
+  LEGACY_SCHEMA_VERSION,
   SCHEMA_VERSION,
   SessionPromptScheduleStore,
 } = require('../src/main/session-prompt-schedules');
@@ -36,6 +37,7 @@ function harness(start = 1_000) {
 }
 
 const IDENTITY = {
+  backendId: 'orchestrator-pty',
   sessionId: 'sess-fixed',
   sessionIncarnationId: '10000000-0000-4000-8000-000000000001',
   expectedProfileId: 'codex:a',
@@ -44,12 +46,17 @@ const IDENTITY = {
 
 function binding(schedule = IDENTITY) {
   return {
+    backendId: schedule.backendId,
     sessionId: schedule.sessionId,
     incarnationId: schedule.sessionIncarnationId,
     profileId: schedule.expectedProfileId,
     agent: schedule.expectedAgent,
     sessionMode: 'direct-agent',
   };
+}
+
+function matched(schedule = IDENTITY) {
+  return { status: 'matched', binding: binding(schedule) };
 }
 
 async function createDue(h, overrides = {}) {
@@ -87,10 +94,71 @@ test('create validates bounded records and writes an atomic schema-owned file', 
   await assert.rejects(h.store.create({ ...IDENTITY, prompt: 'x', nextOccurrenceAt: 3_000, repeatIntervalMinutes: 0 }), /Repeat interval/);
 });
 
+test('v1 schedules migrate explicitly and idempotently to a backend-bound schema', async () => {
+  const h = harness(5_000);
+  const legacy = {
+    schemaVersion: LEGACY_SCHEMA_VERSION,
+    schedules: [{
+      id: '00000000-0000-4000-8000-000000000090',
+      sessionId: IDENTITY.sessionId,
+      sessionIncarnationId: IDENTITY.sessionIncarnationId,
+      expectedProfileId: IDENTITY.expectedProfileId,
+      expectedAgent: IDENTITY.expectedAgent,
+      prompt: 'Preserve this exact prompt.',
+      nextOccurrenceAt: 10_000,
+      repeatIntervalMinutes: null,
+      enabled: true,
+      createdAt: 1_000,
+      updatedAt: 2_000,
+    }],
+  };
+  fs.writeFileSync(h.filePath, JSON.stringify(legacy));
+
+  assert.deepEqual(await h.store.migrateV1(IDENTITY.backendId), {
+    migrated: true,
+    migratedCount: 1,
+  });
+  const disk = JSON.parse(fs.readFileSync(h.filePath, 'utf8'));
+  assert.equal(disk.schemaVersion, SCHEMA_VERSION);
+  assert.equal(disk.schedules[0].backendId, IDENTITY.backendId);
+  assert.equal(disk.schedules[0].prompt, legacy.schedules[0].prompt);
+  assert.equal(disk.schedules[0].sessionIncarnationId, IDENTITY.sessionIncarnationId);
+  assert.deepEqual(await h.store.migrateV1(IDENTITY.backendId), {
+    migrated: false,
+    migratedCount: 0,
+  });
+});
+
+test('a temporarily unavailable backend stays due and cannot be resumed without proof', async () => {
+  const h = harness();
+  const schedule = await createDue(h);
+  const due = await h.store.prepareTick(() => ({ status: 'unavailable' }));
+  assert.deepEqual(due.map(record => record.id), [schedule.id]);
+  assert.equal((await h.store.get(schedule.id)).enabled, true);
+
+  await h.store.setEnabled(schedule.id, false);
+  await assert.rejects(
+    h.store.setEnabled(schedule.id, true, () => ({ status: 'unavailable' })),
+    error => error.code === 'backend-unavailable'
+  );
+  assert.equal((await h.store.get(schedule.id)).lastResult?.status, undefined);
+});
+
+test('a same-named session from another backend is terminal, never a fallback', async () => {
+  const h = harness();
+  const schedule = await createDue(h);
+  const wrongBackend = matched({ ...IDENTITY, backendId: 'wmux-daemon' });
+  assert.deepEqual(await h.store.prepareTick(() => wrongBackend), []);
+  const current = await h.store.get(schedule.id);
+  assert.equal(current.enabled, false);
+  assert.equal(current.lastResult.status, 'session_changed');
+});
+
 test('the store enforces its record limit without replacing existing evidence', async () => {
   const h = harness();
   const schedules = Array.from({ length: MAX_SCHEDULES }, (_, index) => ({
     id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    backendId: IDENTITY.backendId,
     sessionId: `session-${index}`,
     sessionIncarnationId: `10000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
     expectedProfileId: 'codex:a',
@@ -117,6 +185,7 @@ test('legacy rows without an incarnation stay visible but become terminal', asyn
     schemaVersion: SCHEMA_VERSION,
     schedules: [{
       id: '00000000-0000-4000-8000-000000000099',
+      backendId: IDENTITY.backendId,
       sessionId: 'legacy-session',
       expectedProfileId: 'codex:a',
       expectedAgent: 'codex',
@@ -151,7 +220,7 @@ test('pause and delete serialize against a due claim', async () => {
   assert.equal((await paused).enabled, false);
   assert.equal(await lostClaim, null, 'pause that enters the queue first prevents delivery');
 
-  await h.store.setEnabled(schedule.id, true, binding());
+  await h.store.setEnabled(schedule.id, true, matched());
   const wonClaim = h.store.claimDue(schedule.id);
   const blockedDelete = h.store.delete(schedule.id);
   const claimed = await wonClaim;
@@ -183,7 +252,7 @@ test('busy and unavailable remain due while sent and error consume one-shots', a
     assert.equal(current.enabled, false);
     assert.equal(current.lastResult.status, status);
     await assert.rejects(
-      h.store.setEnabled(schedule.id, true, () => binding()),
+      h.store.setEnabled(schedule.id, true, () => matched()),
       error => error.code === 'occurrence-consumed'
     );
     assert.equal((await h.store.get(schedule.id)).enabled, false,
@@ -202,14 +271,14 @@ test('resuming a paused repeat skips missed slots and inspects binding inside th
   await h.store.setEnabled(schedule.id, false);
   h.setNow(2_000 + 35 * 60_000);
   let inspectedSessionId = null;
-  const resumed = await h.store.setEnabled(schedule.id, true, sessionId => {
-    inspectedSessionId = sessionId;
-    return binding();
+  const resumed = await h.store.setEnabled(schedule.id, true, inspected => {
+    inspectedSessionId = inspected.sessionId;
+    return matched();
   });
   assert.equal(inspectedSessionId, IDENTITY.sessionId);
   assert.equal(resumed.enabled, true);
   assert.equal(resumed.nextOccurrenceAt, 2_000 + 40 * 60_000);
-  assert.equal((await h.store.prepareTick(() => binding())).length, 0,
+  assert.equal((await h.store.prepareTick(() => matched())).length, 0,
     'resume never creates a missed-interval catch-up delivery');
 });
 
@@ -222,7 +291,7 @@ test('repeating jobs advance directly beyond missed intervals without catch-up f
   const current = await h.store.get(schedule.id);
   assert.equal(current.enabled, true);
   assert.equal(current.nextOccurrenceAt, 2_000 + 40 * 60_000);
-  assert.equal((await h.store.prepareTick(() => binding())).length, 0);
+  assert.equal((await h.store.prepareTick(() => matched())).length, 0);
 });
 
 test('a stale durable claim is consumed as error and never replayed', async () => {
@@ -238,7 +307,7 @@ test('a stale durable claim is consumed as error and never replayed', async () =
     now: h.now,
     uuid: uuidSource(),
   });
-  const due = await restartedStore.prepareTick(() => binding());
+  const due = await restartedStore.prepareTick(() => matched());
   assert.deepEqual(due, []);
   const recovered = await restartedStore.get(schedule.id);
   assert.equal(recovered.enabled, false);
@@ -252,7 +321,7 @@ test('stale recovery never consumes a claim still owned by this process', async 
   const claimed = await h.store.claimDue(schedule.id);
   h.setNow(2_000 + CLAIM_STALE_MS + 1);
 
-  assert.deepEqual(await h.store.prepareTick(() => binding()), []);
+  assert.deepEqual(await h.store.prepareTick(() => matched()), []);
   assert.equal((await h.store.get(schedule.id)).deliveryClaim.token, claimed.deliveryClaim.token);
   assert.equal(await h.store.finalizeClaim(
     schedule.id,
@@ -269,21 +338,25 @@ test('app restart reconciliation disables an orphaned exact-session row', async 
     prompt: 'Later',
     nextOccurrenceAt: 100_000,
   });
-  assert.deepEqual(await h.store.prepareTick(() => null), []);
+  assert.deepEqual(await h.store.prepareTick(() => ({ status: 'session_changed' })), []);
   const orphan = await h.store.get(schedule.id);
   assert.equal(orphan.enabled, false);
   assert.equal(orphan.lastResult.status, 'session_changed');
-  await assert.rejects(h.store.setEnabled(schedule.id, true, binding()), error => error.code === 'session_changed');
+  await assert.rejects(h.store.setEnabled(schedule.id, true, matched()), error => error.code === 'session_changed');
 });
 
 test('corrupt storage is preserved and every delivery mutation fails closed', async () => {
   const h = harness();
   const corrupt = '{ this is not valid JSON';
   fs.writeFileSync(h.filePath, corrupt);
+  await assert.rejects(
+    h.store.migrateV1(IDENTITY.backendId),
+    error => error.code === 'store_corrupt'
+  );
   const listed = await h.store.list();
   assert.equal(listed.schedules.length, 0);
   assert.equal(listed.diagnostic.code, 'store_corrupt');
-  await assert.rejects(h.store.prepareTick(() => binding()), error => error.code === 'store_corrupt');
+  await assert.rejects(h.store.prepareTick(() => matched()), error => error.code === 'store_corrupt');
   await assert.rejects(h.store.create({ ...IDENTITY, prompt: 'x', nextOccurrenceAt: 2_000 }),
     error => error.code === 'store_corrupt');
   assert.equal(fs.readFileSync(h.filePath, 'utf8'), corrupt);
@@ -293,9 +366,13 @@ test('a future schema is preserved and reported instead of downgraded', async ()
   const h = harness();
   const future = JSON.stringify({ schemaVersion: SCHEMA_VERSION + 1, schedules: [] });
   fs.writeFileSync(h.filePath, future);
+  await assert.rejects(
+    h.store.migrateV1(IDENTITY.backendId),
+    error => error.code === 'store_unsupported'
+  );
   const listed = await h.store.list();
   assert.equal(listed.diagnostic.code, 'store_unsupported');
-  await assert.rejects(h.store.prepareTick(() => binding()), error => error.code === 'store_unsupported');
+  await assert.rejects(h.store.prepareTick(() => matched()), error => error.code === 'store_unsupported');
   assert.equal(fs.readFileSync(h.filePath, 'utf8'), future);
 });
 
@@ -308,7 +385,7 @@ test('scheduler persists a unique claim before delivery and never overlaps ticks
   let durableClaimSeen = false;
   const scheduler = new SessionPromptScheduler({
     store: h.store,
-    inspectBinding: () => binding(),
+    inspectBinding: () => matched(),
     deliver: async (schedule) => {
       deliveries += 1;
       const disk = JSON.parse(fs.readFileSync(h.filePath, 'utf8'));
@@ -358,7 +435,7 @@ test('scheduler shutdown waits for an in-flight claimed occurrence to finalize',
   let deliveryStarted = false;
   const scheduler = new SessionPromptScheduler({
     store: h.store,
-    inspectBinding: () => binding(),
+    inspectBinding: () => matched(),
     deliver: async () => {
       deliveryStarted = true;
       await blocked;
@@ -389,7 +466,7 @@ test('ordinary shutdown preserves rows and the next launch disables the vanished
   let live = true;
   const scheduler = new SessionPromptScheduler({
     store: h.store,
-    inspectBinding: () => live ? binding() : null,
+    inspectBinding: () => live ? matched() : { status: 'session_changed' },
     deliver: async () => 'unavailable',
     setIntervalFn: callback => ({ callback, unref() {} }),
     clearIntervalFn: () => {},
@@ -401,7 +478,7 @@ test('ordinary shutdown preserves rows and the next launch disables the vanished
 
   assert.equal((await h.store.get(schedule.id)).enabled, true,
     'stopping before PTY teardown must not rewrite durable rows');
-  await h.store.prepareTick(() => null);
+  await h.store.prepareTick(() => ({ status: 'session_changed' }));
   const restarted = await h.store.get(schedule.id);
   assert.equal(restarted.enabled, false);
   assert.equal(restarted.lastResult.status, 'session_changed');

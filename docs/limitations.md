@@ -51,6 +51,12 @@ does not have. Everything below is current for v0.4.0.
   delivery. They fail closed rather than using output-idle heuristics. Codex
   readiness is still provider-specific and should be manually rechecked when
   its `notify` lifecycle contract changes.
+- **The continuation core is pluggable, but only one backend is eligible**:
+  `orchestrator-pty` is currently the sole adapter with exact identity,
+  lifecycle readiness, protected input, and claim-bound delivery authority.
+  No wmux or WezTerm runtime dependency is present. A pane id plus `send-text`
+  is insufficient, so external PowerShell or terminal panes cannot be adopted
+  or scheduled through focus, PID, title, liveness, or output heuristics.
 - **Same-user malicious code is outside the lifecycle capability boundary**:
   direct mode excludes the pipe, random capability, and incarnation routing
   values from ordinary Codex shell-tool environments, but Windows processes
