@@ -19,6 +19,7 @@ import {
 } from './schedule.js';
 import { runSelfTest } from './selftest.js';
 import { SessionManager, TARGET_ACTIVE } from './sessions.js';
+import { SessionPromptSchedulesUI } from './session-prompt-schedules.js';
 import { AgentsUI } from './agents-ui.js';
 import {
   assertValidResultReferences,
@@ -815,9 +816,10 @@ class App {
     }
     this.agents = new AgentsUI({
       onLog: (msg, type) => this._termLog(msg, type),
-      onStartSession: async (profileId) => {
+      onStartSession: async (profileId, { sessionMode = 'account-shell' } = {}) => {
         const id = await this.sessions.startProfile(profileId, {
           cwd: this.workflow?.defaultDirectory || this._defaultDirectory,
+          sessionMode,
         });
         if (id) this._switchToTerminalTab();
       },
@@ -1624,7 +1626,10 @@ class App {
     // saved workflows keep working unchanged.
     this.sessions = new SessionManager({
       onLog: (msg, type) => this._termLog(msg, type),
-      onActiveChange: (id) => { this.activeProcessId = id; },
+      onActiveChange: (id) => {
+        this.activeProcessId = id;
+        this.sessionPromptSchedules?.render();
+      },
     });
     this.sessions.mount({
       stack: document.getElementById('terminal-output'),
@@ -1651,7 +1656,10 @@ class App {
       if (this.engine) this.engine.handleProcessError(data);
     });
 
-    window.api.onSessionStatus?.((meta) => this.sessions.handleStatus(meta));
+    window.api.onSessionStatus?.((meta) => {
+      this.sessions.handleStatus(meta);
+      this.sessionPromptSchedules?.render();
+    });
 
     this._initQuickSend();
 
@@ -1845,12 +1853,27 @@ class App {
     this._graceMs = DEFAULT_GRACE_MS;
 
     const modal = document.getElementById('schedule-modal');
-    const openModal = () => { this._refreshScheduledJobs(); modal?.classList.remove('hidden'); };
+    this.sessionPromptSchedules = new SessionPromptSchedulesUI({
+      api: window.api,
+      getActiveSession: () => this.sessions?.activeMeta || null,
+      getSession: id => this.sessions?.metaFor(id) || null,
+      onLog: (message, type) => this._termLog(message, type),
+    });
+    this.sessionPromptSchedules.init();
+    const openModal = () => {
+      this._refreshScheduledJobs();
+      this.sessionPromptSchedules.selectActiveTarget();
+      this.sessionPromptSchedules.refresh();
+      modal?.classList.remove('hidden');
+    };
     const closeModal = () => modal?.classList.add('hidden');
 
     document.getElementById('btn-schedules')?.addEventListener('click', openModal);
     document.getElementById('btn-close-schedules')?.addEventListener('click', closeModal);
-    document.getElementById('btn-refresh-schedules')?.addEventListener('click', () => this._refreshScheduledJobs());
+    document.getElementById('btn-refresh-schedules')?.addEventListener('click', () => {
+      this._refreshScheduledJobs();
+      this.sessionPromptSchedules.refresh();
+    });
     modal?.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
 
     this._refreshScheduledJobs();

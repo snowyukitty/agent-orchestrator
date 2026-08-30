@@ -418,6 +418,7 @@ function buildLaunchSpec(profile, ctx = {}) {
     exists = fs.existsSync,
   } = ctx;
   const workflowSession = ctx.workflowSession === true;
+  const sessionMode = ctx.sessionMode === 'direct-agent' ? 'direct-agent' : 'account-shell';
 
   if (profile.kind === 'routed') {
     // Fail closed. Silently starting a native Codex when a managed account was
@@ -435,6 +436,43 @@ function buildLaunchSpec(profile, ctx = {}) {
     if (!profile.alias) {
       throw new Error(`Cannot start "${profile.displayName}": the account alias is missing.`);
     }
+    if (sessionMode === 'direct-agent') {
+      if (workflowSession) {
+        throw new Error('Direct-agent sessions are separate from workflow-launched sessions');
+      }
+      const notifyScriptPath = String(ctx.notifyScriptPath || '');
+      if (!path.isAbsolute(notifyScriptPath) || !exists(notifyScriptPath)) {
+        throw new Error('Direct-agent lifecycle helper is unavailable');
+      }
+      const notifyCommand = [
+        'pwsh.exe', '-NoLogo', '-NoProfile', '-File', notifyScriptPath,
+      ];
+      const routedTarget = `${ROUTED_PROFILE_PREFIX}${profile.alias}`;
+      if (profile.id !== routedTarget) {
+        throw new Error('Routed profile identity does not match its account alias');
+      }
+      return {
+        file: 'pwsh.exe',
+        args: [
+          '-NoLogo', '-NoProfile', '-File', script,
+          'target', 'run', routedTarget, '--',
+          '-c', `notify=${JSON.stringify(notifyCommand)}`,
+          // Keep the per-session bearer capability out of ordinary Codex
+          // shell-tool environments. Codex's own legacy notify hook receives
+          // the launch environment snapshot; tool commands receive this
+          // independently filtered environment.
+          '-c', 'shell_environment_policy.ignore_default_excludes=false',
+        ],
+        env: { ...baseEnv },
+        cwd: profile.cwd || defaultCwd,
+        profileId: profile.id,
+        agent: 'codex',
+        label: `${profile.displayName} · direct`,
+        assurance: ASSURANCE.ROUTED,
+        resultInputCapable: false,
+        sessionMode: 'direct-agent',
+      };
+    }
     return {
       // The entrypoint constructs the child environment itself; we pass ours
       // through untouched rather than second-guessing its routing.
@@ -450,7 +488,12 @@ function buildLaunchSpec(profile, ctx = {}) {
       // Manual routed tabs remain ordinary account shells and cannot receive
       // generated result contracts through the privileged input channel.
       resultInputCapable: workflowSession,
+      sessionMode: 'account-shell',
     };
+  }
+
+  if (sessionMode === 'direct-agent') {
+    throw new Error('Unattended session continuation currently requires a routed Codex account');
   }
 
   const local = normalizeProfile(profile);
@@ -474,6 +517,7 @@ function buildLaunchSpec(profile, ctx = {}) {
     assurance: assuranceForLocalProfile(local),
     resultInputCapable: workflowSession
       && isConservativeAgentInvocation(local.command, local.agent),
+    sessionMode: 'account-shell',
   };
 }
 

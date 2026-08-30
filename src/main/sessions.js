@@ -12,6 +12,7 @@
 //
 // `pty` is injected so the registry can be unit-tested with a fake.
 // ============================================================
+const { randomUUID } = require('crypto');
 const { asCols, asRows } = require('./validate');
 
 /** How long to wait for a graceful exit before force-killing the tree. */
@@ -40,6 +41,44 @@ function nextSessionId(prefix = 'sess') {
 function nextWaitId() {
   waitSeq += 1;
   return `wait-${Date.now().toString(36)}-${waitSeq}`;
+}
+
+// Exact response shapes emitted by the bundled xterm.js. These replies are
+// generated while xterm processes PTY output; they do not edit the provider's
+// composer and therefore must not impersonate concurrent human input. Mouse
+// reports and arbitrary control strings are deliberately absent.
+const TERMINAL_PROTOCOL_REPLY_PATTERNS = [
+  /^\x1b\[(?:\??[0-9]{1,5};[0-9]{1,5}R|0n|\?1;2c|>0;276;0c|\??[0-9]{1,5};[0-4]\$y|[468];[0-9]{1,6};[0-9]{1,6}t)/,
+  /^\x1b\](?:1[012]|4;(?:[0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5]));rgb:[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}\/[0-9a-fA-F]{1,4}\x1b\\/,
+  /^\x1bP(?:0\$r|1\$r(?:[01]"q|61;1"p|[0-9]{1,5};[0-9]{1,5}r|0m|[1-6] q))\x1b\\/,
+  /^\x1b\[[IO]/,
+];
+
+function isTerminalProtocolReply(text) {
+  if (typeof text !== 'string' || !text) return false;
+  let remaining = text;
+  while (remaining) {
+    let matched = false;
+    for (const pattern of TERMINAL_PROTOCOL_REPLY_PATTERNS) {
+      const match = pattern.exec(remaining);
+      if (!match) continue;
+      remaining = remaining.slice(match[0].length);
+      matched = true;
+      break;
+    }
+    if (!matched) return false;
+  }
+  return true;
+}
+
+function updateBracketedPasteMode(previous, carry, data) {
+  const combined = `${carry || ''}${data || ''}`;
+  let enabled = previous;
+  const pattern = /\x1b\[\?([0-9;]+)([hl])/g;
+  for (const match of combined.matchAll(pattern)) {
+    if (match[1].split(';').includes('2004')) enabled = match[2] === 'h';
+  }
+  return { enabled, carry: combined.slice(-64) };
 }
 
 function asWaitMs(value, { name, allowZero, max }) {
@@ -426,6 +465,9 @@ class SessionRegistry {
     killTree,
     log,
     terminationTimeoutMs = TERMINATION_TIMEOUT_MS,
+    lifecycleBroker = null,
+    now = Date.now,
+    uuid = randomUUID,
   } = {}) {
     this._pty = pty;
     this._onOutput = onOutput || (() => {});
@@ -435,6 +477,9 @@ class SessionRegistry {
     this._killTree = killTree || (() => {});
     this._log = log || (() => {});
     this._terminationTimeoutMs = terminationTimeoutMs;
+    this._lifecycleBroker = lifecycleBroker;
+    this._now = now;
+    this._uuid = uuid;
     /** @type {Map<string, object>} id → session record */
     this._sessions = new Map();
     /** IDs removed while their old PTY is still delivering an exit event. */
@@ -474,15 +519,35 @@ class SessionRegistry {
       throw new Error(`Session id "${sessionId}" is already in use`);
     }
 
-    const proc = this._pty.spawn(spec.file, spec.args || [], {
-      name: 'xterm-color',
-      cols: asCols(cols),
-      rows: asRows(rows),
-      cwd: spec.cwd,
-      env: spec.env,
-      useConpty: true,
-      conptyInheritCursor: true,
-    });
+    const incarnationId = this._uuid();
+    const sessionMode = spec.sessionMode === 'direct-agent' ? 'direct-agent' : 'account-shell';
+    let lifecycleRegistration = null;
+    if (sessionMode === 'direct-agent') {
+      if (!this._lifecycleBroker) {
+        throw new Error('Direct-agent lifecycle service is unavailable');
+      }
+      lifecycleRegistration = this._lifecycleBroker.register({
+        sessionId,
+        incarnationId,
+        onEvent: event => this._handleAgentLifecycleEvent(sessionId, incarnationId, event),
+      });
+    }
+
+    let proc;
+    try {
+      proc = this._pty.spawn(spec.file, spec.args || [], {
+        name: 'xterm-color',
+        cols: asCols(cols),
+        rows: asRows(rows),
+        cwd: spec.cwd,
+        env: { ...(spec.env || {}), ...(lifecycleRegistration?.env || {}) },
+        useConpty: true,
+        conptyInheritCursor: true,
+      });
+    } catch (error) {
+      lifecycleRegistration?.release?.();
+      throw error;
+    }
 
     let resolveExit;
     const exitPromise = new Promise(resolve => { resolveExit = resolve; });
@@ -490,13 +555,24 @@ class SessionRegistry {
       id: sessionId,
       pid: proc.pid,
       proc,
+      incarnationId,
       profileId: spec.profileId || null,
       agent: spec.agent || 'shell',
       label: spec.label || 'Session',
       assurance: spec.assurance || 'L0-native',
       resultInputCapable: spec.resultInputCapable === true,
+      sessionMode,
+      agentState: sessionMode === 'direct-agent' ? 'starting' : 'unavailable',
+      lifecycleConfirmedAt: null,
+      inputRevision: 0,
+      lastExternalInputAt: 0,
+      draftDirty: false,
+      scheduledDelivery: null,
+      bracketedPasteEnabled: false,
+      terminalModeCarry: '',
+      lifecycleRelease: lifecycleRegistration?.release || null,
       cwd: spec.cwd || null,
-      startedAt: Date.now(),
+      startedAt: this._now(),
       status: 'running',
       exitCode: null,
       killTimer: null,
@@ -512,8 +588,22 @@ class SessionRegistry {
 
     proc.onData((data) => {
       const text = data.toString();
+      const previousPasteMode = session.bracketedPasteEnabled;
+      const pasteMode = updateBracketedPasteMode(
+        session.bracketedPasteEnabled,
+        session.terminalModeCarry,
+        text
+      );
+      session.bracketedPasteEnabled = pasteMode.enabled;
+      session.terminalModeCarry = pasteMode.carry;
       this._recordOutput(session, text);
       this._onOutput({ id: sessionId, data: text, stream: 'stdout' });
+      if (
+        previousPasteMode !== session.bracketedPasteEnabled &&
+        this._sessions.get(sessionId) === session
+      ) {
+        this._onStatus(this.describe(sessionId));
+      }
     });
 
     proc.onExit(({ exitCode }) => {
@@ -524,7 +614,11 @@ class SessionRegistry {
       if (session.killTimer) { clearTimeout(session.killTimer); session.killTimer = null; }
       session.status = 'exited';
       session.exitCode = exitCode;
+      session.agentState = 'exited';
       session.proc = null;
+      session.scheduledDelivery = null;
+      session.lifecycleRelease?.();
+      session.lifecycleRelease = null;
       this._retiringIds.delete(sessionId);
       session.resolveExit();
       this._settleAllWaiters(session, 'exit');
@@ -712,6 +806,7 @@ class SessionRegistry {
   write(id, text) {
     const s = this._sessions.get(id);
     if (!s || !s.proc) return false;
+    this._recordExternalInput(s, text);
     // A workflow's "\n" means submit; a real terminal sends CR.
     s.proc.write(text.replace(/\n/g, '\r'));
     return true;
@@ -732,7 +827,161 @@ class SessionRegistry {
     if (s.resultInputCapable !== true) {
       throw new Error('Session is not capable of structured result input');
     }
+    this._recordExternalInput(s, text);
     s.proc.write(text.replace(/\n/g, '\r'));
+    return true;
+  }
+
+  _recordExternalInput(s, text) {
+    if (isTerminalProtocolReply(text)) return;
+    s.inputRevision += 1;
+    s.lastExternalInputAt = this._now();
+    if (s.sessionMode !== 'direct-agent') return;
+    const previousState = s.agentState;
+    const previousDraft = s.draftDirty;
+    if (/[\r\n]/.test(text)) {
+      s.agentState = 'running';
+      s.draftDirty = false;
+    } else {
+      s.draftDirty = true;
+    }
+    if (
+      (previousState !== s.agentState || previousDraft !== s.draftDirty) &&
+      this._sessions.has(s.id)
+    ) {
+      this._onStatus(this.describe(s.id));
+    }
+  }
+
+  _handleAgentLifecycleEvent(id, incarnationId, event) {
+    const s = this._sessions.get(id);
+    if (!s || s.incarnationId !== incarnationId || s.sessionMode !== 'direct-agent') return false;
+    if (event?.type !== 'agent-turn-complete' || s.status !== 'running' || !s.proc) return false;
+    s.agentState = 'idle';
+    s.lifecycleConfirmedAt = this._now();
+    // A provider completion proves lifecycle state, not composer contents.
+    // Only an app-observed submit may clear a draft; otherwise a late or
+    // duplicate receipt could make foreign text eligible for unattended Enter.
+    this._onStatus(this.describe(id));
+    return true;
+  }
+
+  /** Main-only identity used to reconcile durable schedule bindings. */
+  scheduleBinding(id) {
+    const s = this._sessions.get(id);
+    if (!s || s.status !== 'running' || !s.proc) return null;
+    return {
+      sessionId: s.id,
+      incarnationId: s.incarnationId,
+      profileId: s.profileId,
+      agent: s.agent,
+      sessionMode: s.sessionMode,
+    };
+  }
+
+  /** Main-only creation eligibility. A completed provider turn is the proof. */
+  scheduleTarget(id) {
+    const s = this._sessions.get(id);
+    if (
+      !s || s.status !== 'running' || !s.proc || s.sessionMode !== 'direct-agent' ||
+      s.agent !== 'codex' || !s.lifecycleConfirmedAt || !s.bracketedPasteEnabled ||
+      s.agentState !== 'idle' || s.draftDirty
+    ) return null;
+    return {
+      ...this.scheduleBinding(id),
+      readiness: s.agentState,
+    };
+  }
+
+  beginScheduledDelivery(schedule, claimToken, quietPeriodMs) {
+    const s = this._sessions.get(schedule?.sessionId);
+    if (!s || s.status !== 'running' || !s.proc) return { ok: false, status: 'session_changed' };
+    if (
+      s.incarnationId !== schedule.sessionIncarnationId ||
+      s.profileId !== schedule.expectedProfileId ||
+      s.agent !== schedule.expectedAgent ||
+      s.sessionMode !== 'direct-agent'
+    ) {
+      return { ok: false, status: 'session_changed' };
+    }
+    if (!s.lifecycleConfirmedAt) return { ok: false, status: 'unavailable' };
+    if (!s.bracketedPasteEnabled) return { ok: false, status: 'unavailable' };
+    if (s.agentState !== 'idle' || s.draftDirty) return { ok: false, status: 'busy' };
+    if (s.lastExternalInputAt && this._now() - s.lastExternalInputAt < quietPeriodMs) {
+      return { ok: false, status: 'busy' };
+    }
+    if (s.scheduledDelivery) return { ok: false, status: 'busy' };
+    s.scheduledDelivery = { claimToken, incarnationId: s.incarnationId };
+    return { ok: true, inputRevision: s.inputRevision };
+  }
+
+  writeScheduledPaste(id, incarnationId, claimToken, payload) {
+    const s = this._sessions.get(id);
+    if (
+      !s || !s.proc || s.status !== 'running' || s.incarnationId !== incarnationId ||
+      s.agentState !== 'idle' || s.scheduledDelivery?.claimToken !== claimToken
+    ) {
+      throw new Error('Scheduled delivery lost its session proof before paste');
+    }
+    // Latch the composer as occupied before crossing the native write
+    // boundary. A throwing write may still have accepted a prefix, so only a
+    // successful app-observed submit is allowed to clear this flag.
+    s.inputRevision += 1;
+    s.draftDirty = true;
+    s.scheduledDelivery.pasteRevision = s.inputRevision;
+    this._onStatus(this.describe(id));
+    s.proc.write(payload);
+    return s.inputRevision;
+  }
+
+  revalidateScheduledDelivery(schedule, claimToken, pasteRevision) {
+    const s = this._sessions.get(schedule?.sessionId);
+    return {
+      ok: !!(
+        s && s.proc && s.status === 'running' &&
+        s.incarnationId === schedule.sessionIncarnationId &&
+        s.profileId === schedule.expectedProfileId &&
+        s.agent === schedule.expectedAgent &&
+        s.sessionMode === 'direct-agent' &&
+        s.lifecycleConfirmedAt && s.bracketedPasteEnabled &&
+        s.agentState === 'idle' && s.draftDirty &&
+        s.scheduledDelivery?.claimToken === claimToken &&
+        s.scheduledDelivery?.pasteRevision === pasteRevision &&
+        s.inputRevision === pasteRevision
+      ),
+    };
+  }
+
+  submitScheduledDelivery(id, incarnationId, claimToken, submit) {
+    const s = this._sessions.get(id);
+    if (
+      !s || !s.proc || s.status !== 'running' || s.incarnationId !== incarnationId ||
+      s.agentState !== 'idle' || s.scheduledDelivery?.claimToken !== claimToken ||
+      s.scheduledDelivery?.pasteRevision !== s.inputRevision || !s.draftDirty ||
+      submit !== '\r'
+    ) {
+      return false;
+    }
+    s.inputRevision += 1;
+    s.agentState = 'running';
+    // Keep the sticky draft lock while the native submit is uncertain. If
+    // write() throws after a possible partial write, future schedules remain
+    // blocked even if a lifecycle receipt later arrives.
+    try {
+      s.proc.write(submit);
+      s.draftDirty = false;
+    } catch (error) {
+      this._onStatus(this.describe(id));
+      throw error;
+    }
+    this._onStatus(this.describe(id));
+    return true;
+  }
+
+  endScheduledDelivery(id, claimToken) {
+    const s = this._sessions.get(id);
+    if (!s || s.scheduledDelivery?.claimToken !== claimToken) return false;
+    s.scheduledDelivery = null;
     return true;
   }
 
@@ -1195,11 +1444,22 @@ class SessionRegistry {
     return {
       id: s.id,
       pid: s.pid,
+      incarnationId: s.incarnationId,
       profileId: s.profileId,
       agent: s.agent,
       label: s.label,
       assurance: s.assurance,
       resultInputCapable: s.resultInputCapable,
+      sessionMode: s.sessionMode,
+      scheduledPrompt: {
+        supported: s.sessionMode === 'direct-agent' && s.agent === 'codex',
+        confirmed: !!s.lifecycleConfirmedAt,
+        ready: s.sessionMode === 'direct-agent' && s.agent === 'codex' &&
+          s.status === 'running' && !!s.lifecycleConfirmedAt && s.bracketedPasteEnabled &&
+          s.agentState === 'idle' && !s.draftDirty,
+        readiness: s.agentState,
+        bracketedPaste: s.bracketedPasteEnabled,
+      },
       startedAt: s.startedAt,
       status: s.status,
       exitCode: s.exitCode,
@@ -1224,4 +1484,4 @@ class SessionRegistry {
   }
 }
 
-module.exports = { SessionRegistry, nextSessionId, KILL_GRACE_MS };
+module.exports = { SessionRegistry, nextSessionId, KILL_GRACE_MS, updateBracketedPasteMode };

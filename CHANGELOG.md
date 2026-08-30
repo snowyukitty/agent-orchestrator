@@ -5,6 +5,34 @@ the product story; this file keeps the history.
 
 ## Unreleased (Journal v2 + Evidence-First Field Guide)
 
+- **Durable exact-session prompts**: a routed Codex session can now be started
+  in an explicit direct-agent mode and scheduled for a one-shot or repeating
+  prompt. Each record binds the exact session id, a random non-reusable PTY
+  incarnation, and its main-owned profile/agent identity. The app never
+  retargets the record or falls back to launching new work.
+- **At-most-once unattended delivery**: the main process serializes every store
+  mutation, persists a unique occurrence claim before touching the PTY, and
+  rechecks identity, provider-confirmed readiness, quiet time, and input
+  revision between one bracketed paste and one Enter. Busy or temporarily
+  unavailable sessions remain due; any possible partial write consumes the
+  occurrence; stale crash claims are consumed without replay. The renderer
+  locks the displayed session id/incarnation while a prompt is composed, and
+  main rejects the create request if that exact target changed. Direct Codex
+  mode removes all lifecycle routing values from ordinary shell-tool environments.
+  Delivery also requires an observed DECSET 2004 protected-paste mode; a
+  post-paste race never sends a cleanup key that could erase human input and is
+  surfaced as an error requiring composer inspection. Possibly partial paste
+  or submit writes leave a sticky draft lock that provider receipts cannot
+  clear, preventing later repeats from stacking onto uncertain composer text.
+  Consumed one-shots cannot be resumed, and paused repeats skip missed slots
+  rather than replaying them when resumed.
+- **Fail-closed restart and corruption behavior**: schedules survive app exit,
+  but a restarted app cannot prove the vanished PTY incarnation, so affected
+  rows become `session_changed` evidence and require recreation. An unreadable
+  or future schedule store is preserved and disables delivery instead of being
+  replaced with an empty file. Prompt text is deliberately local plaintext and
+  the UI warns never to include secrets.
+
 - **Deliberate Run Journal v2 migration**: startup validates each v1 record,
   preserves a rollback copy, and atomically writes an explicit v2 record rather
   than reinterpreting old data. Migration is idempotent across crashes before

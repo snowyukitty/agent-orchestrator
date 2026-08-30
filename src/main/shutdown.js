@@ -10,9 +10,10 @@ const MAX_DRAIN_ATTEMPTS = 3;
 const DRAIN_RETRY_DELAY_MS = 2000;
 
 class ShutdownCoordinator {
-  constructor({ getRegistry, cleanup, requestQuit, onError, schedule } = {}) {
+  constructor({ getRegistry, cleanup, beforeDrain, requestQuit, onError, schedule } = {}) {
     this._getRegistry = getRegistry || (() => null);
     this._cleanup = cleanup || (() => {});
+    this._beforeDrain = beforeDrain || (() => null);
     this._requestQuit = requestQuit || (() => {});
     this._onError = onError || (() => {});
     this._schedule = schedule || ((fn, ms) => setTimeout(fn, ms));
@@ -42,6 +43,8 @@ class ShutdownCoordinator {
   _drain(registry) {
     this._attempts += 1;
     return (async () => {
+      const gate = this._beforeDrain();
+      if (gate && typeof gate.then === 'function') await gate;
       if (registry) {
         await registry.killAllSequential('shutdown', { failOnTimeout: true });
         await registry.whenTerminationsComplete();

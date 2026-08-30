@@ -97,6 +97,16 @@ export class SessionManager {
 
   get activeId() { return this._activeId; }
 
+  get activeMeta() {
+    const meta = this._sessions.get(this._activeId)?.meta;
+    return meta ? { ...meta } : null;
+  }
+
+  metaFor(id) {
+    const meta = this._sessions.get(id)?.meta;
+    return meta ? { ...meta } : null;
+  }
+
   /** The active session's xterm, or null. Engine/app read cols/rows from this. */
   get activeTerm() {
     const s = this._sessions.get(this._activeId);
@@ -125,9 +135,9 @@ export class SessionManager {
    * routed profile whose account cannot be resolved fails closed rather than
    * silently starting a native login.
    */
-  async startProfile(profileId, { cwd, activate = true } = {}) {
+  async startProfile(profileId, { cwd, activate = true, sessionMode = 'account-shell' } = {}) {
     const geometry = this._geometry();
-    const result = await this._api.createSession({ profileId, cwd, ...geometry });
+    const result = await this._api.createSession({ profileId, cwd, sessionMode, ...geometry });
     if (!result || result.error) {
       if (result?.id) this._dropPendingId(result.id);
       this._onLog(`❌ Could not start "${profileId}": ${result?.error || 'unknown error'}`, 'stderr');
@@ -135,7 +145,8 @@ export class SessionManager {
     }
     const meta = result.session || { id: result.id, label: profileId, agent: 'shell', assurance: 'L0-native', status: 'running' };
     this.adopt(meta, { activate });
-    this._onLog(`⬡ Session started: ${meta.label} (${ASSURANCE_SHORT[meta.assurance] || meta.assurance})`, 'system');
+    const mode = meta.sessionMode === 'direct-agent' ? 'direct agent' : 'account shell';
+    this._onLog(`⬡ Session started: ${meta.label} (${ASSURANCE_SHORT[meta.assurance] || meta.assurance}; ${mode})`, 'system');
     return meta.id;
   }
 

@@ -58,11 +58,31 @@ Open the **Agents** panel:
 - **Routed accounts (L1)** — if you use `ai-agent-entrypoint` to manage Codex
   accounts, they are discovered automatically and launch fail-closed: an
   unresolvable alias refuses to start rather than falling back to the wrong
-  identity.
+  identity. **Account shell** opens the long-lived routed shell. **Direct
+  agent** runs Codex as the routed target and is the only mode eligible for an
+  exact-session scheduled prompt after a turn completes.
 
 Each session gets its own tab; all sessions keep running and buffering while
 hidden. The **quick-send bar** under the terminal broadcasts an ad-hoc prompt
 to the current session, one agent's sessions, or everything at once.
+
+## Continue one session later
+
+1. Open a routed Codex profile with **Direct agent**.
+2. Complete one harmless turn. The app waits for a capability-validated Codex
+   turn-complete notification and protected-paste mode before treating the
+   session as schedulable.
+3. Open **⏱ Schedules**, use **Continue this exact live session**, and choose a
+   future local time or **+1h**, **+5h**, or **+24h**. Add an interval only if
+   the prompt should repeat.
+4. Keep the app and that exact session running. At delivery time, it must still
+   be provider-confirmed idle and quiet.
+
+The prompt is stored locally in plaintext. Never include secrets. Restarting
+the app ends the PTY and leaves the row disabled as `session_changed`; it will
+not bind to a replacement. For work that should launch fresh, use the separate
+saved-workflow section under **Launch new work**. See the
+[full safety contract](session-prompt-scheduling.md).
 
 ## Two things worth automating on day one
 
@@ -78,6 +98,9 @@ to the current session, one agent's sessions, or everything at once.
 
 - Workflows: `%APPDATA%/agent-orchestrator/workflows/` (atomic writes,
   versioned format).
+- Exact-session prompts:
+  `%APPDATA%/agent-orchestrator/session-prompt-schedules.json` (bounded,
+  atomic, local plaintext; never store secrets).
 - Run journal: encrypted with the OS keychain via Electron `safeStorage`,
   inspectable in-app under **📖 Runs**. History loads in stable cursor pages.
   Retention by terminal-run count and/or age is previewed before confirmation;
@@ -90,8 +113,8 @@ to the current session, one agent's sessions, or everything at once.
   [resume design](resume-design.md).
 - Settings: `%APPDATA%/agent-orchestrator/settings.json`.
 
-No telemetry, no analytics, no network calls of its own — the only processes
-it talks to are the terminals you launch.
+No telemetry or analytics. The app talks to the terminals you launch and uses
+one process-local named pipe for minimal direct-Codex lifecycle receipts.
 
 ## Troubleshooting
 
@@ -100,6 +123,14 @@ it talks to are the terminals you launch.
 - **Scheduled run missed while minimized** — the machine was asleep. The
   in-app heartbeat survives tray/lock but not sleep; disable sleep for the
   scheduled window or use a wake timer.
+- **Exact-session row says `session_changed`** — the original PTY exited, the
+  app restarted, or its identity could no longer be proven. This state is
+  permanent by design; recreate the row against a new direct session.
+- **Direct session cannot be scheduled yet** — complete one Codex turn first.
+  Running turns, approval waits, account shells, local profiles, and providers
+  without a capability-validated lifecycle signal deliberately remain
+  ineligible. A Codex TUI that has not enabled bracketed-paste mode is also
+  unavailable, because multiline delivery would be unsafe.
 - **First Enter swallowed by an interactive CLI** — expected; typed
   submission deliberately double-taps Enter.
 - **Waits that never finish** — prefer **Output contains** over idle-only

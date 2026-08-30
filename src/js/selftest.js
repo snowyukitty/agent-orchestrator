@@ -25,6 +25,13 @@ import {
   DEFAULT_GRACE_MS,
 } from './schedule.js';
 import {
+  canResumeSchedule,
+  datetimeLocalValue,
+  scheduleState,
+  SessionPromptSchedulesUI,
+  shortcutTarget,
+} from './session-prompt-schedules.js';
+import {
   BRACKETED_PASTE_END,
   BRACKETED_PASTE_START,
   ENTER_GAP_MS,
@@ -91,6 +98,18 @@ export async function runSelfTest() {
       typeof window.api?.sendStructuredInput === 'function');
     ok('preload-exposes-explicit-resume-preflight',
       typeof window.api?.preflightRunResume === 'function');
+    ok('preload-exposes-session-prompt-management',
+      ['listSessionPrompts', 'createSessionPrompt', 'setSessionPromptEnabled',
+        'deleteSessionPrompt', 'onSessionPromptsChanged']
+        .every(name => typeof window.api?.[name] === 'function'));
+    ok('session-prompt-warning-is-visible',
+      document.querySelector('#session-prompt-plaintext-warning')?.textContent
+        .includes('plaintext'));
+    ok('session-continuation-stays-distinct-from-new-work',
+      document.querySelector('#session-prompt-section h3')?.textContent
+        .includes('exact live session')
+      && document.querySelector('#workflow-schedule-section h3')?.textContent
+        .includes('new work'));
     await testLoops(eq);
     await testTemplates(eq);
     testHandoffWarning(ok);
@@ -101,6 +120,7 @@ export async function runSelfTest() {
     await testAbortSpawnRaces(eq, ok);
     await testRoutedWorkflowBootstrap(eq, ok);
     await testSchedule(eq);
+    await testSessionPromptManagement(eq, ok);
     await testTyping(eq, ok);
     await testSessionTargets(eq);
     await testAgentStages(eq, ok);
@@ -1092,6 +1112,38 @@ async function testRoutedWorkflowBootstrap(eq, ok) {
 async function testSchedule(eq) {
   const GRACE = DEFAULT_GRACE_MS;
 
+  const shortcutNow = new Date(2026, 0, 15, 8, 30, 0, 0).getTime();
+  eq('session-prompt-shortcut-plus-one-hour',
+    shortcutTarget(shortcutNow, 1),
+    shortcutNow + 3_600_000);
+  eq('session-prompt-shortcut-plus-five-hours',
+    shortcutTarget(shortcutNow, 5),
+    shortcutNow + 18_000_000);
+  eq('session-prompt-shortcut-plus-day',
+    shortcutTarget(shortcutNow, 24),
+    shortcutNow + 86_400_000);
+  eq('session-prompt-datetime-local-value',
+    datetimeLocalValue(shortcutNow),
+    '2026-01-15T08:30');
+  eq('session-prompt-state-changed-is-terminal',
+    scheduleState({ enabled: false, lastResult: { status: 'session_changed' } }),
+    'session changed — recreate');
+  eq('session-prompt-state-paused',
+    scheduleState({ enabled: false }),
+    'paused');
+  eq('session-prompt-state-enabled',
+    scheduleState({ enabled: true }),
+    'scheduled');
+  eq('session-prompt-state-error-warns-about-residual-draft',
+    scheduleState({ enabled: false, lastResult: { status: 'error' } }),
+    'error — inspect target composer');
+  eq('consumed-session-prompt-one-shot-cannot-resume',
+    canResumeSchedule({ enabled: false, repeatIntervalMinutes: null, lastResult: { status: 'sent' } }),
+    false);
+  eq('paused-session-prompt-repeat-can-resume',
+    canResumeSchedule({ enabled: false, repeatIntervalMinutes: 60, lastResult: { status: 'sent' } }),
+    true);
+
   // `once` returns the absolute saved time regardless of `now`.
   const onceDt = '2026-01-15T08:30';
   const onceMs = new Date(onceDt).getTime();
@@ -1129,6 +1181,109 @@ async function testSchedule(eq) {
   eq('unsaved-schedule-remains-available-in-memory',
     mergeScheduledWorkflowSources([saved], unsaved),
     [saved, unsaved]);
+}
+
+async function testSessionPromptManagement(eq, ok) {
+  const now = new Date(2026, 0, 15, 8, 30, 0, 0).getTime();
+  const created = [];
+  const original = {
+    id: 'active-session',
+    incarnationId: '70000000-0000-4000-8000-000000000001',
+    label: 'Codex A · direct',
+    status: 'running',
+    scheduledPrompt: {
+      supported: true,
+      confirmed: true,
+      ready: true,
+      bracketedPaste: true,
+    },
+  };
+  let active = original;
+  const sessions = new Map([[original.id, original]]);
+  const otherSchedule = {
+    id: 'bad" data-injected="yes',
+    sessionId: 'other-session',
+    sessionIncarnationId: '90000000-0000-4000-8000-000000000001',
+    expectedProfileId: 'codex:b',
+    expectedAgent: 'codex',
+    prompt: '<review & continue>',
+    nextOccurrenceAt: now + 3_600_000,
+    repeatIntervalMinutes: null,
+    enabled: false,
+    lastResult: { status: 'session_changed' },
+  };
+  const consumedSent = {
+    ...otherSchedule,
+    id: 'consumed-sent',
+    sessionId: original.id,
+    sessionIncarnationId: original.incarnationId,
+    nextOccurrenceAt: now + 3_600_001,
+    lastResult: { status: 'sent' },
+  };
+  const consumedError = {
+    ...consumedSent,
+    id: 'consumed-error',
+    nextOccurrenceAt: now + 3_600_002,
+    lastResult: { status: 'error' },
+  };
+  const ui = new SessionPromptSchedulesUI({
+    api: {
+      listSessionPrompts: async () => ({
+        schedules: [otherSchedule, consumedSent, consumedError],
+        diagnostic: null,
+      }),
+      createSessionPrompt: async payload => { created.push(payload); return payload; },
+    },
+    getActiveSession: () => active,
+    getSession: id => sessions.get(id) || null,
+    now: () => now,
+    confirmFn: () => true,
+  });
+  ui.render();
+  ok('session-prompt-ui-no-target-placeholder',
+    document.getElementById('session-prompt-target')?.textContent.includes('No target locked'));
+  ui.selectActiveTarget();
+  await ui.refresh();
+  const row = document.querySelector('[data-session-prompt-id]');
+  ok('session-prompt-ui-lists-other-session', row?.textContent.includes('other-session'));
+  ok('session-prompt-ui-escapes-prompt-html', !row?.querySelector('review'));
+  eq('session-prompt-ui-escapes-attribute-quotes', row?.dataset.sessionPromptId,
+    otherSchedule.id);
+  ok('session-prompt-ui-does-not-inject-attributes', !row?.hasAttribute('data-injected'));
+  ok('session-changed-row-cannot-resume', row?.querySelector('[data-session-prompt-action="resume"]')?.disabled);
+  ok('session-changed-row-remains-deletable', !row?.querySelector('[data-session-prompt-action="delete"]')?.disabled);
+  ok('sent-one-shot-row-cannot-resume',
+    document.querySelector('[data-session-prompt-id="consumed-sent"]')
+      ?.querySelector('[data-session-prompt-action="resume"]')?.disabled);
+  ok('error-one-shot-row-cannot-resume',
+    document.querySelector('[data-session-prompt-id="consumed-error"]')
+      ?.querySelector('[data-session-prompt-action="resume"]')?.disabled);
+  ok('lifecycle-confirmed-direct-session-can-schedule',
+    !document.getElementById('btn-create-session-prompt')?.disabled);
+
+  active = {
+    ...original,
+    id: 'newly-active-session',
+    incarnationId: '70000000-0000-4000-8000-000000000002',
+    label: 'Codex B · direct',
+  };
+  sessions.set(active.id, active);
+  ui.render();
+  ok('session-prompt-target-does-not-drift-with-active-tab',
+    document.getElementById('session-prompt-target')?.textContent.includes(original.incarnationId)
+    && !document.getElementById('session-prompt-target')?.textContent.includes(active.incarnationId));
+
+  document.getElementById('session-prompt-text').value = 'Continue safely.';
+  document.getElementById('session-prompt-datetime').value = datetimeLocalValue(now + 3_600_000);
+  document.getElementById('session-prompt-repeat').value = '300';
+  eq('session-prompt-ui-create-result', await ui.create(), true);
+  eq('session-prompt-ui-exact-create-guard', created, [{
+    sessionId: 'active-session',
+    sessionIncarnationId: original.incarnationId,
+    prompt: 'Continue safely.',
+    nextOccurrenceAt: now + 3_600_000,
+    repeatIntervalMinutes: 300,
+  }]);
 }
 
 // ── Human-paced typing (shared by the engine and quick-send) ──

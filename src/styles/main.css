@@ -1311,6 +1311,164 @@ html, body {
 }
 .modal-hint { font-size: var(--font-size-xs); color: var(--text-muted); }
 
+.schedule-sections {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+  padding: var(--sp-4);
+}
+
+.schedule-section + .schedule-section {
+  padding-top: var(--sp-5);
+  border-top: 1px solid var(--border-medium);
+}
+
+.schedule-section-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-3);
+}
+
+.schedule-section-heading h3 {
+  color: var(--text-primary);
+  font-size: var(--font-size-base);
+  margin-bottom: var(--sp-1);
+}
+
+.schedule-section-heading p {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  line-height: 1.55;
+}
+
+.schedule-operation-chip {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--border-medium);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+}
+
+.plaintext-warning {
+  margin-bottom: var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid color-mix(in srgb, var(--accent-yellow) 55%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent-yellow) 9%, transparent);
+  color: var(--text-secondary);
+  font-size: var(--font-size-xs);
+  line-height: 1.55;
+}
+
+.session-prompt-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--sp-3);
+  align-items: end;
+  margin-bottom: var(--sp-4);
+  padding: var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-glass);
+}
+
+.session-prompt-target,
+.session-prompt-target-row,
+.session-prompt-text-field,
+.session-prompt-form .agent-form-error {
+  grid-column: 1 / -1;
+}
+
+.session-prompt-target {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  overflow-wrap: anywhere;
+}
+
+.session-prompt-target-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+}
+
+.session-prompt-target-row .session-prompt-target { flex: 1; }
+
+.agent-field input[type="datetime-local"],
+.agent-field input[type="number"],
+.agent-field textarea {
+  width: 100%;
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--font-size-sm);
+}
+
+.agent-field textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.agent-field input[type="datetime-local"]:focus,
+.agent-field input[type="number"]:focus,
+.agent-field textarea:focus {
+  outline: none;
+  border-color: var(--accent-cyan);
+}
+
+.session-prompt-shortcuts,
+.session-prompt-actions {
+  display: flex;
+  gap: var(--sp-1);
+  flex-wrap: wrap;
+}
+
+.session-prompt-row {
+  align-items: flex-start;
+  border-left-color: var(--accent-cyan);
+}
+
+.session-prompt-row .sched-info { min-width: 0; flex: 1; }
+.sched-time,
+.session-prompt-binding {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  overflow-wrap: anywhere;
+}
+
+.session-prompt-preview {
+  max-height: 7.5em;
+  overflow: auto;
+  margin-top: var(--sp-2);
+  padding: var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.session-prompt-row .sched-right {
+  align-items: flex-end;
+  flex-direction: column;
+}
+
+.session-prompt-row .sched-countdown {
+  font-size: var(--font-size-xs);
+  white-space: nowrap;
+}
+
 .sched-empty {
   padding: var(--sp-6) var(--sp-4);
   text-align: center;
@@ -2133,6 +2291,16 @@ html, body {
   padding: var(--sp-2);
   font-size: var(--font-size-sm);
   width: 100%;
+}
+
+.sched-row.session-prompt-row { border-left-color: var(--accent-cyan); }
+
+@media (max-width: 680px) {
+  .session-prompt-form { grid-template-columns: 1fr; }
+  .session-prompt-form > * { grid-column: 1; }
+  .schedule-section-heading,
+  .session-prompt-row { flex-direction: column; }
+  .session-prompt-row .sched-right { align-items: flex-start; }
 }
 
 .agent-field input[type="text"]:focus,

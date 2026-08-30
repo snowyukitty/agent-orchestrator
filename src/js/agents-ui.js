@@ -31,7 +31,7 @@ const HOME_ENV_HINT = {
 export class AgentsUI {
   /**
    * @param {object} opts
-   * @param {function} opts.onStartSession (profileId) => void
+   * @param {function} opts.onStartSession (profileId, { sessionMode }) => void
    * @param {function} opts.onLog          (message, type) => void
    * @param {object} [opts.api]
    */
@@ -99,6 +99,20 @@ export class AgentsUI {
 
     // Row actions for both lists.
     document.getElementById('agents-body')?.addEventListener('click', async (e) => {
+      const direct = e.target.closest('[data-start-direct]');
+      if (direct) {
+        e.stopPropagation();
+        document.getElementById('agents-modal')?.classList.add('hidden');
+        this._onStartSession(direct.dataset.startDirect, { sessionMode: 'direct-agent' });
+        return;
+      }
+      const shell = e.target.closest('[data-start-shell]');
+      if (shell) {
+        e.stopPropagation();
+        document.getElementById('agents-modal')?.classList.add('hidden');
+        this._onStartSession(shell.dataset.startShell, { sessionMode: 'account-shell' });
+        return;
+      }
       const edit = e.target.closest('[data-edit-profile]');
       if (edit) {
         e.stopPropagation();
@@ -114,7 +128,7 @@ export class AgentsUI {
       const row = e.target.closest('[data-profile-id]');
       if (row && !row.classList.contains('unavailable')) {
         document.getElementById('agents-modal')?.classList.add('hidden');
-        this._onStartSession(row.dataset.profileId);
+        this._onStartSession(row.dataset.profileId, { sessionMode: 'account-shell' });
       }
     });
   }
@@ -224,6 +238,10 @@ export class AgentsUI {
             <div class="agent-sub">${esc(health)}</div>
           </div>
           <span class="assurance-chip ${esc(p.assurance)}">${esc(ASSURANCE_CHIP[p.assurance] || p.assurance)}</span>
+          <span class="agent-actions">
+            <button class="btn btn-secondary btn-sm" data-start-shell="${esc(p.id)}" title="Open a long-lived account shell">Account shell</button>
+            <button class="btn btn-primary btn-sm" data-start-direct="${esc(p.id)}" title="Launch Codex directly; scheduled continuation becomes available after a confirmed turn">Direct agent</button>
+          </span>
         </div>`;
     }).join('');
   }
@@ -251,6 +269,7 @@ export class AgentsUI {
           </div>
           <span class="assurance-chip ${esc(p.assurance)}">${esc(ASSURANCE_CHIP[p.assurance] || p.assurance)}</span>
           <span class="agent-actions">
+            <button class="btn btn-secondary btn-sm" data-start-shell="${esc(p.id)}" title="Start this account shell">Start shell</button>
             <button class="btn btn-icon btn-sm" data-edit-profile="${esc(p.id)}" title="Edit">✎</button>
             <button class="btn btn-icon btn-sm" data-delete-profile="${esc(p.id)}" data-name="${esc(p.displayName)}" title="Delete">🗑️</button>
           </span>

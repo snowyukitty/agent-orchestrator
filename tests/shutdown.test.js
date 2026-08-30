@@ -71,6 +71,29 @@ test('quit without a session registry still uses the two-phase gate', async () =
   assert.equal(quitRequests, 1);
 });
 
+test('quit joins privileged scheduler work before terminating PTYs', async () => {
+  const schedulerIdle = deferred();
+  const calls = [];
+  const registry = {
+    closeAdmission() { calls.push('close'); },
+    async killAllSequential() { calls.push('kill'); },
+    async whenTerminationsComplete() { calls.push('wait'); },
+  };
+  const coordinator = new ShutdownCoordinator({
+    getRegistry: () => registry,
+    cleanup: () => calls.push('cleanup'),
+    beforeDrain: () => schedulerIdle.promise,
+    requestQuit: () => calls.push('quit'),
+  });
+
+  coordinator.handleBeforeQuit({ preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, ['close', 'cleanup']);
+  schedulerIdle.resolve();
+  await coordinator.whenDrained();
+  assert.deepEqual(calls, ['close', 'cleanup', 'kill', 'wait', 'quit']);
+});
+
 test('a transiently failed drain retries and then quits cleanly', async () => {
   // Cleanup has already destroyed the tray by the time the drain runs, so a
   // failed drain must recover on its own — there is no UI left to ask again.

@@ -18,6 +18,7 @@ const entries = listPackage(asarPath, { isPack: false }).map((entry) => {
 });
 const forbidden = [
   /^\/.*\.log$/i,
+  /^\/.*\.bat$/i,
   /^\/(?:docs|mcps|scripts|tests)(?:\/|$)/,
   /^\/\.git(?:hub)?(?:\/|$)/,
   /^\/(?:AGENTS|CONTRIBUTING|README|SECURITY)\.md$/,
@@ -34,6 +35,11 @@ const required = [
   '/src/js/sessions.js',
   '/src/js/selftest.js',
   '/src/main/agents.js',
+  '/src/main/codex-lifecycle.js',
+  '/src/main/scheduled-prompt-delivery.js',
+  '/src/main/session-prompt-ipc.js',
+  '/src/main/session-prompt-scheduler.js',
+  '/src/main/session-prompt-schedules.js',
   '/src/main/sessions.js',
   '/src/main/settings.js',
   '/src/main/store.js',
@@ -85,10 +91,20 @@ if (!fs.existsSync(unpackedPty)) {
   throw new Error('Packaged node-pty native runtime is missing from app.asar.unpacked.');
 }
 
+const packagedNotifyHelper = path.join(packageRoot, 'resources', 'codex-notify.ps1');
+const sourceNotifyHelper = path.join(projectRoot, 'src', 'main', 'codex-notify.ps1');
+if (!fs.existsSync(packagedNotifyHelper)) {
+  throw new Error('Packaged Codex lifecycle helper is missing from resources.');
+}
+if (!fs.readFileSync(packagedNotifyHelper).equals(fs.readFileSync(sourceNotifyHelper))) {
+  throw new Error('Packaged Codex lifecycle helper does not match its reviewed source.');
+}
+
 const looseEntries = fs.readdirSync(packageRoot, { recursive: true, encoding: 'utf8' });
 const forbiddenLoose = looseEntries.filter((entry) => {
   const normalized = entry.replaceAll('\\', '/');
   return /(?:^|\/).*\.log$/i.test(normalized) ||
+    /(?:^|\/).*\.bat$/i.test(normalized) ||
     /^(?:\.github|docs|mcps|scripts|tests)(?:\/|$)/i.test(normalized) ||
     /^(?:AGENTS|CONTRIBUTING|README|SECURITY)\.md$/i.test(normalized);
 });

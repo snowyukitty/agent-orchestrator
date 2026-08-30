@@ -164,18 +164,71 @@
     </div>
   </footer>
 
-  <!-- ═══ Scheduled Runs Modal ═══ -->
+  <!-- ═══ Schedules Modal ═══ -->
   <div class="modal-overlay hidden" id="schedule-modal">
-    <div class="modal-card">
+    <div class="modal-card modal-wide">
       <div class="modal-header">
-        <h2>⏱ Scheduled Runs</h2>
+        <h2>⏱ Schedules</h2>
         <button class="btn btn-icon btn-sm" id="btn-close-schedules" title="Close">✕</button>
       </div>
-      <div class="modal-body" id="schedule-list">
-        <!-- Scheduled workflow rows rendered by JS -->
+      <div class="modal-body schedule-sections">
+        <section class="schedule-section" id="session-prompt-section" aria-labelledby="session-prompt-heading">
+          <div class="schedule-section-heading">
+            <div>
+              <h3 id="session-prompt-heading">Continue this exact live session</h3>
+              <p>Delivers only to the original, lifecycle-confirmed direct-agent PTY. It never launches or retargets work.</p>
+            </div>
+            <span class="schedule-operation-chip">Exact session</span>
+          </div>
+          <div class="plaintext-warning" id="session-prompt-plaintext-warning" role="note">
+            ⚠ Prompt text is stored locally in plaintext. Never include passwords, tokens, credentials, or other secrets.
+          </div>
+          <div class="session-prompt-form">
+            <div class="session-prompt-target-row">
+              <div class="session-prompt-target" id="session-prompt-target">No target locked.</div>
+              <button class="btn btn-secondary btn-sm" id="btn-use-active-session">Use active session</button>
+            </div>
+            <label class="agent-field session-prompt-text-field">
+              <span>Prompt</span>
+              <textarea id="session-prompt-text" rows="4" maxlength="16000" spellcheck="true"
+                        placeholder="Continue the current task safely…"></textarea>
+            </label>
+            <label class="agent-field">
+              <span>Local date and time</span>
+              <input id="session-prompt-datetime" type="datetime-local">
+            </label>
+            <div class="session-prompt-shortcuts" aria-label="Schedule shortcuts">
+              <button class="btn btn-secondary btn-sm" data-session-prompt-shortcut="1">+1h</button>
+              <button class="btn btn-secondary btn-sm" data-session-prompt-shortcut="5">+5h</button>
+              <button class="btn btn-secondary btn-sm" data-session-prompt-shortcut="24">+24h</button>
+            </div>
+            <label class="agent-field">
+              <span>Repeat every (minutes, optional)</span>
+              <input id="session-prompt-repeat" type="number" min="1" max="525600" step="1" placeholder="One shot">
+            </label>
+            <div class="agent-form-error hidden" id="session-prompt-error" role="alert"></div>
+            <button class="btn btn-primary" id="btn-create-session-prompt" disabled>Schedule exact-session prompt</button>
+          </div>
+          <div id="session-prompt-list" aria-live="polite">
+            <!-- Durable per-session schedules rendered by JS -->
+          </div>
+        </section>
+
+        <section class="schedule-section" id="workflow-schedule-section" aria-labelledby="workflow-schedule-heading">
+          <div class="schedule-section-heading">
+            <div>
+              <h3 id="workflow-schedule-heading">Launch new work</h3>
+              <p>Runs a saved workflow and profile as a new operation after its Schedule block becomes due.</p>
+            </div>
+            <span class="schedule-operation-chip">New work</span>
+          </div>
+          <div id="schedule-list">
+            <!-- Scheduled workflow rows rendered by JS -->
+          </div>
+        </section>
       </div>
       <div class="modal-footer">
-        <span class="modal-hint">Workflows with a <strong>Schedule</strong> block appear here. Save a workflow to keep it scheduled across restarts.</span>
+        <span class="modal-hint">The app must remain running. Exact-session rows survive restart only as manageable, disabled evidence because PTYs do not.</span>
         <button class="btn btn-secondary btn-sm" id="btn-refresh-schedules" title="Reload from disk">🔄 Refresh</button>
       </div>
     </div>

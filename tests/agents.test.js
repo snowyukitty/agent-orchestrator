@@ -482,6 +482,67 @@ test('a routed Codex workflow session is result-input capable', () => {
   assert.deepEqual(spec.args.slice(-3), ['codex', 'shell', 'a']);
 });
 
+test('a routed Codex direct-agent session uses the public target run contract and lifecycle helper', () => {
+  const notifyScriptPath = 'C:/AgentOrchestrator/codex-notify.ps1';
+  const spec = agents.buildLaunchSpec(ROUTED, {
+    baseEnv: { PATH: '/bin' },
+    entrypointPath: 'C:/AI_Projects/ai-agent-entrypoint',
+    notifyScriptPath,
+    exists: () => true,
+    sessionMode: 'direct-agent',
+  });
+  assert.equal(spec.file, 'pwsh.exe');
+  assert.deepEqual(spec.args.slice(4, 9), [
+    'target', 'run', 'codex:a', '--', '-c',
+  ]);
+  assert.match(spec.args[9], /^notify=\[/);
+  assert.ok(spec.args[9].includes('codex-notify.ps1'));
+  assert.deepEqual(spec.args.slice(10), [
+    '-c',
+    'shell_environment_policy.ignore_default_excludes=false',
+  ]);
+  assert.equal(spec.sessionMode, 'direct-agent');
+  assert.equal(spec.resultInputCapable, false, 'scheduled delivery uses its own guarded capability');
+  assert.deepEqual(spec.env, { PATH: '/bin' });
+});
+
+test('direct-agent mode rejects a routed id and alias mismatch', () => {
+  assert.throws(
+    () => agents.buildLaunchSpec(
+      { ...ROUTED, id: 'codex:b', alias: 'a' },
+      {
+        baseEnv: {},
+        entrypointPath: 'C:/entrypoint',
+        notifyScriptPath: 'C:/app/codex-notify.ps1',
+        sessionMode: 'direct-agent',
+        exists: () => true,
+      }
+    ),
+    /identity does not match/
+  );
+});
+
+test('direct-agent mode fails closed for local profiles, workflows, and missing helpers', () => {
+  assert.throws(
+    () => agents.buildLaunchSpec(CLAUDE_WORK, { baseEnv: {}, sessionMode: 'direct-agent' }),
+    /requires a routed Codex account/
+  );
+  assert.throws(
+    () => agents.buildLaunchSpec(ROUTED, {
+      baseEnv: {}, entrypointPath: 'C:/entrypoint', notifyScriptPath: 'C:/notify.ps1',
+      exists: () => true, sessionMode: 'direct-agent', workflowSession: true,
+    }),
+    /separate from workflow/
+  );
+  assert.throws(
+    () => agents.buildLaunchSpec(ROUTED, {
+      baseEnv: {}, entrypointPath: 'C:/entrypoint', notifyScriptPath: 'relative.ps1',
+      exists: () => true, sessionMode: 'direct-agent',
+    }),
+    /helper is unavailable/
+  );
+});
+
 test('a routed profile fails closed rather than falling back to the native login', () => {
   assert.throws(
     () => agents.buildLaunchSpec(ROUTED, { baseEnv: {}, entrypointPath: null }),

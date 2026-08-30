@@ -20,6 +20,11 @@ const fs = require('fs');
 const pty = require('node-pty');
 
 const { SessionRegistry } = require('./src/main/sessions');
+const { CodexLifecycleBroker } = require('./src/main/codex-lifecycle');
+const { SessionPromptScheduleStore } = require('./src/main/session-prompt-schedules');
+const { SessionPromptScheduler } = require('./src/main/session-prompt-scheduler');
+const { deliverScheduledPrompt } = require('./src/main/scheduled-prompt-delivery');
+const { createSessionPromptHandlers } = require('./src/main/session-prompt-ipc');
 const agentProfiles = require('./src/main/agents');
 const { writeJsonAtomic, readJsonStrict, readJsonDir, ensureDir } = require('./src/main/store');
 const { loadSettings, saveSettings } = require('./src/main/settings');
@@ -120,6 +125,10 @@ let sleepTimer = null;
 let sleepTarget = null; // epoch ms when hibernate fires (null = none armed)
 let sessions = null;    // SessionRegistry, created once the app is ready
 let runJournal = null;  // RunJournal, created once safeStorage is available
+let codexLifecycleBroker = null;
+let sessionPromptStore = null;
+let sessionPromptScheduler = null;
+let sessionPromptHandlers = null;
 let testDataCleanupScheduled = false;
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 const isDev = process.argv.includes('--dev');
@@ -211,6 +220,7 @@ function killProcessTree(pid) {
 function createSessionRegistry() {
   return new SessionRegistry({
     pty,
+    lifecycleBroker: codexLifecycleBroker,
     // On Windows, request whole-tree termination before touching the outer
     // ConPTY root. Once that pwsh exits, nested routed children can be
     // reparented and a later taskkill /T can no longer discover them.
@@ -228,6 +238,27 @@ function createSessionRegistry() {
       if (meta) sendToRenderer('session-status', meta);
     },
   });
+}
+
+function sessionPromptFile() {
+  return path.join(app.getPath('userData'), 'session-prompt-schedules.json');
+}
+
+function codexNotifyScriptPath() {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'codex-notify.ps1')
+    : path.join(__dirname, 'src', 'main', 'codex-notify.ps1');
+}
+
+async function reconcileSessionPromptBindings() {
+  if (!sessionPromptStore || !sessions) return;
+  try {
+    await sessionPromptStore.prepareTick(id => sessions.scheduleBinding(id));
+    return true;
+  } catch (error) {
+    console.warn(`[Session prompts] binding reconciliation failed (${error.code || 'error'})`);
+    return false;
+  }
 }
 
 // ── Tray Icon ────────────────────────────────────────────────
@@ -651,7 +682,28 @@ if (!gotSingleInstanceLock) {
       console.warn('[Storage] Both legacy and canonical app data exist; canonical data was kept without merging');
     }
     console.log('[Main] App ready, creating window and tray...');
+    codexLifecycleBroker = new CodexLifecycleBroker({
+      log: message => console.warn(`[Session prompts] ${message}`),
+    });
+    try {
+      await codexLifecycleBroker.start();
+    } catch (error) {
+      console.warn(`[Session prompts] direct-agent lifecycle unavailable (${error.code || 'error'})`);
+      codexLifecycleBroker = null;
+    }
     sessions = createSessionRegistry();
+    sessionPromptStore = new SessionPromptScheduleStore({
+      filePath: sessionPromptFile(),
+      onChange: () => sendToRenderer('session-prompt-schedules-changed'),
+    });
+    sessionPromptHandlers = createSessionPromptHandlers({ store: sessionPromptStore, registry: sessions });
+    sessionPromptScheduler = new SessionPromptScheduler({
+      store: sessionPromptStore,
+      inspectBinding: id => sessions?.scheduleBinding(id) || null,
+      deliver: schedule => deliverScheduledPrompt(schedule, { registry: sessions }),
+      log: message => console.warn(`[Session prompts] ${message}`),
+    });
+    sessionPromptScheduler.start();
     // Headless verification uses injected renderer fakes and must never recover
     // or write the user's real journal. A test accidentally calling journal IPC
     // should fail closed via requireRunJournal() instead.
@@ -811,6 +863,8 @@ function cleanupNonProcessState() {
   cleanupComplete = true;
   app.isQuitting = true;
   stopSchedulerHeartbeat();
+  sessionPromptScheduler?.stop();
+  codexLifecycleBroker?.stop();
   cancelSleepTimer();
   stopKeepAwake();
   if (tray) {
@@ -861,6 +915,9 @@ function cleanupForQuit() {
 const shutdownCoordinator = new ShutdownCoordinator({
   getRegistry: () => sessions,
   cleanup: cleanupNonProcessState,
+  // A claimed occurrence must finish or be consumed before ConPTY teardown.
+  // This also prevents binding loss caused by shutdown from rewriting rows.
+  beforeDrain: () => sessionPromptScheduler?.whenIdle(),
   requestQuit: () => app.quit(),
   onError: (err) => console.error(`[Sessions] sequential shutdown failed: ${err.message}`),
 });
@@ -954,7 +1011,9 @@ handleTrusted('resize-process', async (_event, payload) => {
 handleTrusted('kill-process', async (_event, payload) => {
   try {
     const p = asPlainObject(payload);
-    return await sessions.removeAndWait(asId(p.id, 'session id'));
+    const removed = await sessions.removeAndWait(asId(p.id, 'session id'));
+    if (removed) await reconcileSessionPromptBindings();
+    return removed;
   } catch (err) {
     console.warn(`[IPC] kill-process rejected: ${err.message}`);
     return false;
@@ -1094,6 +1153,9 @@ handleTrusted('session:create', async (_event, payload, rendererEpoch) => {
     if (p.workflowSession !== undefined && typeof p.workflowSession !== 'boolean') {
       throw new Error('session:create workflowSession must be a boolean');
     }
+    if (p.sessionMode !== undefined && !['account-shell', 'direct-agent'].includes(p.sessionMode)) {
+      throw new Error('session:create sessionMode is invalid');
+    }
     const found = await findProfile(String(p.profileId ?? ''));
     if (!found) throw new Error(`No agent profile named "${p.profileId}"`);
     const { profile, entrypointSource } = found;
@@ -1103,6 +1165,8 @@ handleTrusted('session:create', async (_event, payload, rendererEpoch) => {
       entrypointPath: profile.kind === 'routed' ? entrypointSource : null,
       defaultCwd: resolveWorkingDir(p.cwd),
       workflowSession: p.workflowSession === true,
+      sessionMode: p.sessionMode || 'account-shell',
+      notifyScriptPath: codexNotifyScriptPath(),
     });
     spec.cwd = resolveWorkingDir(spec.cwd);
 
@@ -1123,6 +1187,28 @@ handleTrusted('session:create', async (_event, payload, rendererEpoch) => {
     return { error: err.message };
   }
 });
+
+// ── IPC: Durable prompts for one exact live direct-agent session ──
+function requireSessionPromptHandlers() {
+  if (!sessionPromptHandlers) throw new Error('Scheduled prompts are not ready');
+  return sessionPromptHandlers;
+}
+
+handleTrusted('session-prompts:list', async (_event, payload = {}) => (
+  requireSessionPromptHandlers().list(payload)
+));
+
+handleTrusted('session-prompts:create', async (_event, payload) => (
+  requireSessionPromptHandlers().create(payload)
+));
+
+handleTrusted('session-prompts:set-enabled', async (_event, payload) => (
+  requireSessionPromptHandlers().setEnabled(payload)
+));
+
+handleTrusted('session-prompts:delete', async (_event, payload) => (
+  requireSessionPromptHandlers().delete(payload)
+));
 
 // ── IPC: Keep Awake (power save blocker) ─────────────────────
 // The renderer requests this ON while any future scheduled run is pending,
@@ -1196,6 +1282,7 @@ handleTrusted('get-sleep-state', async () => ({ target: sleepTarget }));
 // leftover processes from previous runs, preventing PTY leaks.
 handleTrusted('kill-all-processes', async () => {
   const count = sessions ? await sessions.killAllSequential('renderer request') : 0;
+  if (count) await reconcileSessionPromptBindings();
   if (count) console.log(`[IPC] kill-all-processes: terminated ${count} process(es)`);
   return count;
 });

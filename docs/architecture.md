@@ -13,6 +13,7 @@ ai-agent-entrypoint                 Agent Orchestrator
         |                                      |
         | doctor --all --json                  | local env-only profiles
         | codex shell <alias>                  | native shell
+        | target run codex:<alias> --          | exact-session scheduler
         v                                      v
   routed child shell  <-----------  main-process SessionRegistry
                                                |
@@ -40,6 +41,15 @@ testable:
   launch specifications;
 - `sessions.js` owns PTY creation, bounded output activity, process-tree
   termination, and public session metadata;
+- `codex-lifecycle.js` owns the capability-authenticated, process-local receipt channel
+  used to prove that a direct Codex turn completed;
+- `session-prompt-schedules.js` validates the bounded durable record and
+  serializes every read-modify-write mutation;
+- `session-prompt-scheduler.js` owns the non-overlapping due loop;
+- `scheduled-prompt-delivery.js` owns the guarded bracketed-paste and single
+  submit sequence;
+- `session-prompt-ipc.js` binds renderer requests to main-owned session
+  identity rather than accepting identity claims from the renderer;
 - `run-journal.js` owns protected run records, deliberate schema migration,
   public lineage and boundary-review facts, encrypted control checkpoints, the
   rebuildable public-metadata index, stable cursor pages, and canonical-source,
@@ -92,12 +102,71 @@ Manually opened sessions survive. Closing a session first requests graceful
 termination, then force-kills that exact process tree after a grace period.
 Application shutdown serializes native PTY exits to avoid ConPTY teardown races.
 
+### Exact-session continuation
+
+Account shells and direct-agent sessions are intentionally distinct. A routed
+account shell may return to ordinary PowerShell when its provider exits, so its
+profile label and live PTY are not agent-active proof. It is never eligible for
+unattended delivery. An explicit routed Codex direct-agent session instead uses
+ai-agent-entrypoint's public `target run codex:<alias> --` contract. The PTY
+ends with the provider rather than falling back to a shell.
+
+Every PTY creation receives a fresh random incarnation UUID. A schedule binds
+that incarnation plus the exact session, profile, and agent identities. Main
+also gives each direct Codex child a random capability for an app-owned named
+pipe. Codex's provider `notify` callback reports only
+`agent-turn-complete`; the helper forwards only the capability, incarnation,
+and event type. Prompt/output data, routes, paths, and credentials never cross
+that channel. Direct mode gives the pipe, token, and incarnation variables
+secret-shaped names and enables Codex's default secret-name filter, so those
+routing values are absent from ordinary shell-tool environments while the internal
+notify hook retains it. Until a valid receipt arrives, readiness is unknown and delivery
+fails closed. A new input moves the state to running; without another receipt,
+an approval wait remains busy.
+
+Main separately tracks DEC private mode 2004 from raw PTY output. A lifecycle
+receipt does not make the session eligible until bracketed paste is positively
+enabled, and a later DECRST disables delivery again. This protocol fact is not
+used as agent-idle proof; it only prevents multiline prompt bytes from becoming
+multiple submissions.
+
+The durable scheduler first reconciles identity, then atomically persists a
+unique claim for the due occurrence. Delivery begins only when main proves the
+exact live incarnation and identity, provider-confirmed idle state, a
+conservative input-quiet period, and no in-flight delivery. Main writes a
+bounded control-character-free body inside bracketed-paste delimiters as one
+PTY operation, waits briefly, and rechecks the binding, readiness, and input
+revision before sending one carriage return. It never uses PowerShell,
+SendKeys, the clipboard, window focus, or renderer typing for prompt delivery.
+The small PowerShell `notify` helper is only a one-way lifecycle receipt bridge;
+it contains no timer or delivery path.
+
+If revalidation fails after the paste because other input arrived, main sends
+no cleanup key: Ctrl-U, Escape, or backspaces could erase the human's input.
+The occurrence is consumed as an error and the renderer tells the operator to
+inspect the possibly residual composer draft. Main latches that draft as
+occupied before the native paste boundary and clears it only after an
+app-observed successful submit. Provider lifecycle receipts cannot clear the
+lock, so a later repeat cannot paste over uncertain residue.
+
+Claims make occurrences at-most-once. Busy and temporarily unavailable jobs
+remain due. A successful submit consumes a one-shot or advances a repeat
+directly to its next future occurrence. Identity loss permanently disables the
+row. Any error after a possible partial PTY write consumes the occurrence. A
+claim left by a crash is held for a bounded recovery period and then consumed
+as an error, never replayed. See
+[`session-prompt-scheduling.md`](session-prompt-scheduling.md) for the complete
+contract. Consumed one-shots cannot be resumed, and a paused repeat skips
+directly over missed slots when it is resumed.
+
 ## Persistence and identity migration
 
 App-owned data lives under `%APPDATA%/agent-orchestrator`:
 
 - `agents.json` for local, non-secret profiles;
 - `settings.json` for UI and window preferences;
+- `session-prompt-schedules.json` for bounded exact-session records, including
+  local plaintext prompt bodies and durable delivery claims;
 - `run-journal/*.json` for one bounded protected record per run;
 - `run-journal/.index/` for rebuildable public summaries and its crash-dirty
   marker (never ciphertext or result bodies);
@@ -131,7 +200,7 @@ never overwritten or silently merged, and the historical directory is retained
 for rollback.
 
 Smoke and self-test modes use temporary user data and cannot touch production
-settings or workflows.
+settings, workflows, or scheduled prompts.
 
 ## Interrupted-run evidence
 

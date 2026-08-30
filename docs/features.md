@@ -57,6 +57,15 @@ form for people deciding whether a specific behavior exists.
 - **Single-Instance Guard**: Electron's single-instance lock prevents duplicate tray apps, duplicate scheduler ticks, and conflicting hibernate timers. Launching a second instance focuses the existing window instead.
 - **Input Simulation**: Ordinary workflow input and Quick Send use human-paced typing so async CLI redraw loops do not swallow characters. Generated result contracts and handoffs use bounded bracketed-paste chunks so large structured prompts do not take minutes to submit.
 - **Scheduled Countdown Board**: A **⏱ Schedules** panel lists every scheduled workflow (saved on disk + the one being edited), each with a **live countdown** to its next run. The bottom toolbar always shows "next in HH:MM:SS". Due `once` jobs auto-run at their time; `cron` mode repeats daily. A due saved workflow executes independently of the current editor state.
+- **Durable Exact-Session Prompts**: The same panel has a separate
+  **Continue this exact live session** operation for one lifecycle-confirmed
+  routed Codex direct-agent PTY. It supports one-shot local times, optional
+  repeating intervals, +1h/+5h/+24h shortcuts, and list/pause/resume/delete
+  controls across every session. A random incarnation binds each row to the
+  original PTY; restart, exit, identity drift, or reuse disables it as
+  `session_changed` instead of retargeting or launching work. Prompt text is
+  app-owned local plaintext and must not contain secrets. See the
+  [delivery contract](session-prompt-scheduling.md).
 - **Schedule Defaults**: Default and newly added Schedule blocks use the current local system time as their trigger time, with a one-click control to reset back to now. Loaded workflows preserve their saved schedule values.
 - **Delayed Hibernate (power saving)**: A **💤 Hibernate PC** block arms a delayed system hibernate (`shutdown /h`) after a configurable delay — e.g. ping an agent, then hibernate to save power once it's done. The timer lives in the main process so it fires reliably even when the window is minimized to the tray or the screen is locked. While armed, a top banner shows a **live countdown** with a **✕ Cancel hibernate** button to force-abort it. Arming is non-blocking, so it can sit at the end of a workflow.
 - **Timestamped Logs**: Every renderer Log line and every main-process console line is prefixed with an `HH:MM:SS.mmm` timestamp.
@@ -65,11 +74,22 @@ form for people deciding whether a specific behavior exists.
 ## Implementation notes
 
 - **Account routing is delegated, not reimplemented.** `ai-agent-entrypoint` owns the Codex account manifest and child-environment construction; this app discovers its aliases and launches through it. Bringing another CLI under managed routing is a decision for that repository. `AGENTS.md` records the boundary and the rules the code enforces.
-- **The routed shell remains the launch boundary.** Main still launches
-  `codex shell <alias>` and never constructs account homes. Only the workflow
-  engine waits for the fixed account-shell readiness signal and enters the
-  session-local `codex` wrapper with a trailing `exit`; opening the same profile
-  from the Agents panel remains an interactive account shell.
+- **Routed shells and direct agents are different modes.** An account-shell
+  button still launches `codex shell <alias>`. Workflow sessions keep their
+  existing shell/bootstrap contract. The explicit **Direct agent** button uses
+  ai-agent-entrypoint's public `target run codex:<alias> -- ...` contract so
+  provider exit also ends the PTY instead of returning to a shell. Main never
+  constructs account homes in either mode. Only direct mode can become eligible
+  for exact-session prompts, and only after a capability-validated Codex
+  turn-complete notification. Direct mode also removes the private lifecycle
+  token from ordinary Codex shell-tool environments.
+- **Scheduled delivery is a main-process capability.** The renderer manages
+  rows through validated IPC but owns no due timer or PTY write. Main serializes
+  store mutations, persists a unique delivery claim, and proves exact
+  incarnation/profile/agent identity, provider-confirmed idle state, quiet
+  time, and input revision. It sends one sanitized bracketed paste, revalidates,
+  then sends exactly one Enter. A possible partial write consumes that
+  occurrence; it is never blindly replayed.
 - **Structured result input is a main-owned capability.** Main grants it only
   to routed Codex workflow sessions and local workflow sessions whose profile
   is one conservative direct invocation of its declared agent. Shell profiles,

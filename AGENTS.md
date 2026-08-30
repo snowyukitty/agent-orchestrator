@@ -66,6 +66,9 @@ preload.js           contextBridge surface (the only renderer→main path)
 src/main/            Main-process modules, CommonJS, unit-tested with node --test
   agents.js            profile model, entrypoint discovery, launch specs
   sessions.js          PTY session registry (spawn, route, kill-tree)
+  codex-lifecycle.js    authenticated direct-agent turn-complete receipts
+  session-prompt-*.js  durable exact-session schedules, IPC, and scheduler
+  scheduled-prompt-delivery.js guarded main-owned PTY prompt delivery
   settings.js          persisted preferences
   store.js             atomic JSON read/write
   validate.js          IPC payload validation
@@ -74,6 +77,7 @@ src/js/              Renderer, ES modules, tested by the Electron self-test
   app.js               wiring: editor, toolbar, scheduler, workflow storage
   sessions.js          SessionManager: one xterm per session, tabs, quick-send
   agents-ui.js         agent account lists and the profile editor
+  session-prompt-schedules.js exact-session schedule management UI
   engine.js            workflow execution, loops, block executors
   blocks.js            block registry and parameter rendering
   typing.js            human-paced typing, shared by engine and quick-send

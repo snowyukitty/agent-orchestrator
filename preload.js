@@ -73,6 +73,14 @@ const api = {
   deleteAgentProfile: (id) => invokeTrusted('agents:delete', { id }),
   createSession: (params) => invokeTrusted('session:create', params),
 
+  // Durable prompts bound to one exact direct-agent PTY incarnation.
+  listSessionPrompts: () => invokeTrusted('session-prompts:list', {}),
+  createSessionPrompt: (params) => invokeTrusted('session-prompts:create', params),
+  setSessionPromptEnabled: (scheduleId, enabled) => (
+    invokeTrusted('session-prompts:set-enabled', { scheduleId, enabled })
+  ),
+  deleteSessionPrompt: (scheduleId) => invokeTrusted('session-prompts:delete', { scheduleId }),
+
   // Persisted preferences (theme, window/panel geometry, entrypoint path).
   getSettings: () => invokeTrusted('get-settings'),
   updateSettings: (patch) => invokeTrusted('update-settings', patch),
@@ -130,6 +138,9 @@ const api = {
   onSchedulerTick: (callback) => {
     ipcRenderer.on('scheduler-tick', () => callback());
   },
+  onSessionPromptsChanged: (callback) => {
+    ipcRenderer.on('session-prompt-schedules-changed', () => callback());
+  },
 
   // Cleanup
   removeAllListeners: (channel) => {
@@ -139,6 +150,7 @@ const api = {
       'process-error',
       'session-status',
       'scheduler-tick',
+      'session-prompt-schedules-changed',
       'sleep-state',
     ]);
     if (allowed.has(channel)) {

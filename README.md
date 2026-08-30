@@ -65,6 +65,21 @@ pre-warm** template ships this pattern ready to run; the
 [full walkthrough](docs/five-hour-window.md) covers tuning the ping time and
 pre-warming several accounts with a single `Send to All → Join Agents` stage.
 
+The **Schedules** panel now makes two different operations explicit:
+
+- **Continue this exact live session** stores a one-shot or repeating prompt
+  for one lifecycle-confirmed routed Codex PTY. The binding includes a random
+  session incarnation; it never retargets or launches a replacement. The app
+  must stay running, and any restart leaves the row visible but permanently
+  disabled as `session_changed`.
+- **Launch new work** keeps the existing saved-workflow schedule for work that
+  should start after a quota reset without depending on a current PTY.
+
+Exact-session prompt text is stored locally in plaintext. Never put passwords,
+tokens, credentials, or other secrets in a scheduled prompt. The full delivery
+and crash contract is in
+[`docs/session-prompt-scheduling.md`](docs/session-prompt-scheduling.md).
+
 ## Multi-account agent control
 
 Each session is "which agent, as which account", and the guarantee behind that
@@ -72,7 +87,7 @@ pairing is stated rather than implied:
 
 | Level | What it means | How a session starts |
 |---|---|---|
-| **L1 · routed** | A Codex alias owned by [`ai-agent-entrypoint`](../ai-agent-entrypoint), which builds the child environment | `agent-entrypoint.ps1 codex shell <alias>` |
+| **L1 · routed** | A Codex alias owned by [`ai-agent-entrypoint`](../ai-agent-entrypoint), which builds the child environment | account shell, or explicit direct Codex through the public `target run` contract |
 | **L2 · env-only** | A local profile that points the agent at its own state directory (`CLAUDE_CONFIG_DIR`, `GROK_HOME`, …) for that child process | `powershell.exe` with env overrides |
 | **L0 · native** | No account selected | plain `powershell.exe` |
 
@@ -132,6 +147,7 @@ The full list, with the reasoning, is in
 | [Getting started](docs/getting-started.md) | First run, first workflow, first scheduled job |
 | [Feature reference](docs/features.md) | Everything that ships, and why it is built that way |
 | [Architecture and safety model](docs/architecture.md) | Process boundaries, assurance levels, persistence |
+| [Exact-session prompt scheduling](docs/session-prompt-scheduling.md) | Identity binding, readiness proof, claims, crash and restart behavior |
 | [Interrupted-run resume design](docs/resume-design.md) | The accepted evidence-without-replay contract |
 | [Five-hour window](docs/five-hour-window.md) | The scheduling trick, tuned |
 | [Limits and unfinished work](docs/limitations.md) | Stated boundaries |
