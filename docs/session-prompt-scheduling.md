@@ -243,12 +243,33 @@ helper path containing spaces, then proves that both Codex `-c` values arrive
 byte-identically. It does not launch ai-agent-entrypoint, Codex, an account, or
 a network request.
 
-The remaining manual provider check is intentionally live and credential-safe:
-start one routed Codex direct-agent session, complete a harmless turn, confirm
-the UI becomes eligible only after its receipt, and schedule a harmless prompt
-after the quiet period. Recheck this whenever Codex changes the semantics or
-shape of its `notify` `agent-turn-complete` contract. Automated tests must not
-touch a real account home or consume a live account turn.
+`npm run verify:direct-live -- --confirm-live` is the opt-in provider acceptance
+gate. It selects one healthy routed Codex account, starts a direct-agent PTY in
+the current checkout with an explicit no-tools/no-file-mutation prompt,
+completes one harmless setup turn, and creates a one-shot schedule in a
+disposable store. The real scheduler then waits out
+the quiet period, persists a claim, writes one protected paste and one Enter,
+observes the nonce-bound response and a later capability-authenticated lifecycle
+receipt, proves the session is reusable, waits for the PTY to exit, verifies the
+Git status is byte-identical, and confirms the temporary artifacts no longer
+exist. It prints aggregate booleans only and never prints or stores the alias,
+PTY output, claim token, or prompt body in a durable record. The explicit flag
+prevents tests and ordinary verification from touching a real account or
+consuming a live turn. Re-run this gate whenever Codex changes its TUI input or
+`notify` contract.
+
+Before entering its setup prompt, the gate fails closed on recognized quota,
+authentication, trust, approval, or connection screens. A disposable notify
+wrapper records presence-only booleans and then forwards the real completion
+event to the production helper, distinguishing an unfinished provider turn
+from a broken receipt path without retaining event contents or capability
+values. All five wrapper observations are required for a passing result.
+
+The gate defaults to the first authenticated routed account. A maintainer may
+select the 1-based `N`th entry in the filtered authenticated-and-healthy list
+with `--account-number=N` when the default account is usage-limited. This is
+test selection only: it is never an automatic delivery fallback, and the gate
+does not print the account alias.
 
 ## Design evidence
 

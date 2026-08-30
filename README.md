@@ -165,7 +165,12 @@ npm run promo:capture   # reproduce twice, verify, then atomically refresh the f
 npm run icons       # regenerate icon.png + icon.ico from src/assets/icon-source.png
 npm run verify      # the complete checkpoint gate used by CI
 npm run verify:routed -- --confirm-live   # opt-in gate: two real routed accounts
+npm run verify:direct-live -- --confirm-live  # opt-in: two harmless prompts on one routed account
 ```
+
+If the default routed account is temporarily usage-limited, select another
+entry from the filtered authenticated-and-healthy list without printing its alias:
+`npm run verify:direct-live -- --confirm-live --account-number=2`.
 
 Repository conventions, the routing authority boundary, and what must stay a
 manual check live in [`AGENTS.md`](AGENTS.md).

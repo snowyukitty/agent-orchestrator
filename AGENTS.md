@@ -93,7 +93,13 @@ npm run check       # syntax-check every JS file under the source roots
 npm test            # test:unit (node --test) + test:app (Electron self-test)
 npm run smoke       # Electron startup/shutdown cleanup path
 npm run verify      # complete checkpoint gate: check, tests, audit, build/package verification
+npm run verify:direct-live -- --confirm-live  # opt-in real-provider acceptance; never automated
 ```
+
+If the default account is usage-limited, a maintainer can select another
+entry from the filtered authenticated-and-healthy list with
+`--account-number=N`. This is test selection only and never changes product
+delivery identity.
 
 Add a case with the behavior. Pure logic goes in `src/main/` (CommonJS,
 `tests/*.test.js`) or a pure `src/js/` module (`selftest.js`). Anything

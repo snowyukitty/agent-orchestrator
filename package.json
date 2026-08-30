@@ -20,6 +20,7 @@
     "test:app": "electron . --self-test",
     "check": "node scripts/check-syntax.js && node scripts/check-docs.js",
     "verify:direct-argv": "node scripts/manual-verify-direct-argv.js",
+    "verify:direct-live": "node scripts/manual-verify-direct-delivery.js",
     "verify:routed": "node scripts/manual-verify-routed.js",
     "icons": "electron scripts/build-icons.js",
     "build": "electron-packager . AgentOrchestrator --platform=win32 --arch=x64 --overwrite --out=dist --icon=src/assets/icon.ico --ignore=\"(dist|scripts|tests|docs|mcps|\\.git|\\.github|icon-source\\.png|AGENTS\\.md|README\\.md|CONTRIBUTING\\.md|SECURITY\\.md|package-lock\\.json|.*\\.log|.*\\.bat)\" --asar.unpackDir=node_modules/node-pty --extra-resource=src/main/codex-notify.ps1 && node scripts/verify-package.mjs",
