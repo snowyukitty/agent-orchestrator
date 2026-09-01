@@ -83,7 +83,6 @@ class SessionContinuationCore {
         Promise.resolve().then(operation),
         new Promise(resolve => {
           timer = setTimeout(() => resolve(READ_TIMED_OUT), this._readTimeoutMs);
-          timer.unref?.();
         }),
       ]);
     } finally {

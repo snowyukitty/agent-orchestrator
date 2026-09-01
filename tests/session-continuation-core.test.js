@@ -1,5 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 
 const {
   CAPABILITY_KEYS,
@@ -117,6 +118,39 @@ test('async read-side adapters are bounded and fail closed as unavailable', asyn
   assert.deepEqual(await core.inspectSchedule(schedule('slow-daemon')), {
     status: 'unavailable',
   });
+});
+
+test('a read timeout keeps a clean Node process alive until fail-closed resolution', () => {
+  const modulePath = require.resolve('../src/main/session-continuation-core');
+  const source = `
+    const { SessionContinuationCore } = require(${JSON.stringify(modulePath)});
+    const never = () => new Promise(() => {});
+    const core = new SessionContinuationCore({
+      readTimeoutMs: 20,
+      backends: [{
+        id: 'probe',
+        label: 'Probe',
+        capabilities: {
+          exactSessionIdentity: true,
+          agentReadinessProof: true,
+          protectedPromptDelivery: true,
+          claimBoundDelivery: true,
+        },
+        getScheduleTarget: never,
+        inspectSchedule: never,
+        deliverClaimed: async () => 'unavailable',
+      }],
+    });
+    core.getScheduleTarget('probe', 'session')
+      .then(value => process.stdout.write(value === null ? 'resolved-null' : 'unexpected'));
+  `;
+  const child = spawnSync(process.execPath, ['-e', source], {
+    encoding: 'utf8',
+    timeout: 2_000,
+    windowsHide: true,
+  });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout, 'resolved-null');
 });
 
 test('malformed post-claim backend results consume safely as error', async () => {
