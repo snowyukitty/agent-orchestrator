@@ -73,10 +73,13 @@ its launch-time environment snapshot. The receipt contains only:
 
 - the capability token;
 - the session incarnation UUID;
-- the fixed `agent-turn-complete` event type.
+- the fixed `agent-turn-complete` event type;
+- SHA-256 digests of the provider thread and turn ids.
 
 No provider output, prompt, command, path, account home, environment value, or
-credential is forwarded. The pipe and capability stay out of renderer session
+credential is forwarded, and the raw provider ids never leave the helper. The
+broker binds the first thread digest, rejects a later thread mismatch, and
+accepts each turn digest at most once. The pipe and capability stay out of renderer session
 metadata, and all three routing values stay out of ordinary tool-command
 environments.
 The PowerShell helper is only this lifecycle bridge; scheduling, timing,
@@ -117,7 +120,9 @@ and requires that guard to match. Delivery claim tokens never cross IPC; the
 renderer receives only a `deliveryInFlight` fact. The store
 allows at most 100 records, 16,000 characters per prompt, and a 2 MiB file. It
 rejects unknown fields, invalid identities, unsupported schemas, duplicate
-schedule ids, unsafe terminal controls, and out-of-range values.
+schedule ids, unsafe terminal controls, and out-of-range values. The same exact
+UTF-8 serialization used by the atomic writer is size-checked before any
+replacement, so a valid mutation cannot create a file that the next read rejects.
 
 All read-modify-write operations share one serialized queue, including create,
 pause, resume, delete, reconciliation, claim, and finalization. Writes use the
@@ -131,7 +136,9 @@ disabled `session_changed` evidence and must be explicitly recreated.
 Schema v2 adds the backend id to the durable binding. Existing schema-v1 rows
 were necessarily created by the app-owned PTY registry, so startup performs an
 explicit atomic migration to `orchestrator-pty`. The migration is idempotent;
-corrupt and future schemas remain preserved and unavailable. The
+corrupt and future schemas remain preserved and unavailable. If adding the
+backend namespace and pretty serialization would exceed the file bound,
+migration also preserves the byte-identical v1 evidence and fails closed. The
 [continuation backend contract](session-continuation-backends.md) defines the
 capability gate and the difference between temporary backend unavailability
 and authoritative session replacement.
@@ -153,8 +160,11 @@ Immediately before a write, main proves every condition below:
 10. no scheduled delivery is already in flight for that session.
 
 Every renderer, workflow, and quick-send PTY write advances a main-owned input
-revision. Submission marks a direct agent running. It cannot become idle again
-until another capability-matching Codex notification arrives. An approval prompt
+revision. Main parses bracketed-paste delimiters across writes, so embedded
+newlines are composer text rather than submissions. Each observed submission
+increments a pending-turn count and marks the direct agent running. It cannot
+become idle again until a distinct capability-matching completion has arrived
+for every pending turn. An approval prompt
 therefore remains busy rather than being inferred idle from quiet output.
 A lifecycle notification never clears an app-observed draft: only an explicit
 submit observed by main can do that. This prevents late or duplicate provider
@@ -254,25 +264,43 @@ a network request.
 
 `npm run verify:direct-live -- --confirm-live` is the opt-in provider acceptance
 gate. It selects one healthy routed Codex account, starts a direct-agent PTY in
-the current checkout with an explicit no-tools/no-file-mutation prompt,
-completes one harmless setup turn, and creates a one-shot schedule in a
-disposable store. The real scheduler then waits out
+the current checkout, and submits one harmless setup turn through the same
+human-paced double-Enter contract as normal product input. After the real
+scheduler delivers a second turn and its distinct lifecycle receipt restores
+same-session readiness, the gate uses Codex's local-shell `!` command with one
+literal `!` key to enter shell mode, one protected paste for the command body,
+and one Enter for a deterministic presence-only probe. Keeping the mode sigil
+outside the paste is required because Codex deliberately treats a leading `!`
+revealed only by paste expansion as model input. This
+proves that the three lifecycle routing variables are absent from an ordinary
+Codex shell-command environment without asking the provider model to select a
+tool and without reading or printing their values. The live-only launch grants
+write access only to the nonce-named disposable temporary directory; product
+launch permissions are unchanged. The exact command writes a nonce-bound,
+presence-only boolean receipt into the gate's disposable
+temporary directory without embedding its expanded account-local path in the
+provider prompt or printed output. The harness bounds and validates that
+receipt directly, so terminal redraw does not become security evidence. The
+one-shot schedule lives in a disposable store. The real scheduler waits out
 the quiet period, persists a claim, writes one protected paste and one Enter,
-observes the nonce-bound response and a later capability-authenticated lifecycle
-receipt, proves the session is reusable, waits for the PTY to exit, verifies the
+observes a later capability-authenticated lifecycle receipt, proves the session
+is reusable before the local-shell probe, waits for the PTY to exit, verifies the
 Git status is byte-identical, and confirms the temporary artifacts no longer
-exist. It prints aggregate booleans only and never prints or stores the alias,
+exist. It compares tracked Git status without enumerating user-owned untracked
+files. It prints aggregate booleans only and never prints or stores the alias,
 PTY output, claim token, or prompt body in a durable record. The explicit flag
 prevents tests and ordinary verification from touching a real account or
 consuming a live turn. Re-run this gate whenever Codex changes its TUI input or
 `notify` contract.
 
-Before entering its setup prompt, the gate fails closed on recognized quota,
+Before and during both provider turns, the gate fails closed on recognized quota,
 authentication, trust, approval, or connection screens. A disposable notify
 wrapper records presence-only booleans and then forwards the real completion
 event to the production helper, distinguishing an unfinished provider turn
 from a broken receipt path without retaining event contents or capability
-values. All five wrapper observations are required for a passing result.
+values. Seven wrapper observations, including the thread/turn field presence,
+and a valid tool-environment absence receipt are required for a passing result;
+the terminal marker is auxiliary diagnostics rather than security evidence.
 
 The gate defaults to the first authenticated routed account. A maintainer may
 select the 1-based `N`th entry in the filtered authenticated-and-healthy list
@@ -293,5 +321,6 @@ that the legacy notify hook receives a snapshot of the Codex process
 environment while shell-tool environments independently apply the configured
 secret-name filters: [hook environment snapshot](https://github.com/openai/codex/blob/rust-v0.150.1/codex-rs/hooks/src/registry.rs) and
 [shell environment policy](https://github.com/openai/codex/blob/rust-v0.150.1/codex-rs/protocol/src/config_types.rs).
-The app also probes the two `-c` overrides with the installed Codex config
-parser during manual verification; this does not start an account or a turn.
+The credential-free `verify:direct-argv` gate proves only byte-identical argv
+transport through `node-pty`/ConPTY/Pwsh; the provider live gate is what exercises
+the installed Codex configuration and notification contract.

@@ -28,6 +28,8 @@ const MAX_IDLE_MS = 60 * 60 * 1000;
 const MAX_WAIT_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const TERMINATION_TIMEOUT_MS = 5000;
 const VISIBILITY_BOUNDARY = '\uFFFC';
+const BRACKETED_PASTE_INPUT_START = '\x1b[200~';
+const BRACKETED_PASTE_INPUT_END = '\x1b[201~';
 
 let seq = 0;
 let waitSeq = 0;
@@ -69,6 +71,74 @@ function isTerminalProtocolReply(text) {
     if (!matched) return false;
   }
   return true;
+}
+
+function longestMarkerPrefixSuffix(text, marker) {
+  const max = Math.min(text.length, marker.length - 1);
+  for (let length = max; length > 0; length -= 1) {
+    if (text.endsWith(marker.slice(0, length))) return length;
+  }
+  return 0;
+}
+
+function recordDirectComposerInput(session, text) {
+  let remaining = `${session.externalInputCarry || ''}${text}`;
+  session.externalInputCarry = '';
+
+  const recordNormalText = (value) => {
+    for (let index = 0; index < value.length; index += 1) {
+      const char = value[index];
+      if (char === '\r' || char === '\n') {
+        if (char === '\r' && value[index + 1] === '\n') index += 1;
+        // Human-paced input deliberately sends a second bare Enter to dismiss
+        // autocomplete before submission. Once a turn is already pending, a
+        // bare repeat with no intervening composer text is part of that same
+        // submission. Text followed by Enter always creates another turn.
+        if (
+          session.pendingTurnCount === 0 ||
+          session.agentState !== 'running' ||
+          session.draftDirty
+        ) {
+          session.pendingTurnCount += 1;
+        }
+        session.agentState = 'running';
+        session.draftDirty = false;
+      } else {
+        session.draftDirty = true;
+      }
+    }
+  };
+
+  while (remaining) {
+    const marker = session.externalPasteMode
+      ? BRACKETED_PASTE_INPUT_END
+      : BRACKETED_PASTE_INPUT_START;
+    const markerIndex = remaining.indexOf(marker);
+    if (markerIndex >= 0) {
+      const before = remaining.slice(0, markerIndex);
+      if (session.externalPasteMode) {
+        if (before) session.draftDirty = true;
+        session.externalPasteMode = false;
+      } else {
+        recordNormalText(before);
+        session.draftDirty = true;
+        session.externalPasteMode = true;
+      }
+      remaining = remaining.slice(markerIndex + marker.length);
+      continue;
+    }
+
+    const carryLength = longestMarkerPrefixSuffix(remaining, marker);
+    const complete = carryLength ? remaining.slice(0, -carryLength) : remaining;
+    if (session.externalPasteMode) {
+      if (complete || carryLength) session.draftDirty = true;
+    } else {
+      recordNormalText(complete);
+      if (carryLength) session.draftDirty = true;
+    }
+    session.externalInputCarry = carryLength ? remaining.slice(-carryLength) : '';
+    break;
+  }
 }
 
 function updateBracketedPasteMode(previous, carry, data) {
@@ -567,9 +637,12 @@ class SessionRegistry {
       sessionMode,
       agentState: sessionMode === 'direct-agent' ? 'starting' : 'unavailable',
       lifecycleConfirmedAt: null,
+      pendingTurnCount: 0,
       inputRevision: 0,
       lastExternalInputAt: 0,
       draftDirty: false,
+      externalPasteMode: false,
+      externalInputCarry: '',
       scheduledDelivery: null,
       bracketedPasteEnabled: false,
       terminalModeCarry: '',
@@ -811,7 +884,15 @@ class SessionRegistry {
     if (!s || !s.proc) return false;
     this._recordExternalInput(s, text);
     // A workflow's "\n" means submit; a real terminal sends CR.
-    s.proc.write(text.replace(/\n/g, '\r'));
+    try {
+      s.proc.write(text.replace(/\n/g, '\r'));
+    } catch (error) {
+      if (s.sessionMode === 'direct-agent') {
+        s.draftDirty = true;
+        this._onStatus(this.describe(id));
+      }
+      throw error;
+    }
     return true;
   }
 
@@ -831,7 +912,15 @@ class SessionRegistry {
       throw new Error('Session is not capable of structured result input');
     }
     this._recordExternalInput(s, text);
-    s.proc.write(text.replace(/\n/g, '\r'));
+    try {
+      s.proc.write(text.replace(/\n/g, '\r'));
+    } catch (error) {
+      if (s.sessionMode === 'direct-agent') {
+        s.draftDirty = true;
+        this._onStatus(this.describe(id));
+      }
+      throw error;
+    }
     return true;
   }
 
@@ -842,12 +931,7 @@ class SessionRegistry {
     if (s.sessionMode !== 'direct-agent') return;
     const previousState = s.agentState;
     const previousDraft = s.draftDirty;
-    if (/[\r\n]/.test(text)) {
-      s.agentState = 'running';
-      s.draftDirty = false;
-    } else {
-      s.draftDirty = true;
-    }
+    recordDirectComposerInput(s, text);
     if (
       (previousState !== s.agentState || previousDraft !== s.draftDirty) &&
       this._sessions.has(s.id)
@@ -859,8 +943,12 @@ class SessionRegistry {
   _handleAgentLifecycleEvent(id, incarnationId, event) {
     const s = this._sessions.get(id);
     if (!s || s.incarnationId !== incarnationId || s.sessionMode !== 'direct-agent') return false;
-    if (event?.type !== 'agent-turn-complete' || s.status !== 'running' || !s.proc) return false;
-    s.agentState = 'idle';
+    if (
+      event?.type !== 'agent-turn-complete' || s.status !== 'running' || !s.proc ||
+      s.pendingTurnCount < 1
+    ) return false;
+    s.pendingTurnCount -= 1;
+    if (s.pendingTurnCount === 0) s.agentState = 'idle';
     s.lifecycleConfirmedAt = this._now();
     // A provider completion proves lifecycle state, not composer contents.
     // Only an app-observed submit may clear a draft; otherwise a late or
@@ -966,6 +1054,7 @@ class SessionRegistry {
       return false;
     }
     s.inputRevision += 1;
+    s.pendingTurnCount += 1;
     s.agentState = 'running';
     // Keep the sticky draft lock while the native submit is uncertain. If
     // write() throws after a possible partial write, future schedules remain

@@ -24,13 +24,18 @@ the product story; this file keeps the history.
   surfaced as an error requiring composer inspection. Possibly partial paste
   or submit writes leave a sticky draft lock that provider receipts cannot
   clear, preventing later repeats from stacking onto uncertain composer text.
+  Lifecycle receipts are bound to one provider-thread digest, deduplicated by
+  turn digest, and matched against main-owned pending submissions so an older
+  completion cannot idle a newer turn. Bracketed multiline paste and text after
+  a submit are tracked conservatively as composer state.
   Consumed one-shots cannot be resumed, and paused repeats skip missed slots
   rather than replaying them when resumed.
 - **Fail-closed restart and corruption behavior**: schedules survive app exit,
   but a restarted app cannot prove the vanished PTY incarnation, so affected
   rows become `session_changed` evidence and require recreation. An unreadable
   or future schedule store is preserved and disables delivery instead of being
-  replaced with an empty file. Prompt text is deliberately local plaintext and
+  replaced with an empty file. Mutations and v1-to-v2 migration also enforce
+  the exact serialized byte bound before atomic replacement. Prompt text is deliberately local plaintext and
   the UI warns never to include secrets.
 - **Authority-preserving continuation backends**: exact-session scheduling now
   routes through a provider-neutral main-process core. Schema v2 durably adds

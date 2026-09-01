@@ -10,6 +10,21 @@ try {
     $notification = $NotificationArguments[-1] | ConvertFrom-Json
     if ($notification.type -ne 'agent-turn-complete') { exit 0 }
 
+    $threadId = [string]$notification.'thread-id'
+    $turnId = [string]$notification.'turn-id'
+    if ([string]::IsNullOrWhiteSpace($threadId) -or [string]::IsNullOrWhiteSpace($turnId)) { exit 0 }
+    if ($threadId.Length -gt 4096 -or $turnId.Length -gt 4096) { exit 0 }
+
+    function Get-Sha256Hex([string] $Value) {
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value)
+            return [System.BitConverter]::ToString($sha256.ComputeHash($bytes)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $sha256.Dispose()
+        }
+    }
+
     $pipeName = [Environment]::GetEnvironmentVariable('AGENT_ORCHESTRATOR_NOTIFY_SECRET_PIPE')
     $token = [Environment]::GetEnvironmentVariable('AGENT_ORCHESTRATOR_NOTIFY_SECRET_TOKEN')
     $incarnation = [Environment]::GetEnvironmentVariable('AGENT_ORCHESTRATOR_NOTIFY_SECRET_INCARNATION')
@@ -31,6 +46,8 @@ try {
                 token = $token
                 incarnationId = $incarnation
                 type = 'agent-turn-complete'
+                threadDigest = Get-Sha256Hex $threadId
+                turnDigest = Get-Sha256Hex $turnId
             } | ConvertTo-Json -Compress
             $writer.WriteLine($payload)
             $writer.Flush()

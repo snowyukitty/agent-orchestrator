@@ -36,12 +36,17 @@ const ACCOUNT_NUMBER_PREFIX = '--account-number=';
 const SESSION_ID = 'manual-direct-live';
 const STARTUP_TIMEOUT_MS = 45_000;
 const TURN_TIMEOUT_MS = 180_000;
+const TOOL_ENVIRONMENT_TIMEOUT_MS = 45_000;
 const SCHEDULE_TIMEOUT_MS = QUIET_PERIOD_MS + TURN_TIMEOUT_MS;
 const SCHEDULE_DELAY_MS = QUIET_PERIOD_MS;
 const COLS = 160;
 const ROWS = 40;
 const STARTUP_SETTLE_MS = 3_000;
 const HUMAN_CHAR_DELAY_MS = 75;
+const HUMAN_ENTER_GAP_MS = 150;
+const TOOL_ENVIRONMENT_RECEIPT_MAX_BYTES = 1024;
+const PROBE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const VISIBILITY_BOUNDARY = '\uFFFC';
 
 function fail(code) {
   const error = new Error(code);
@@ -50,10 +55,10 @@ function fail(code) {
 }
 
 function requestedAccountNumber(argv) {
-  const arguments = argv.filter(value => value.startsWith(ACCOUNT_NUMBER_PREFIX));
-  if (arguments.length === 0) return 1;
-  if (arguments.length !== 1) fail('invalid-account-number');
-  const number = Number(arguments[0].slice(ACCOUNT_NUMBER_PREFIX.length));
+  const matches = argv.filter(value => value.startsWith(ACCOUNT_NUMBER_PREFIX));
+  if (matches.length === 0) return 1;
+  if (matches.length !== 1) fail('invalid-account-number');
+  const number = Number(matches[0].slice(ACCOUNT_NUMBER_PREFIX.length));
   if (!Number.isSafeInteger(number) || number < 1) fail('invalid-account-number');
   return number;
 }
@@ -92,11 +97,15 @@ $diagnostic = [ordered]@{
         [Environment]::GetEnvironmentVariable('AGENT_ORCHESTRATOR_NOTIFY_SECRET_INCARNATION')
     )
     turnCompleteEvent = $false
+    threadIdPresent = $false
+    turnIdPresent = $false
 }
 try {
     if ($NotificationArguments -and $NotificationArguments.Count -gt 0) {
         $event = $NotificationArguments[-1] | ConvertFrom-Json
         $diagnostic.turnCompleteEvent = $event.type -eq 'agent-turn-complete'
+        $diagnostic.threadIdPresent = -not [string]::IsNullOrWhiteSpace([string]$event.'thread-id')
+        $diagnostic.turnIdPresent = -not [string]::IsNullOrWhiteSpace([string]$event.'turn-id')
     }
 } catch {}
 $diagnostic | ConvertTo-Json -Compress |
@@ -117,6 +126,8 @@ function readNotifyDiagnostic(diagnosticPath) {
       notifyTokenPresent: value?.tokenPresent === true,
       notifyIncarnationPresent: value?.incarnationPresent === true,
       notifyTurnCompleteEvent: value?.turnCompleteEvent === true,
+      notifyThreadIdPresent: value?.threadIdPresent === true,
+      notifyTurnIdPresent: value?.turnIdPresent === true,
     };
   } catch (_error) {
     return {
@@ -125,6 +136,8 @@ function readNotifyDiagnostic(diagnosticPath) {
       notifyTokenPresent: false,
       notifyIncarnationPresent: false,
       notifyTurnCompleteEvent: false,
+      notifyThreadIdPresent: false,
+      notifyTurnIdPresent: false,
     };
   }
 }
@@ -136,6 +149,8 @@ function notifyContractSatisfied(diagnostic) {
     'notifyTokenPresent',
     'notifyIncarnationPresent',
     'notifyTurnCompleteEvent',
+    'notifyThreadIdPresent',
+    'notifyTurnIdPresent',
   ].every(name => diagnostic?.[name] === true);
 }
 
@@ -143,6 +158,13 @@ function terminalPlainText(value) {
   return String(value)
     .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ' ');
+}
+
+function terminalVisibleText(value) {
+  return String(value)
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, VISIBILITY_BOUNDARY)
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, VISIBILITY_BOUNDARY)
     .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ' ');
 }
 
@@ -168,11 +190,15 @@ function expectResponseMarker(state, marker) {
 }
 
 function observeExpectedResponse(state, chunk) {
-  const plain = terminalPlainText(`${state.responseCarry}${String(chunk)}`);
+  const plain = terminalVisibleText(`${state.responseCarry}${String(chunk)}`);
   if (state.expectedResponseMarker && plain.includes(state.expectedResponseMarker)) {
     state.expectedResponseSeen = true;
   }
   state.responseCarry = plain.slice(-512);
+}
+
+function assertLiveSafe(state) {
+  failOnProviderBlock(state.providerSignals);
 }
 
 function failOnProviderBlock(signals) {
@@ -202,7 +228,7 @@ function gitStatusSnapshot(cwd) {
   return new Promise((resolve, reject) => {
     execFile(
       'git',
-      ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+      ['status', '--porcelain=v1', '-z', '--untracked-files=no'],
       { cwd, windowsHide: true, encoding: 'buffer', maxBuffer: 2 * 1024 * 1024 },
       (error, stdout) => {
         if (error) reject(error);
@@ -219,7 +245,7 @@ async function waitFor(check, timeoutMs, code) {
     if (value) return value;
     await delay(100);
   }
-  fail(code);
+  fail(typeof code === 'function' ? code() : code);
 }
 
 function fragments(label) {
@@ -233,14 +259,102 @@ function fragments(label) {
   };
 }
 
-async function typeHumanPrompt(registry, id, prompt, assertSafe) {
+function environmentProbe({ receiptPath, probeId = randomUUID() } = {}) {
+  if (typeof probeId !== 'string' || !PROBE_ID_PATTERN.test(probeId)) {
+    throw new TypeError('Tool environment probe needs a UUID probe id');
+  }
+  const resolvedReceiptPath = receiptPath || path.join(
+    os.tmpdir(),
+    `agent-orchestrator-tool-environment-${probeId}.json`
+  );
+  if (typeof resolvedReceiptPath !== 'string' || !resolvedReceiptPath) {
+    throw new TypeError('Tool environment probe needs a receipt path');
+  }
+  const temporaryRoot = path.resolve(os.tmpdir());
+  const relativeReceiptPath = path.relative(temporaryRoot, path.resolve(resolvedReceiptPath));
+  if (
+    !relativeReceiptPath || relativeReceiptPath.startsWith('..') ||
+    path.isAbsolute(relativeReceiptPath) || !/^[A-Za-z0-9._\\/-]+$/.test(relativeReceiptPath) ||
+    relativeReceiptPath.includes('@')
+  ) {
+    throw new TypeError('Tool environment probe needs a safe path inside the temporary directory');
+  }
+  const escapedRelativeReceiptPath = relativeReceiptPath.replaceAll("'", "''");
+  const command = [
+    `$receipt=Join-Path ([System.IO.Path]::GetTempPath()) '${escapedRelativeReceiptPath}'`,
+    "$names='AGENT_ORCHESTRATOR_NOTIFY_SECRET_PIPE','AGENT_ORCHESTRATOR_NOTIFY_SECRET_TOKEN','AGENT_ORCHESTRATOR_NOTIFY_SECRET_INCARNATION'",
+    "$present=$names|Where-Object{Test-Path \"Env:$_\"}",
+    "if($present){$absent='false'}else{$absent='true'}",
+    `[System.IO.File]::WriteAllText($receipt,'{"schemaVersion":1,"probeId":"${probeId}","secretsAbsent":'+$absent+'}',[System.Text.UTF8Encoding]::new($false))`,
+  ].join(';');
+  return {
+    command,
+    probeId,
+    receiptPath: resolvedReceiptPath,
+  };
+}
+
+function readToolEnvironmentProbe(probe) {
+  const missing = { observed: false, valid: false, secretsAbsent: false };
+  if (!probe?.receiptPath || !probe?.probeId || !fs.existsSync(probe.receiptPath)) return missing;
+  try {
+    const stat = fs.statSync(probe.receiptPath);
+    if (!stat.isFile() || stat.size > TOOL_ENVIRONMENT_RECEIPT_MAX_BYTES) {
+      return { ...missing, observed: true };
+    }
+    const value = JSON.parse(fs.readFileSync(probe.receiptPath, 'utf8').replace(/^\uFEFF/, ''));
+    const keys = value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.keys(value).sort()
+      : [];
+    const valid = keys.join(',') === 'probeId,schemaVersion,secretsAbsent' &&
+      value.schemaVersion === 1 && value.probeId === probe.probeId &&
+      typeof value.secretsAbsent === 'boolean';
+    return {
+      observed: true,
+      valid,
+      secretsAbsent: valid && value.secretsAbsent === true,
+    };
+  } catch (_error) {
+    return { ...missing, observed: true };
+  }
+}
+
+async function typeHumanPrompt(registry, id, prompt, assertSafe, {
+  delayFn = delay,
+  charDelayMs = HUMAN_CHAR_DELAY_MS,
+  enterGapMs = HUMAN_ENTER_GAP_MS,
+} = {}) {
   for (const char of prompt) {
     assertSafe();
     if (!registry.write(id, char)) fail('initial-input-refused');
-    await delay(HUMAN_CHAR_DELAY_MS);
+    await delayFn(charDelayMs);
   }
   assertSafe();
   if (!registry.write(id, '\r')) fail('initial-enter-refused');
+  await delayFn(enterGapMs);
+  assertSafe();
+  if (!registry.write(id, '\r')) fail('initial-enter-refused');
+}
+
+async function submitLocalShellProbe(registry, id, probe, assertSafe, {
+  delayFn = delay,
+  settleMs = HUMAN_ENTER_GAP_MS,
+} = {}) {
+  if (!probe?.command || /[\x00-\x1f\x7f]/.test(probe.command)) {
+    throw new TypeError('Local shell probe needs one terminal line');
+  }
+  assertSafe();
+  // Codex intentionally treats a leading `!` introduced only by paste expansion
+  // as model input. Send the sigil as a real key first so the TUI enters its
+  // local-shell mode, then paste the inert command body and submit exactly once.
+  if (!registry.write(id, '!')) fail('tool-environment-shell-mode-refused');
+  await delayFn(settleMs);
+  assertSafe();
+  const protectedLine = `${BRACKETED_PASTE_START}${probe.command}${BRACKETED_PASTE_END}`;
+  if (!registry.write(id, protectedLine)) fail('tool-environment-input-refused');
+  await delayFn(settleMs);
+  assertSafe();
+  if (!registry.write(id, '\r')) fail('tool-environment-enter-refused');
 }
 
 function respondToTerminalQueries(registry, id, state, chunk) {
@@ -314,11 +428,9 @@ async function main() {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-orchestrator-direct-live-'));
   assertDisposablePath(temporaryRoot);
   const storePath = path.join(temporaryRoot, 'session-prompt-schedules.json');
+  const toolEnvironmentReceiptPath = path.join(temporaryRoot, 'tool-environment-receipt.json');
   const productionNotifyScriptPath = path.join(appRoot, 'src', 'main', 'codex-notify.ps1');
-  const notifyDiagnostic = createDiagnosticNotifyWrapper({
-    root: temporaryRoot,
-    productionHelper: productionNotifyScriptPath,
-  });
+  let notifyDiagnostic = null;
   const state = {
     queryCarry: '',
     outputEvents: 0,
@@ -362,8 +474,17 @@ async function main() {
   let failure = null;
   let lifecycleReceipts = 0;
   let worktreeBefore = null;
+  let initial = null;
+  let toolEnvironmentProbe = null;
+  let initialToolEnvironmentProof = { observed: false, valid: false, secretsAbsent: false };
+  let initialResponseMarkerObserved = false;
+  let scheduledResponseMarkerObserved = false;
 
   try {
+    notifyDiagnostic = createDiagnosticNotifyWrapper({
+      root: temporaryRoot,
+      productionHelper: productionNotifyScriptPath,
+    });
     const entrypointPath = agents.resolveEntrypointPath({ appRoot });
     const discovered = await agents.discoverRoutedProfiles({ entrypointPath });
     if (discovered.error) fail('routing-discovery-failed');
@@ -382,6 +503,9 @@ async function main() {
       notifyScriptPath: notifyDiagnostic.wrapperPath,
       sessionMode: 'direct-agent',
     });
+    // The live-only local-shell probe may write only inside this disposable
+    // directory. Product launches do not add or relax any sandbox root.
+    spec.args.push('--add-dir', temporaryRoot);
 
     const wrappedPty = instrumentPty(pty, probe);
     const trackingBroker = {
@@ -420,7 +544,7 @@ async function main() {
     rootPid = created.pid;
     await waitFor(
       () => {
-        failOnProviderBlock(state.providerSignals);
+        assertLiveSafe(state);
         return registry.describe(SESSION_ID)?.scheduledPrompt?.bracketedPaste;
       },
       STARTUP_TIMEOUT_MS,
@@ -428,36 +552,39 @@ async function main() {
     );
     await waitFor(
       () => {
-        failOnProviderBlock(state.providerSignals);
+        assertLiveSafe(state);
         return state.lastOutputAt && Date.now() - state.lastOutputAt >= STARTUP_SETTLE_MS;
       },
       STARTUP_TIMEOUT_MS,
       'terminal-did-not-settle'
     );
-    failOnProviderBlock(state.providerSignals);
+    assertLiveSafe(state);
 
     stage = 'initial-turn';
-    const initial = fragments('INITIAL');
+    initial = fragments('INITIAL');
     expectResponseMarker(state, initial.responseMarker);
     state.initialInputAfterSeq = registry.checkpoint(SESSION_ID).outputSeq;
     await typeHumanPrompt(
       registry,
       SESSION_ID,
       initial.prompt,
-      () => failOnProviderBlock(state.providerSignals)
+      () => assertLiveSafe(state)
     );
     await waitFor(
       () => {
-        failOnProviderBlock(state.providerSignals);
-        return lifecycleReceipts >= 1 && state.expectedResponseSeen &&
-          registry.describe(SESSION_ID)?.scheduledPrompt?.ready;
+        assertLiveSafe(state);
+        return lifecycleReceipts >= 1 && registry.describe(SESSION_ID)?.scheduledPrompt?.ready;
       },
       TURN_TIMEOUT_MS,
-      'initial-lifecycle-receipt-missing'
+      () => {
+        if (lifecycleReceipts < 1) return 'initial-lifecycle-receipt-missing';
+        return 'initial-readiness-proof-missing';
+      }
     );
     if (!notifyContractSatisfied(readNotifyDiagnostic(notifyDiagnostic.diagnosticPath))) {
       fail('notify-contract-invalid');
     }
+    initialResponseMarkerObserved = state.expectedResponseSeen;
 
     stage = 'schedule';
     const scheduled = fragments('SCHEDULED');
@@ -492,7 +619,7 @@ async function main() {
     probe.armed = true;
     if (!scheduler.start() || scheduler.start()) fail('scheduler-idempotence-failed');
     await waitFor(async () => {
-      failOnProviderBlock(state.providerSignals);
+      assertLiveSafe(state);
       const record = await store.get(createdSchedule.id);
       if (record?.lastResult?.status === 'sent') return record;
       if (record?.lastResult && !['busy', 'unavailable'].includes(record.lastResult.status)) {
@@ -507,9 +634,9 @@ async function main() {
     stage = 'second-receipt';
     await waitFor(
       () => {
-        failOnProviderBlock(state.providerSignals);
+        assertLiveSafe(state);
         return lifecycleReceipts > receiptsBeforeScheduledDelivery &&
-          state.expectedResponseSeen && registry.describe(SESSION_ID)?.scheduledPrompt?.ready;
+          registry.describe(SESSION_ID)?.scheduledPrompt?.ready;
       },
       TURN_TIMEOUT_MS,
       'second-lifecycle-receipt-missing'
@@ -531,6 +658,36 @@ async function main() {
       fail('delivery-sequence-invalid');
     }
     if (!registry.scheduleTarget(SESSION_ID)) fail('session-not-reusable');
+    scheduledResponseMarkerObserved = state.expectedResponseSeen;
+
+    stage = 'tool-environment';
+    toolEnvironmentProbe = environmentProbe({ receiptPath: toolEnvironmentReceiptPath });
+    assertDisposablePath(toolEnvironmentProbe.receiptPath);
+    await submitLocalShellProbe(
+      registry,
+      SESSION_ID,
+      toolEnvironmentProbe,
+      () => assertLiveSafe(state)
+    );
+    await waitFor(
+      () => {
+        assertLiveSafe(state);
+        initialToolEnvironmentProof = readToolEnvironmentProbe(toolEnvironmentProbe);
+        if (
+          initialToolEnvironmentProof.observed && initialToolEnvironmentProof.valid &&
+          !initialToolEnvironmentProof.secretsAbsent
+        ) {
+          fail('tool-environment-secret-present');
+        }
+        return initialToolEnvironmentProof.valid && initialToolEnvironmentProof.secretsAbsent;
+      },
+      TOOL_ENVIRONMENT_TIMEOUT_MS,
+      () => {
+        if (!initialToolEnvironmentProof.observed) return 'tool-environment-probe-missing';
+        if (!initialToolEnvironmentProof.valid) return 'tool-environment-probe-invalid';
+        return 'tool-environment-secret-present';
+      }
+    );
 
     stage = 'cleanup';
     await registry.removeAndWait(SESSION_ID);
@@ -546,9 +703,12 @@ async function main() {
       selectedAccountNumber: accountNumber,
       routedAccountsUsed: 1,
       harmlessPromptsSubmitted: 2,
+      localShellProbesExecuted: 1,
       lifecycleReceiptsObserved: lifecycleReceipts,
-      initialResponseMarkerObserved: true,
-      scheduledResponseMarkerObserved: state.expectedResponseSeen,
+      initialResponseMarkerObserved,
+      toolEnvironmentProbeObserved: initialToolEnvironmentProof.observed,
+      toolEnvironmentSecretsAbsent: initialToolEnvironmentProof.secretsAbsent,
+      scheduledResponseMarkerObserved,
       durableClaimBeforeWrite: probe.claimWasDurableBeforeWrite,
       protectedPasteWrites: probe.protectedPasteWrites,
       unattendedEnterWrites: probe.submitWrites,
@@ -559,6 +719,7 @@ async function main() {
     };
   } catch (error) {
     const meta = registry?.describe(SESSION_ID);
+    initialToolEnvironmentProof = readToolEnvironmentProbe(toolEnvironmentProbe);
     failure = {
       passed: false,
       stage,
@@ -576,11 +737,14 @@ async function main() {
         : false,
       providerSignals: state.providerSignals,
       expectedResponseSeen: state.expectedResponseSeen,
+      toolEnvironmentProbeObserved: initialToolEnvironmentProof.observed,
+      toolEnvironmentProbeValid: initialToolEnvironmentProof.valid,
+      toolEnvironmentSecretsAbsent: initialToolEnvironmentProof.secretsAbsent,
       durableClaimBeforeWrite: probe.claimWasDurableBeforeWrite,
       protectedPasteWrites: probe.protectedPasteWrites,
       unattendedEnterWrites: probe.submitWrites,
       selectedAccountNumber: accountNumber,
-      ...readNotifyDiagnostic(notifyDiagnostic.diagnosticPath),
+      ...readNotifyDiagnostic(notifyDiagnostic?.diagnosticPath),
     };
     process.exitCode = 1;
   } finally {
@@ -646,7 +810,11 @@ if (require.main === module) {
       const code = /^[a-z0-9-]+$/.test(String(error?.code || ''))
         ? error.code
         : 'unexpected-error';
-      const stage = ['windows-required', 'live-confirmation-required'].includes(code)
+      const stage = [
+        'windows-required',
+        'live-confirmation-required',
+        'invalid-account-number',
+      ].includes(code)
         ? 'preflight'
         : 'finalize';
       console.error(JSON.stringify({ passed: false, stage, code }));
@@ -657,10 +825,14 @@ if (require.main === module) {
 
 module.exports = {
   expectResponseMarker,
+  environmentProbe,
   failOnProviderBlock,
   fragments,
   notifyContractSatisfied,
   observeExpectedResponse,
   observeProviderSignals,
+  readToolEnvironmentProbe,
   requestedAccountNumber,
+  submitLocalShellProbe,
+  typeHumanPrompt,
 };

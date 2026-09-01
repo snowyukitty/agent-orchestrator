@@ -6,11 +6,14 @@ const path = require('node:path');
 
 const {
   CLAIM_STALE_MS,
+  MAX_FILE_BYTES,
   MAX_PROMPT_CHARS,
   MAX_SCHEDULES,
   LEGACY_SCHEMA_VERSION,
   SCHEMA_VERSION,
   SessionPromptScheduleStore,
+  migrateLegacyFile,
+  serializedFileBytes,
 } = require('../src/main/session-prompt-schedules');
 const { SessionPromptScheduler } = require('../src/main/session-prompt-scheduler');
 
@@ -129,6 +132,90 @@ test('v1 schedules migrate explicitly and idempotently to a backend-bound schema
   });
 });
 
+function storedRecord(index, prompt, { legacy = false } = {}) {
+  return {
+    id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    ...(legacy ? {} : { backendId: IDENTITY.backendId }),
+    sessionId: `session-${index}`,
+    sessionIncarnationId: `10000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+    expectedProfileId: IDENTITY.expectedProfileId,
+    expectedAgent: IDENTITY.expectedAgent,
+    prompt,
+    nextOccurrenceAt: 10_000,
+    repeatIntervalMinutes: null,
+    enabled: true,
+    createdAt: 500,
+    updatedAt: 500,
+  };
+}
+
+function largestFittingPrompt(buildFile, serialize) {
+  let low = 1;
+  let high = MAX_PROMPT_CHARS;
+  let best = null;
+  while (low <= high) {
+    const middle = Math.floor((low + high) / 2);
+    const file = buildFile('雪'.repeat(middle));
+    if (Buffer.byteLength(serialize(file), 'utf8') <= MAX_FILE_BYTES) {
+      best = file;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return best;
+}
+
+test('mutations cannot write a valid store that its own reader rejects as oversized', async () => {
+  const filePath = tmpFile();
+  const current = largestFittingPrompt(
+    prompt => ({
+      schemaVersion: SCHEMA_VERSION,
+      schedules: Array.from({ length: MAX_SCHEDULES - 1 }, (_, index) => storedRecord(index, prompt)),
+    }),
+    file => JSON.stringify(file, null, 2)
+  );
+  const original = JSON.stringify(current, null, 2);
+  assert.ok(Buffer.byteLength(original, 'utf8') <= MAX_FILE_BYTES);
+  fs.writeFileSync(filePath, original);
+  const store = new SessionPromptScheduleStore({
+    filePath,
+    now: () => 1_000,
+    uuid: () => '00000000-0000-4000-8000-000000000100',
+  });
+
+  await assert.rejects(store.create({
+    ...IDENTITY,
+    prompt: '雪'.repeat(MAX_PROMPT_CHARS),
+    nextOccurrenceAt: 2_000,
+  }), error => error.code === 'store-limit');
+  assert.equal(fs.readFileSync(filePath, 'utf8'), original, 'the readable original remains byte-identical');
+  assert.equal((await store.list()).diagnostic, null);
+});
+
+test('an oversized v1-to-v2 serialization fails closed without replacing legacy evidence', async () => {
+  const h = harness(5_000);
+  const legacy = largestFittingPrompt(
+    prompt => ({
+      schemaVersion: LEGACY_SCHEMA_VERSION,
+      schedules: Array.from({ length: MAX_SCHEDULES }, (_, index) => storedRecord(index, prompt, { legacy: true })),
+    }),
+    file => JSON.stringify(file)
+  );
+  const original = JSON.stringify(legacy);
+  assert.ok(Buffer.byteLength(original, 'utf8') <= MAX_FILE_BYTES);
+  assert.ok(serializedFileBytes(migrateLegacyFile(legacy, 5_000, IDENTITY.backendId)) > MAX_FILE_BYTES);
+  fs.writeFileSync(h.filePath, original);
+
+  await assert.rejects(
+    h.store.migrateV1(IDENTITY.backendId),
+    error => error.code === 'store_limit'
+  );
+  assert.equal(fs.readFileSync(h.filePath, 'utf8'), original);
+  const listed = await h.store.list();
+  assert.equal(listed.diagnostic.code, 'store_limit');
+});
+
 test('a temporarily unavailable backend stays due and cannot be resumed without proof', async () => {
   const h = harness();
   const schedule = await createDue(h);
@@ -152,6 +239,31 @@ test('a same-named session from another backend is terminal, never a fallback', 
   const current = await h.store.get(schedule.id);
   assert.equal(current.enabled, false);
   assert.equal(current.lastResult.status, 'session_changed');
+});
+
+test('tick inspections start concurrently while the durable mutation stays serialized', async () => {
+  const h = harness();
+  for (let index = 0; index < 3; index += 1) {
+    await h.store.create({
+      ...IDENTITY,
+      sessionId: `session-${index}`,
+      sessionIncarnationId: `10000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+      prompt: `Future ${index}`,
+      nextOccurrenceAt: 10_000 + index,
+    });
+  }
+  let inspected = 0;
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const pending = h.store.prepareTick(async (schedule) => {
+    inspected += 1;
+    await gate;
+    return matched(schedule);
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(inspected, 3, 'one slow backend read cannot multiply the tick timeout by row count');
+  release();
+  await pending;
 });
 
 test('the store enforces its record limit without replacing existing evidence', async () => {

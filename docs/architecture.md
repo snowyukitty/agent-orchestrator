@@ -121,13 +121,17 @@ profile, and agent identities. Main
 also gives each direct Codex child a random capability for an app-owned named
 pipe. Codex's provider `notify` callback reports only
 `agent-turn-complete`; the helper forwards only the capability, incarnation,
-and event type. Prompt/output data, routes, paths, and credentials never cross
+event type, and SHA-256 digests of the provider thread and turn ids. It never
+forwards the raw ids. The broker binds one thread and rejects duplicate turns.
+Prompt/output data, routes, paths, and credentials never cross
 that channel. Direct mode gives the pipe, token, and incarnation variables
 secret-shaped names and enables Codex's default secret-name filter, so those
 routing values are absent from ordinary shell-tool environments while the internal
 notify hook retains it. Until a valid receipt arrives, readiness is unknown and delivery
-fails closed. A new input moves the state to running; without another receipt,
-an approval wait remains busy.
+fails closed. Main counts observed submissions; the session becomes idle only
+after one distinct authenticated completion per pending turn. Bracketed-paste
+newlines do not count as submissions, while post-submit suffix text remains a
+draft. Without another receipt, an approval wait remains busy.
 
 Main separately tracks DEC private mode 2004 from raw PTY output. A lifecycle
 receipt does not make the session eligible until bracketed paste is positively

@@ -10,7 +10,9 @@ const { randomUUID } = require('crypto');
 
 const MAX_MESSAGE_CHARS = 4096;
 const MAX_CONNECTIONS = 16;
+const MAX_TURN_RECEIPTS = 4096;
 const SOCKET_TIMEOUT_MS = 2_000;
+const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
 const ENV_PIPE = 'AGENT_ORCHESTRATOR_NOTIFY_SECRET_PIPE';
 const ENV_TOKEN = 'AGENT_ORCHESTRATOR_NOTIFY_SECRET_TOKEN';
 const ENV_INCARNATION = 'AGENT_ORCHESTRATOR_NOTIFY_SECRET_INCARNATION';
@@ -65,7 +67,14 @@ class CodexLifecycleBroker {
     if (!this._started || !this._server) throw new Error('Codex lifecycle service is not listening');
     if (typeof onEvent !== 'function') throw new TypeError('Lifecycle registration needs an event handler');
     const token = this._uuid();
-    const registration = { sessionId, incarnationId, onEvent };
+    const registration = {
+      sessionId,
+      incarnationId,
+      onEvent,
+      threadDigest: null,
+      turnDigests: new Set(),
+      exhausted: false,
+    };
     this._registrations.set(token, registration);
     let active = true;
     return {
@@ -118,10 +127,28 @@ class CodexLifecycleBroker {
     let payload;
     try { payload = JSON.parse(line); } catch (_error) { return false; }
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
-    if (Object.keys(payload).some(key => !['token', 'incarnationId', 'type'].includes(key))) return false;
+    if (Object.keys(payload).some(key => ![
+      'token',
+      'incarnationId',
+      'type',
+      'threadDigest',
+      'turnDigest',
+    ].includes(key))) return false;
     if (payload.type !== 'agent-turn-complete') return false;
+    if (!DIGEST_PATTERN.test(payload.threadDigest) || !DIGEST_PATTERN.test(payload.turnDigest)) return false;
     const registration = this._registrations.get(payload.token);
     if (!registration || registration.incarnationId !== payload.incarnationId) return false;
+    if (registration.exhausted) return false;
+    if (registration.threadDigest && registration.threadDigest !== payload.threadDigest) return false;
+    if (registration.turnDigests.has(payload.turnDigest)) return false;
+    if (registration.turnDigests.size >= MAX_TURN_RECEIPTS) {
+      // Never evict an old digest: accepting it again could make a delayed
+      // duplicate receipt authorize a newer turn. Exhaustion stays fail-closed.
+      registration.exhausted = true;
+      return false;
+    }
+    registration.threadDigest ||= payload.threadDigest;
+    registration.turnDigests.add(payload.turnDigest);
     return registration.onEvent({ type: payload.type }) === true;
   }
 
@@ -136,6 +163,7 @@ module.exports = {
   ENV_TOKEN,
   MAX_CONNECTIONS,
   MAX_MESSAGE_CHARS,
+  MAX_TURN_RECEIPTS,
   SOCKET_TIMEOUT_MS,
   CodexLifecycleBroker,
 };

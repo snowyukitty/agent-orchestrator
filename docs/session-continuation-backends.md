@@ -30,7 +30,8 @@ Existing schema-v1 rows have an unambiguous origin: they were created by
 `SessionRegistry` before external backends existed. Startup therefore performs
 one explicit, atomic, idempotent migration that adds `orchestrator-pty` and
 writes schema v2. An invalid, oversized, corrupt, or future store is preserved
-unchanged and remains unavailable with a safe diagnostic.
+unchanged and remains unavailable with a safe diagnostic. The migration checks
+the exact UTF-8 bytes the atomic writer would emit before replacing v1 evidence.
 
 ## Capability gate
 
@@ -67,6 +68,10 @@ timeout: once an adapter may have crossed its write boundary, it must resolve
 only after the submit guard is closed and the occurrence has an at-most-once
 result. Read-side adapter methods must never write to a PTY or mutate durable
 backend state, because a timed-out promise is ignored rather than cancelled.
+One store tick starts eligible row inspections concurrently, so its read-side
+delay is bounded by the slowest adapter call rather than multiplied by the
+100-row store limit; durable reconciliation still runs under one serialized
+mutation.
 
 Inspection has three outcomes:
 

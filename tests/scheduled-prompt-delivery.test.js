@@ -82,8 +82,16 @@ function harness() {
     onStatus: meta => statuses.push(meta),
   });
   const ready = (index = pty.spawned.length - 1) => {
+    const sessionId = broker.registrations[index].sessionId;
+    const starting = registry.describe(sessionId).scheduledPrompt.readiness === 'starting';
+    if (starting) {
+      registry.write(sessionId, '\r');
+      pty.spawned[index].written.length = 0;
+    }
     pty.spawned[index]._onData('\x1b[?2004h');
-    return broker.complete(index);
+    const accepted = broker.complete(index);
+    if (starting) now += 30_001;
+    return accepted;
   };
   return { registry, pty, broker, ready, statuses, setNow: value => { now = value; }, now: () => now };
 }
@@ -132,6 +140,8 @@ test('provider receipt makes only the exact direct session lifecycle-confirmed',
   const id = h.registry.create(DIRECT_SPEC).id;
   assert.equal(h.registry.scheduleTarget(id), null);
   assert.equal(h.registry.describe(id).scheduledPrompt.confirmed, false);
+  h.registry.write(id, '\r');
+  h.pty.spawned[0].written.length = 0;
   assert.equal(h.broker.complete(), true);
   assert.equal(h.registry.describe(id).scheduledPrompt.confirmed, true);
   assert.equal(h.registry.describe(id).scheduledPrompt.ready, false,
@@ -141,6 +151,46 @@ test('provider receipt makes only the exact direct session lifecycle-confirmed',
   assert.equal(h.registry.describe(id).scheduledPrompt.ready, true);
   assert.equal(h.registry.describe(id).scheduledPrompt.bracketedPaste, true);
   assert.equal(h.registry.scheduleTarget(id).incarnationId, h.registry.describe(id).incarnationId);
+});
+
+test('older completion receipts cannot idle a newer submitted turn', () => {
+  const h = harness();
+  const id = h.registry.create(DIRECT_SPEC).id;
+  h.ready();
+
+  h.registry.write(id, '\r');
+  h.registry.write(id, 'newer prompt\r');
+  assert.equal(h.broker.complete(), true);
+  assert.equal(h.registry.describe(id).scheduledPrompt.readiness, 'running');
+  assert.equal(h.broker.complete(), true);
+  assert.equal(h.registry.describe(id).scheduledPrompt.readiness, 'idle');
+});
+
+test('the human-paced double Enter represents one pending provider turn', () => {
+  const h = harness();
+  const id = h.registry.create(DIRECT_SPEC).id;
+  h.ready();
+
+  h.registry.write(id, 'one prompt');
+  h.registry.write(id, '\r');
+  h.registry.write(id, '\r');
+  assert.equal(h.broker.complete(), true);
+  assert.equal(h.registry.describe(id).scheduledPrompt.readiness, 'idle');
+  assert.equal(h.broker.complete(), false, 'the second bare Enter did not invent a second turn');
+});
+
+test('bracketed multiline paste and post-submit suffix keep the composer locked', () => {
+  const h = harness();
+  const id = h.registry.create(DIRECT_SPEC).id;
+  h.ready();
+
+  h.registry.write(id, `${BRACKETED_PASTE_START}line one\nline two${BRACKETED_PASTE_END}`);
+  assert.equal(h.registry.scheduleTarget(id), null, 'newlines inside protected paste are not submits');
+  assert.equal(h.broker.complete(), false, 'a receipt without an observed submit is rejected');
+
+  h.registry.write(id, '\rforeign suffix');
+  assert.equal(h.broker.complete(), true);
+  assert.equal(h.registry.scheduleTarget(id), null, 'text after a submit remains a sticky draft');
 });
 
 test('delivery remains unavailable when the provider disables bracketed paste mode', async () => {

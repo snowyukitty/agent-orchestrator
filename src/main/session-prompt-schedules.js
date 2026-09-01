@@ -108,6 +108,10 @@ function clone(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
+function serializedFileBytes(file) {
+  return Buffer.byteLength(JSON.stringify(file, null, 2), 'utf8');
+}
+
 function lastResult(status, at, occurrenceAt) {
   return { status, at, occurrenceAt };
 }
@@ -285,6 +289,9 @@ class SessionPromptScheduleStore {
       return { schemaVersion: SCHEMA_VERSION, schedules: [] };
     }
     try {
+      if (this._diagnostic?.code === 'store_limit') {
+        fail('Schedule store migration exceeds its serialized byte limit', 'store-limit');
+      }
       const raw = readJsonStrict(this.filePath, { maxFileBytes: MAX_FILE_BYTES });
       const parsed = validateFile(raw, this._now());
       this._diagnostic = null;
@@ -295,17 +302,26 @@ class SessionPromptScheduleStore {
   }
 
   _diagnose(error) {
-    const code = error?.code === 'store-unsupported' ? 'store_unsupported' : 'store_corrupt';
+    const code = error?.code === 'store-unsupported'
+      ? 'store_unsupported'
+      : error?.code === 'store-limit'
+        ? 'store_limit'
+        : 'store_corrupt';
     this._diagnostic = {
       code,
       message: code === 'store_unsupported'
         ? 'Scheduled prompts are unavailable because the local store uses an unsupported schema.'
+        : code === 'store_limit'
+          ? 'Scheduled prompts are unavailable because migration would exceed the local store size limit. The original file was preserved.'
         : 'Scheduled prompts are unavailable because the local store is unreadable. The original file was preserved.',
     };
     return new SessionPromptScheduleError(this._diagnostic.message, code);
   }
 
   _write(file) {
+    if (serializedFileBytes(file) > MAX_FILE_BYTES) {
+      fail('Schedule store exceeds its serialized byte limit', 'store-limit');
+    }
     writeJsonAtomic(this.filePath, file);
     this._onChange?.();
   }
@@ -441,7 +457,12 @@ class SessionPromptScheduleStore {
       const file = this._read();
       let changed = false;
       const reconciled = [];
-      for (const schedule of file.schedules) {
+      const inspections = await Promise.all(file.schedules.map(async (schedule) => {
+        if (!schedule.enabled || schedule.deliveryClaim) return null;
+        return bindingInspection(schedule, await inspectBinding(schedule));
+      }));
+      for (let index = 0; index < file.schedules.length; index += 1) {
+        const schedule = file.schedules[index];
         if (
           schedule.deliveryClaim &&
           !this._ownedClaimTokens.has(schedule.deliveryClaim.token) &&
@@ -451,13 +472,10 @@ class SessionPromptScheduleStore {
           reconciled.push(advanceOccurrence(schedule, 'error', now));
           continue;
         }
-        if (schedule.enabled && !schedule.deliveryClaim) {
-          const status = bindingInspection(schedule, await inspectBinding(schedule));
-          if (status === 'session_changed') {
-            changed = true;
-            reconciled.push(advanceOccurrence(schedule, 'session_changed', now));
-            continue;
-          }
+        if (inspections[index] === 'session_changed') {
+          changed = true;
+          reconciled.push(advanceOccurrence(schedule, 'session_changed', now));
+          continue;
         }
         reconciled.push(schedule);
       }
@@ -529,5 +547,6 @@ module.exports = {
   bindingMatches,
   migrateLegacyFile,
   normalizePrompt,
+  serializedFileBytes,
   validateFile,
 };

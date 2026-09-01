@@ -11,6 +11,10 @@ const {
 } = require('../src/main/codex-lifecycle');
 
 const INCARNATION = '40000000-0000-4000-8000-000000000001';
+const THREAD_A = 'a'.repeat(64);
+const THREAD_B = 'b'.repeat(64);
+const TURN_A = 'c'.repeat(64);
+const TURN_B = 'd'.repeat(64);
 
 test('lifecycle broker accepts only an exact token, incarnation, and event', async () => {
   const broker = new CodexLifecycleBroker();
@@ -25,18 +29,25 @@ test('lifecycle broker accepts only an exact token, incarnation, and event', asy
   try {
     assert.equal(broker.acceptPayload('not json'), false);
     assert.equal(broker.acceptPayload(JSON.stringify({ token, incarnationId: INCARNATION, type: 'approval-requested' })), false);
-    assert.equal(broker.acceptPayload(JSON.stringify({ token: 'wrong', incarnationId: INCARNATION, type: 'agent-turn-complete' })), false);
-    assert.equal(broker.acceptPayload(JSON.stringify({ token, incarnationId: 'wrong', type: 'agent-turn-complete' })), false);
-    assert.equal(broker.acceptPayload(JSON.stringify({ token, incarnationId: INCARNATION, type: 'agent-turn-complete', output: 'leak' })), false);
-    assert.equal(broker.acceptPayload(JSON.stringify({ token, incarnationId: INCARNATION, type: 'agent-turn-complete' })), true);
+    const valid = { token, incarnationId: INCARNATION, type: 'agent-turn-complete', threadDigest: THREAD_A, turnDigest: TURN_A };
+    assert.equal(broker.acceptPayload(JSON.stringify({ ...valid, token: 'wrong' })), false);
+    assert.equal(broker.acceptPayload(JSON.stringify({ ...valid, incarnationId: 'wrong' })), false);
+    assert.equal(broker.acceptPayload(JSON.stringify({ ...valid, output: 'leak' })), false);
+    assert.equal(broker.acceptPayload(JSON.stringify({ token, incarnationId: INCARNATION, type: 'agent-turn-complete' })), false);
+    assert.equal(broker.acceptPayload(JSON.stringify(valid)), true);
     assert.equal(receipts, 1);
+    assert.equal(broker.acceptPayload(JSON.stringify(valid)), false, 'duplicate turn receipt is rejected');
+    assert.equal(broker.acceptPayload(JSON.stringify({ ...valid, threadDigest: THREAD_B, turnDigest: TURN_B })), false,
+      'one registration cannot switch provider threads');
+    assert.equal(broker.acceptPayload(JSON.stringify({ ...valid, turnDigest: TURN_B })), true);
+    assert.equal(receipts, 2);
     assert.match(registration.env[ENV_PIPE], /^agent-orchestrator-/);
     assert.equal(registration.env[ENV_INCARNATION], INCARNATION);
     assert.ok(Object.keys(registration.env).every(name => name.includes('SECRET')),
       'every lifecycle routing variable must match Codex secret-name filtering');
     assert.equal(registration.release(), true);
     assert.equal(registration.release(), false);
-    assert.equal(broker.acceptPayload(JSON.stringify({ token, incarnationId: INCARNATION, type: 'agent-turn-complete' })), false);
+    assert.equal(broker.acceptPayload(JSON.stringify({ ...valid, turnDigest: 'e'.repeat(64) })), false);
   } finally {
     broker.stop();
   }
@@ -62,6 +73,8 @@ test('bundled PowerShell helper forwards only a synthetic turn-complete receipt'
   const helper = path.join(__dirname, '..', 'src', 'main', 'codex-notify.ps1');
   const notification = JSON.stringify({
     type: 'agent-turn-complete',
+    'thread-id': 'private-provider-thread-id',
+    'turn-id': 'private-provider-turn-id',
     'last-assistant-message': 'This text must not cross the named pipe.',
   });
   try {
