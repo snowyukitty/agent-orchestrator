@@ -39,22 +39,55 @@ Tune the ping time to your own burn rate:
    as **cron** (repeats daily at that clock time).
 3. Point the **Command** block at the agent you want to pre-warm (the default
    opens Claude Code; swap in your Codex launch or a routed account session).
-4. Save the workflow. Agent Orchestrator's main-process heartbeat keeps the
-   schedule firing even while the app sits in the tray with the screen locked
-   — the machine only has to be awake.
+4. Save the workflow, then leave Agent Orchestrator running — closing its
+   window hides it to the tray rather than quitting. A main-process heartbeat
+   keeps the schedule firing while the app sits in the tray with the screen
+   locked, because a Node timer is not subject to Chromium's throttling of
+   hidden renderers.
 
-To keep the machine awake overnight, either disable sleep for that period or
-combine this with your platform's wake timers; the app deliberately does not
-change power settings behind your back. (The **Nightly run + hibernate**
-template shows the reverse trick: work, then power down.)
+While any future run is pending, the app holds off system sleep for you, and
+releases that hold as soon as nothing is scheduled. The display is still
+allowed to turn off. What it does **not** do is register a wake timer, start
+itself, or survive a reboot: it cannot bring back a machine you put to sleep by
+hand, and after a restart you have to open it again. (The **Nightly run +
+hibernate** template shows the reverse trick: work, then power down.)
 
 ## Pre-warming several accounts at once
 
-Each account meters its own window. With multi-account sessions you can
-pre-warm all of them in a single scheduled workflow: add one `Agent Session`
-block per account, then a `Send to Agent → All workflow agents` ping, and a
-`Join Agents` barrier so the run only ends after every account has answered.
-Every account's window then rolls over on the same clock.
+Each account meters its own window, so pre-warm them in **one** workflow rather
+than one workflow per account: only a single workflow runs at a time, and two
+schedules set to the same minute would queue behind each other.
+
+Open **🧩 Templates** and load **Usage-window pre-warm (two accounts)**. It is
+the shape above with a second lane:
+
+```text
+⏰ Schedule        05:15 · cron
+📁 Directory       a folder the agent is already trusted in
+🤖 Agent Session   account A
+🤖 Agent Session   account B
+📨 Send to Agent   All workflow agents · "ping. reply ok only."
+◇ Join Agents      continue on incomplete
+📨 Send to Agent   All workflow agents · "/exit"
+```
+
+Add a lane per extra account. Every account's window then rolls over on the
+same clock.
+
+Two defaults in that template are deliberate:
+
+- **cron, not once.** A one-shot pre-warm that misses its five-minute grace
+  window — the app was closed, the machine was asleep — is simply lost, and
+  you find out at 09:00. A daily cron gets the next morning back.
+- **The barrier continues on incomplete.** A pre-warm exists to touch every
+  account; one slow lane should not stop the others from finishing and exiting.
+  Use *stop* instead when later blocks depend on every lane having answered.
+
+You do not need a `Wait for Agent` between the lanes and the ping. Each
+`Agent Session` block already waits for its provider's output to settle and
+proves the session is still alive before the workflow moves on — a lane whose
+agent never came up fails that block by name instead of silently handing a dead
+session to the ping.
 
 ## Honest limits
 
@@ -63,3 +96,11 @@ Every account's window then rolls over on the same clock.
 - Providers can change their metering rules at any time; verify the current
   behavior of your plan.
 - A pre-warm ping is real usage on your account — keep the prompt trivial.
+- The ping lands in whatever the agent shows first. An account that opens onto
+  a trust prompt, a login screen, or a quota notice looks started and settled,
+  so the ping goes into that screen and no window opens. Start each account by
+  hand once in the directory the schedule uses, clear whatever it asks for, and
+  the unattended run will have nothing left to ask.
+- Check the result rather than assuming it: a pre-warmed account reports
+  `used 0%` against a fresh 5-hour window, and the **Run Journal** shows the
+  scheduled run's terminal status.

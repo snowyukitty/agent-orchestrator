@@ -119,6 +119,50 @@ export const TEMPLATES = [
     ],
   },
   {
+    id: 'tpl-usage-window-prewarm-accounts',
+    name: 'Usage-window pre-warm (two accounts)',
+    description: 'Start the metered 5-hour window on two accounts at the same clock time. Each account meters its own window, so both roll over together. Pick an account in each Agent Session block.',
+    blocks: [
+      // One Agent Session per account, then a single fan-out and one barrier.
+      // Each Agent Session already proves its provider came up and stayed up,
+      // so no per-lane wait is needed between the launches and the ping.
+      { type: 'schedule', params: { datetime: '', mode: 'cron' } },
+      { type: 'directory', params: { path: '' } },
+      { type: 'agentStart', params: { profileId: '', settleMs: 2500 } },
+      { type: 'agentStart', params: { profileId: '', settleMs: 2500 } },
+      {
+        type: 'agentSend',
+        params: {
+          profileId: WORKFLOW_AGENT_TARGET,
+          text: 'ping. reply ok only. (usage-window pre-warm)',
+          pressEnter: true,
+          expectResult: false,
+          handoffFrom: '',
+        },
+      },
+      {
+        type: 'agentJoin',
+        params: {
+          idleMs: 2000,
+          pattern: '',
+          timeoutMs: 180000,
+          onIncomplete: 'continue',
+          resultName: '',
+        },
+      },
+      {
+        type: 'agentSend',
+        params: {
+          profileId: WORKFLOW_AGENT_TARGET,
+          text: '/exit',
+          pressEnter: true,
+          expectResult: false,
+          handoffFrom: '',
+        },
+      },
+    ],
+  },
+  {
     id: 'tpl-quick-command',
     name: 'Quick command',
     description: 'A minimal workflow: pick a directory and run a single command.',

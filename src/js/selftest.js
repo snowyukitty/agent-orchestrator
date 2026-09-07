@@ -119,6 +119,7 @@ export async function runSelfTest() {
     await testRunJournalBridge(eq, ok);
     await testAbortSpawnRaces(eq, ok);
     await testRoutedWorkflowBootstrap(eq, ok);
+    await testAgentLaunchLiveness(eq, ok);
     await testSchedule(eq);
     await testSessionPromptManagement(eq, ok);
     await testTyping(eq, ok);
@@ -424,6 +425,37 @@ async function testTemplates(eq) {
       name: multi.name,
       defaultDirectory: '.',
       blocks: multi.blocks,
+    }).diagnostics.filter(diagnostic => diagnostic.severity === 'error'),
+    []);
+
+  // The multi-account pre-warm ships the shape the five-hour-window guide
+  // describes: one lane per account, one fan-out, one barrier — and a cron
+  // schedule, because a missed one-shot pre-warm is simply lost.
+  const prewarm = TEMPLATES.find(t => t.id === 'tpl-usage-window-prewarm-accounts');
+  eq('prewarm-accounts-template-stage-order',
+    prewarm.blocks.map(b => b.type),
+    ['schedule', 'directory', 'agentStart', 'agentStart', 'agentSend', 'agentJoin', 'agentSend']);
+  eq('prewarm-accounts-template-repeats-daily',
+    prewarm.blocks.find(b => b.type === 'schedule').params.mode,
+    'cron');
+  eq('prewarm-accounts-template-portable-start-profiles',
+    prewarm.blocks.filter(b => b.type === 'agentStart').map(b => b.params.profileId),
+    ['', '']);
+  eq('prewarm-accounts-template-broadcasts-to-every-lane',
+    prewarm.blocks.filter(b => b.type === 'agentSend').map(b => b.params.profileId),
+    [WORKFLOW_AGENT_TARGET, WORKFLOW_AGENT_TARGET]);
+  // A pre-warm exists to touch every account. One slow lane must not stop the
+  // barrier from letting the others finish and exit.
+  eq('prewarm-accounts-template-join-continues-on-incomplete',
+    prewarm.blocks.find(b => b.type === 'agentJoin').params.onIncomplete,
+    'continue');
+  eq('prewarm-accounts-template-document-valid',
+    loadWorkflowDocument({
+      formatVersion: WORKFLOW_FORMAT_VERSION,
+      id: 'prewarm-template-check',
+      name: prewarm.name,
+      defaultDirectory: '.',
+      blocks: prewarm.blocks,
     }).diagnostics.filter(diagnostic => diagnostic.severity === 'error'),
     []);
 }
@@ -940,13 +972,15 @@ async function testRoutedWorkflowBootstrap(eq, ok) {
       },
       waitForSession: async params => {
         routedEvents.push([
-          'ready-wait',
+          params.pattern ? 'ready-wait' : 'settle-wait',
           params.afterSeq,
           params.idleMs,
           params.pattern,
           params.timeoutMs,
         ]);
-        return { reason: 'match', outputSeq: 4 };
+        return params.pattern
+          ? { reason: 'match', outputSeq: 4 }
+          : { reason: 'idle', outputSeq: 9 };
       },
       sendInput: async ({ id, text }) => {
         routedEvents.push(['shell-write', id, text]);
@@ -988,12 +1022,15 @@ async function testRoutedWorkflowBootstrap(eq, ok) {
       },
     },
   ], '.', { runId: 'run-routed-bootstrap' });
+  // The settle wait is bounded and starts after the account shell's ready
+  // marker, so it measures the provider's own startup rather than the shell
+  // transcript that preceded it. A blind sleep here used to race the TUI.
   eq('routed-workflow-bootstrap-order', routedEvents, [
     ['create', true],
     ['adopt', 'routed-codex'],
     ['ready-wait', 0, 0, 'account shell ready', 20000],
     ['shell-write', 'routed-codex', 'codex; exit\r'],
-    ['settle', 25],
+    ['settle-wait', 4, 25, '', 60025],
     ['prompt', 'routed-codex', 'Do routed work.', false],
     'prompt-checkpoint',
   ]);
@@ -1016,7 +1053,14 @@ async function testRoutedWorkflowBootstrap(eq, ok) {
           status: 'running',
         },
       }),
-      waitForSession: async () => { localEvents.push('unexpected-ready-wait'); return { reason: 'match' }; },
+      waitForSession: async params => {
+        localEvents.push(
+          params.pattern
+            ? ['unexpected-ready-wait', params.pattern]
+            : ['settle-wait', params.afterSeq, params.idleMs, params.pattern, params.timeoutMs]
+        );
+        return { reason: 'idle', outputSeq: 3 };
+      },
       sendInput: async params => { localEvents.push(['unexpected-shell-write', params.text]); return true; },
       sessionCheckpoint: async () => ({ outputSeq: 1 }),
     },
@@ -1051,7 +1095,7 @@ async function testRoutedWorkflowBootstrap(eq, ok) {
   ], '.', { runId: 'run-local-bootstrap' });
   eq('local-profile-does-not-launch-duplicate-codex', localEvents, [
     ['adopt', 'local-codex'],
-    ['settle', 10],
+    ['settle-wait', 0, 10, '', 60010],
     ['prompt', 'local-codex', 'Do local work.', false],
   ]);
 
@@ -1105,6 +1149,136 @@ async function testRoutedWorkflowBootstrap(eq, ok) {
     abortAdoptions,
     ['abort-routed']);
   eq('abort-during-routed-ready-clears-active-waits', abortEngine._activeWaits.size, 0);
+}
+
+// ── Agent Session launch liveness ────────────────────────────
+// An Agent Session block used to report success whenever its fixed settle
+// sleep elapsed, so a provider that never came up (the account shell fell
+// through to `exit`) was only discovered by a later block, which then blamed
+// the wrong thing. These cases pin the replacement contract: the block owns
+// the failure, names the lane, and never hands a dead lane downstream.
+async function testAgentLaunchLiveness(eq, ok) {
+  // A block error is caught by the drive loop, logged to stderr, and turns
+  // the run's terminal status to failed — it is not thrown out of execute().
+  // These cases therefore read the log, the way the app's Log pane does.
+  const laneEngine = (settleReason, { sessions = null, settleMs = 20 } = {}) => {
+    const errors = [];
+    const meta = {
+      id: 'lane-1',
+      profileId: 'codex:lane',
+      label: 'Codex LANE',
+      agent: 'codex',
+      assurance: 'L1-routed',
+      resultInputCapable: true,
+      status: 'running',
+    };
+    const live = sessions || [];
+    const engine = new ExecutionEngine({
+      getSessions: () => live,
+      api: {
+        createSession: async () => ({ id: meta.id, pid: 9001, session: { ...meta } }),
+        waitForSession: async params => (params.pattern
+          ? { reason: 'match', outputSeq: 2 }
+          : { reason: settleReason, outputSeq: 7 }),
+        sendInput: async () => true,
+        cancelSessionWait: async () => true,
+        killProcess: async () => true,
+        sessionCheckpoint: async () => ({ outputSeq: 8 }),
+      },
+      typeIntoFn: async ({ onTyped }) => { await onTyped(); return { sent: true, aborted: false }; },
+    });
+    engine.onSessionSpawned = session => { if (!sessions) live.push(session); };
+    engine.onLog = (message, type) => { if (type === 'stderr') errors.push(message); };
+    return {
+      engine,
+      errors,
+      run: async () => {
+        await engine.execute([
+          {
+            id: 'lane-start',
+            type: 'agentStart',
+            params: { profileId: 'codex:lane', cwd: '.', settleMs },
+          },
+        ], '.', { runId: `run-lane-${settleReason}` });
+        return errors.join(' | ');
+      },
+    };
+  };
+
+  // The provider exited while starting: the account shell ran `exit` because
+  // the agent command was unavailable in that account.
+  const exited = laneEngine('exit');
+  const exitMessage = await exited.run();
+  eq('agent-launch-exit-marks-the-run-failed', exited.engine.lastOutcome.status, 'failed');
+  ok('agent-launch-exit-names-the-lane', exitMessage.includes('Codex LANE'));
+  ok('agent-launch-exit-explains-the-cause', exitMessage.includes('exited while starting up'));
+
+  // Still painting at the timeout is not a failure: the lane is alive, which
+  // is the only thing the blocks after it depend on.
+  const slow = laneEngine('timeout');
+  const slowMessage = await slow.run();
+  eq('agent-launch-timeout-keeps-the-lane', slowMessage, '');
+  eq('agent-launch-timeout-completes-the-run', slow.engine.lastOutcome.status, 'completed');
+
+  // settleMs = 0 skips the wait, so the liveness proof is the list check.
+  const deadList = [{
+    id: 'lane-1',
+    profileId: 'codex:lane',
+    label: 'Codex LANE',
+    agent: 'codex',
+    assurance: 'L1-routed',
+    status: 'exited',
+  }];
+  const instant = laneEngine('idle', { sessions: deadList, settleMs: 0 });
+  const instantMessage = await instant.run();
+  ok('agent-launch-zero-settle-still-proves-liveness',
+    instantMessage.includes('exited while starting up'));
+  eq('agent-launch-zero-settle-marks-the-run-failed',
+    instant.engine.lastOutcome.status, 'failed');
+
+  // A lane that dies between the send's own two list reads is named, instead
+  // of reaching typeInto and surfacing as an unexplained write failure. Read
+  // one still sees the lane (so it is targeted); read two no longer does.
+  const liveLane = {
+    id: 'live-lane',
+    profileId: 'codex:live',
+    label: 'Codex LIVE',
+    agent: 'codex',
+    assurance: 'L1-routed',
+    resultInputCapable: true,
+    status: 'running',
+  };
+  let listReads = 0;
+  let typedAfterDeath = false;
+  const sendEngine = new ExecutionEngine({
+    getSessions: () => (++listReads === 1 ? [liveLane] : []),
+    api: {
+      sessionCheckpoint: async () => ({ outputSeq: 1 }),
+      cancelSessionWait: async () => true,
+    },
+    typeIntoFn: async () => { typedAfterDeath = true; return { sent: true, aborted: false }; },
+  });
+  sendEngine._spawnedIds = new Set(['live-lane']);
+  let sendMessage = null;
+  try {
+    await sendEngine._executors.agentSend.call(sendEngine, {
+      id: 'lane-send',
+      type: 'agentSend',
+      params: {
+        profileId: WORKFLOW_AGENT_TARGET,
+        text: 'ping',
+        pressEnter: true,
+        expectResult: false,
+        handoffFrom: '',
+      },
+    });
+  } catch (error) {
+    sendMessage = error.message;
+  }
+  ok('vanished-lane-fails-the-send', !!sendMessage);
+  ok('vanished-lane-names-the-cause',
+    !!sendMessage && sendMessage.includes('live workflow lane'));
+  eq('vanished-lane-is-never-typed-into', typedAfterDeath, false);
 }
 
 // ── Schedule time math ───────────────────────────────────────

@@ -36,6 +36,17 @@ does not have. Everything below is current for v0.4.0.
   rather than automatically quarantined or deleted; an unknowable accepted
   deletion can therefore keep journal admission disabled until it is repaired.
   Durable prune replay history is deliberately bounded.
+- **Agent Session liveness is not provider readiness**: the block waits for a
+  launched agent's output to settle and refuses to continue with a lane whose
+  session exited, which is enough to keep a dead lane out of the blocks after
+  it. It is not proof that the provider is ready for *work*. An agent that
+  comes up into a trust prompt, a login screen, a quota notice, or an approval
+  dialog is alive and quiet, so a following Send types into that screen. Only
+  routed Codex direct mode has an app-owned lifecycle contract strong enough to
+  distinguish those states, and it is deliberately unavailable to
+  workflow-launched sessions. Use **Output contains** on `Wait for Agent` or
+  `Join Agents` when a workflow needs proof of a semantic response, and start a
+  new account by hand once so an unattended run has nothing left to ask.
 - **CLI-specific prompt controls**: Highly interactive CLIs can consume the
   first Enter, so ordinary human-paced workflow/Quick Send submission still
   uses a deliberate double-tap. Guarded exact-session delivery is different:

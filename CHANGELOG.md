@@ -5,6 +5,24 @@ the product story; this file keeps the history.
 
 ## Unreleased (Journal v2 + Evidence-First Field Guide)
 
+- **An Agent Session block now proves its provider came up**: the fixed
+  `settleMs` sleep after launching an agent was a guess, and it hid two
+  different failures behind a completed block. A provider that booted more
+  slowly than the constant let the next block type into a shell that had not
+  handed over yet; a provider that never started at all (the routed account
+  shell falls through to `exit`) left a dead lane that only failed later, at
+  the wrong block, with an error describing the symptom. `settleMs` is now the
+  idle threshold of a bounded output wait, so a slow provider is waited for
+  instead of raced, and liveness is a hard requirement: a lane that exits while
+  starting fails its own Agent Session block, by name, and never reaches a
+  downstream Send. Output still arriving at the timeout is not a failure — the
+  lane is alive, which is what later blocks depend on — but it is logged. A
+  fan-out that finds a lane gone between resolving its targets and writing to
+  them now says so instead of surfacing an unexplained typing failure.
+- **Usage-window pre-warm for two accounts** ships as a template: one lane per
+  account, one `Send to All`, one `Join Agents`, defaulting to a daily cron,
+  because a missed one-shot pre-warm is simply lost. Its barrier continues on
+  incomplete so one slow account cannot stop the others from finishing.
 - **Durable exact-session prompts**: a routed Codex session can now be started
   in an explicit direct-agent mode and scheduled for a one-shot or repeating
   prompt. Each record binds the exact session id, a random non-reusable PTY

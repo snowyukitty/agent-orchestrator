@@ -18,6 +18,14 @@ import {
 
 const ROUTED_CODEX_READY_PATTERN = 'account shell ready';
 const ROUTED_CODEX_READY_TIMEOUT_MS = 20_000;
+const DEFAULT_AGENT_SETTLE_MS = 1500;
+// How long past its own idle threshold one Agent Session block will keep
+// waiting for a provider to stop painting. Added to `settleMs` rather than
+// maxed with it, so the threshold is always observable: a bound equal to the
+// threshold could only ever expire. A provider still painting at the bound
+// keeps its lane — it is alive, which is the part that matters — but the
+// block stops waiting and says so.
+const AGENT_SETTLE_GRACE_MS = 60_000;
 
 export class ExecutionEngine {
   constructor({ api = null, getSessions = null, getGeometry = null, typeIntoFn = typeInto } = {}) {
@@ -475,6 +483,11 @@ export class ExecutionEngine {
             + `within ${ROUTED_CODEX_READY_TIMEOUT_MS} ms (${ready?.reason || 'unknown'})`
           );
         }
+        // Measure the settle wait below against output produced *after* the
+        // marker, not against the account shell's own bootstrap transcript.
+        if (Number.isInteger(ready?.outputSeq)) {
+          this._outputCheckpoints.set(result.id, ready.outputSeq);
+        }
 
         const launched = await this._apiClient().sendInput?.({
           id: result.id,
@@ -485,11 +498,11 @@ export class ExecutionEngine {
           throw new Error('Routed Codex account shell refused the fixed Codex workflow launch command');
         }
 
-        await this._sleep(Number(block.params.settleMs) || 1500);
+        await this._settleAgentLaunch(result.id, block, meta.label);
         return;
       }
 
-      await this._sleep(Number(block.params.settleMs) || 1500);
+      await this._settleAgentLaunch(result.id, block, meta.label);
     },
 
     /** Send a prompt to one agent lane, or fan out to every lane in this run. */
@@ -580,6 +593,15 @@ export class ExecutionEngine {
       // block has already reported an error.
       const sends = await Promise.allSettled(sessionIds.map(async (sessionId, laneIndex) => {
         const session = agentLanes.get(sessionId);
+        // A fan-out resolves its ids from the same lane list that builds
+        // `agentLanes`, so a missing entry means the lane died between the
+        // two reads. Naming that keeps the aggregate error below from
+        // reporting a dead lane as an unexplained typing failure. Only the
+        // fan-out can conclude this: a profile- or current-session target
+        // may legitimately address a plain command PTY, which is never a lane.
+        if (target === WORKFLOW_AGENT_TARGET && !session) {
+          throw new Error('the session stopped being a live workflow lane before this prompt was sent');
+        }
         const resultContract = expectResult
           ? createResultContract({
             token: this._nextResultContractToken(block, laneIndex),
@@ -1182,6 +1204,71 @@ export class ExecutionEngine {
     await Promise.allSettled(
       [...this._activeWaits.values()].map(wait => cancel(wait))
     );
+  }
+
+  /**
+   * Let a freshly launched agent settle, and prove it is still there.
+   *
+   * `settleMs` used to be a blind sleep, which made an Agent Session block
+   * report success for two different failures: a provider that booted slower
+   * than the constant (the next block then typed into a shell that had not
+   * handed over yet) and a provider that never started at all (the account
+   * shell fell through to `exit` and the lane was already dead by the time a
+   * later Send tried to use it — the run then failed at the wrong block, with
+   * an error that described the symptom rather than the cause).
+   *
+   * `settleMs` is now the *idle threshold* of a bounded output wait, so a slow
+   * provider is waited for instead of raced. Liveness is the hard guarantee:
+   * a lane that exits during startup fails this block, by name. Still-painting
+   * output at the timeout is not a failure — the lane is alive, which is what
+   * the blocks after this one depend on.
+   */
+  async _settleAgentLaunch(sessionId, block, label) {
+    const requested = Number(block?.params?.settleMs);
+    const settleMs = Number.isFinite(requested) && requested >= 0
+      ? requested
+      : DEFAULT_AGENT_SETTLE_MS;
+    const name = label || this._sessionLabel(sessionId);
+
+    if (settleMs > 0) {
+      const waitId = `${this.runId}-s${++this._waitSeq}`;
+      const afterSeq = this._outputCheckpoints.get(sessionId);
+      const settled = await this._waitForSessionSignal({
+        sessionId,
+        waitId,
+        afterSeq: Number.isInteger(afterSeq) ? afterSeq : 0,
+        idleMs: settleMs,
+        pattern: '',
+        timeoutMs: settleMs + AGENT_SETTLE_GRACE_MS,
+      });
+      if (this.aborted) return;
+      if (Number.isInteger(settled?.outputSeq)) {
+        this._outputCheckpoints.set(sessionId, settled.outputSeq);
+      }
+      if (settled?.reason === 'exit' || settled?.reason === 'removed') {
+        throw new Error(this._agentLaunchExitMessage(name));
+      }
+      if (settled?.reason === 'timeout') {
+        this._log(
+          `⚠️ ${name} was still producing output after `
+          + `${settleMs + AGENT_SETTLE_GRACE_MS} ms; continuing with the lane open`,
+          'system'
+        );
+      }
+    }
+
+    // Covers settleMs = 0 and an exit that raced the wait's resolution.
+    const live = this._sessionList().find(session => session.id === sessionId);
+    if (!live || live.status === 'exited') {
+      throw new Error(this._agentLaunchExitMessage(name));
+    }
+  }
+
+  /** One wording for "the lane died while starting", used by both checks. */
+  _agentLaunchExitMessage(name) {
+    return `${name} exited while starting up, so this session cannot receive `
+      + `prompts. The agent command is launched inside that account — check `
+      + `that it is installed and authenticated there, then run again.`;
   }
 
   _sessionSource() {

@@ -13,6 +13,12 @@ form for people deciding whether a specific behavior exists.
 - **Multi-Account Agent Sessions**: Several agents run at once, one PTY per account, each with a terminal tab carrying its agent, account name, live status dot, and assurance badge. Hidden sessions keep running and buffering. Routed Codex accounts come from `ai-agent-entrypoint`; local env-only profiles cover the CLIs it does not manage yet. See "Multi-account agent control" above.
 - **Quick Send**: A prompt bar under the terminal fires an ad-hoc command at the current session, every session of one agent, or all of them. Broadcast targets are typed concurrently using the same human-paced typing as the workflow engine.
 - **Visual Workflow Builder**: Users can construct automation workflows by combining blocks (Schedule, Directory, Agent Session, Send to Agent, Wait for Agent, Join Agents, Command, Wait, Send Input, Keypress, Loop / End Loop, Log, Hibernate PC).
+- **Proven Agent Session Startup**: An `Agent Session` block waits for the
+  launched agent's output to settle — its `Settle ms` is an idle threshold with
+  a bounded overall timeout, not a fixed sleep — and then requires the session
+  to still be running. A lane whose agent exited while starting fails that
+  block by name instead of being handed to a later Send. A still-painting
+  provider at the timeout keeps its lane and logs a warning.
 - **Signal-Aware Team Stages**: `Send to Agent` can prompt one session or all workflow-owned agent sessions. A single `Join Agents` barrier then tracks every workflow-owned session prompted since the previous wait/join and reports live `N / M ready` progress. Timeout and premature exit stop downstream blocks by default without closing the remaining sessions; an explicit continue policy keeps the warning-and-continue behavior when that is intentional.
 - **Explicit Result Handoff**: A Send block can issue a unique bounded result
   contract to every targeted lane. A named Join captures complete framed

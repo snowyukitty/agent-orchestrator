@@ -342,9 +342,11 @@
                   route cannot be resolved, launch fails closed. In a workflow,
                   an Agent Session block waits for the account shell, invokes
                   its session-local <code>codex</code> wrapper once with a
-                  fixed trailing shell exit, and then observes the configured
-                  settle period. Opening the same account manually leaves you
-                  at the interactive shell.
+                  fixed trailing shell exit, waits for that provider's output
+                  to settle, and requires the session to still be running
+                  before anything types into it. A lane whose agent exited
+                  while starting fails its own block by name. Opening the same
+                  account manually leaves you at the interactive shell.
                 </p>
                 <ul class="boundary-list">
                   <li><span>✓</span> Account route is centrally resolved</li>
@@ -631,10 +633,12 @@
         <p>
           This shifts when a window you already pay for begins; it does not
           create free usage, and weekly caps are unaffected. The
-          <strong>Usage-window pre-warm</strong> template ships the pattern
-          ready to run — tune the ping time to your own burn rate, and keep
-          the machine awake for the scheduled minute (the heartbeat survives
-          tray and lock, not sleep).
+          <strong>Usage-window pre-warm</strong> templates ship the pattern
+          ready to run, for one account or for two at the same clock minute —
+          tune the ping time to your own burn rate. Leave the app in the tray:
+          the heartbeat survives tray and lock, and a pending run holds off
+          system sleep until it has fired. Nothing wakes a machine you put to
+          sleep by hand, or relaunches the app after a reboot.
         </p>
       </div>
     </section>
