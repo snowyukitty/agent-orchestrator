@@ -257,10 +257,53 @@ for (const reference of references) {
   }
 }
 
-if (failures.length) {
-  for (const failure of failures) console.error(`✗ ${failure}`);
-  console.error(`${failures.length} static guide contract check(s) failed.`);
-  process.exit(1);
+// The authoring guide teaches a document format, so its example has to be a
+// document the app would actually accept. Checking it here keeps the guide
+// honest when the schema moves, instead of leaving a plausible-looking JSON
+// blob that fails only when someone tries to install it.
+const AUTHORING_FILE = path.join(DOCS, 'authoring-workflows.md');
+let authoringExamples = 0;
+async function checkAuthoringExamples() {
+  if (!fs.existsSync(AUTHORING_FILE)) return;
+  const markdown = fs.readFileSync(AUTHORING_FILE, 'utf8');
+  const fence = /```json\r?\n([\s\S]*?)```/g;
+  const examples = [...markdown.matchAll(fence)].map(match => match[1]);
+  if (examples.length === 0) {
+    fail('authoring guide has no complete JSON workflow example to verify');
+    return;
+  }
+  const { pathToFileURL } = require('url');
+  const { loadWorkflowDocument } = await import(
+    pathToFileURL(path.join(ROOT, 'src', 'js', 'workflow-document.mjs')).href
+  );
+  for (const [index, example] of examples.entries()) {
+    let parsed;
+    try {
+      parsed = JSON.parse(example);
+    } catch (error) {
+      fail(`authoring guide example ${index + 1} is not valid JSON: ${error.message}`);
+      continue;
+    }
+    try {
+      const { diagnostics } = loadWorkflowDocument(parsed);
+      const errors = diagnostics.filter(diagnostic => diagnostic.severity === 'error');
+      if (errors.length) {
+        fail(`authoring guide example ${index + 1} has ${errors.length} document error(s)`);
+      }
+    } catch (error) {
+      fail(`authoring guide example ${index + 1} is rejected by the loader: ${error.message}`);
+    }
+    authoringExamples += 1;
+  }
 }
 
-console.log(`✓ Static guide: ${references.length} references, ${ids.size} anchors, no backend calls.`);
+checkAuthoringExamples().then(() => {
+  if (failures.length) {
+    for (const failure of failures) console.error(`✗ ${failure}`);
+    console.error(`${failures.length} static guide contract check(s) failed.`);
+    process.exit(1);
+  }
+
+  console.log(`✓ Static guide: ${references.length} references, ${ids.size} anchors, no backend calls.`);
+  console.log(`✓ Authoring guide: ${authoringExamples} workflow example(s) accepted by the loader.`);
+});

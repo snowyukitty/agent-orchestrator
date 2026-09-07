@@ -112,7 +112,7 @@ export class ExecutionEngine {
       for (const warning of analyzeHandoffPolicies(blocks)) {
         this._log(`⚠️ ${warning.message}`, 'system');
       }
-      success = await this._drive(blocks);
+      success = await this._preflightAgentProfiles(blocks) && await this._drive(blocks);
     } catch (error) {
       preserveFirstError(error);
       success = false;
@@ -1262,6 +1262,71 @@ export class ExecutionEngine {
     if (!live || live.status === 'exited') {
       throw new Error(this._agentLaunchExitMessage(name));
     }
+  }
+
+  /**
+   * Resolve every Agent Session account before opening any of them.
+   *
+   * A workflow outlives the accounts it names. An alias that was renamed in
+   * ai-agent-entrypoint, a local profile that was deleted, or a lane left
+   * unset by a half-finished edit all used to surface only when the run
+   * reached that block — which for a scheduled run means discovering it from
+   * a half-open run the next morning. Resolving the whole cast first turns
+   * that into one message before anything launches.
+   *
+   * Provider-neutral by construction: it compares ids against whatever the
+   * agent list reports, so routed Codex aliases and local Claude/Grok/Gemini
+   * profiles are checked the same way. A build without the listing (or a test
+   * harness) simply skips, because an unverifiable cast is not a failed one.
+   */
+  async _preflightAgentProfiles(blocks) {
+    const starts = (Array.isArray(blocks) ? blocks : [])
+      .filter(block => block?.type === 'agentStart');
+    if (starts.length === 0) return true;
+
+    const unset = starts.filter(block => !String(block.params?.profileId || '').trim());
+    if (unset.length > 0) {
+      this._log(
+        `❌ ${unset.length} Agent Session block(s) have no account selected. `
+        + `Pick an account in each before running.`,
+        'stderr'
+      );
+      return false;
+    }
+
+    const list = this._apiClient().listAgents;
+    if (typeof list !== 'function') return true;
+
+    let agents;
+    try {
+      agents = await list({});
+    } catch (error) {
+      // Discovery is advisory here. Refusing to run because the *check*
+      // failed would be a worse failure than the one it guards against.
+      this._log(`⚠️ Could not verify agent accounts before the run: ${error.message}`, 'system');
+      return true;
+    }
+
+    const known = new Set([
+      ...(Array.isArray(agents?.local) ? agents.local : []),
+      ...(Array.isArray(agents?.routed) ? agents.routed : []),
+    ].map(profile => profile?.id).filter(Boolean));
+
+    const wanted = [...new Set(starts.map(block => String(block.params.profileId).trim()))];
+    const missing = wanted.filter(id => !known.has(id));
+    if (missing.length === 0) return true;
+
+    // Routed discovery failing makes every routed alias look deleted. Say
+    // which of the two it is, because the fixes are completely different.
+    const detail = agents?.routedError
+      ? ` Routed account discovery also reported a problem, so a routed alias may exist but be unreachable right now.`
+      : '';
+    this._log(
+      `❌ This workflow names ${missing.length} account(s) that are not available: `
+      + `${missing.join(', ')}.${detail} Nothing was launched.`,
+      'stderr'
+    );
+    return false;
   }
 
   /** One wording for "the lane died while starting", used by both checks. */

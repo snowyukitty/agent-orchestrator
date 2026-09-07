@@ -9,6 +9,7 @@ const {
   LEGACY_STORAGE_NAME,
   MIGRATION_MARKER,
   prepareUserData,
+  resolveExistingUserData,
 } = require('../src/main/user-data');
 
 function fixture(t) {
@@ -115,4 +116,38 @@ test('smoke and self-test storage is isolated from production data', (t) => {
   assert.equal(result.temporary, true);
   assert.equal(result.path, path.join(fx.tempRoot, 'agent-orchestrator-tests', '47'));
   assert.equal(fs.existsSync(fx.canonical), false);
+});
+
+test('read-only resolution finds the directory the app reads today', (t) => {
+  const fx = fixture(t);
+
+  // Nothing exists yet: name the canonical directory, but do not create it.
+  const fresh = resolveExistingUserData({ appDataRoot: fx.appDataRoot });
+  assert.equal(fresh.path, fx.canonical);
+  assert.equal(fresh.exists, false);
+  assert.equal(fresh.migrationPending, false);
+  assert.equal(fs.existsSync(fx.canonical), false, 'resolution must not create anything');
+
+  // Legacy-only: that is what the app is still reading, and it owes a migration.
+  writeJson(path.join(fx.legacy, 'settings.json'), { theme: 'dark' });
+  const pending = resolveExistingUserData({ appDataRoot: fx.appDataRoot });
+  assert.equal(pending.path, fx.legacy);
+  assert.equal(pending.canonical, false);
+  assert.equal(pending.migrationPending, true);
+  assert.equal(fs.existsSync(fx.canonical), false);
+
+  // Once the app has migrated, canonical wins and nothing is pending.
+  prepareUserData({ appDataRoot: fx.appDataRoot, tempRoot: fx.tempRoot, pid: 91 });
+  const migrated = resolveExistingUserData({ appDataRoot: fx.appDataRoot });
+  assert.equal(migrated.path, fx.canonical);
+  assert.equal(migrated.canonical, true);
+  assert.equal(migrated.migrationPending, false);
+  assert.ok(fs.existsSync(path.join(fx.canonical, MIGRATION_MARKER)));
+});
+
+test('read-only resolution rejects a relative application data root', () => {
+  assert.throws(
+    () => resolveExistingUserData({ appDataRoot: 'relative/path' }),
+    /absolute path/
+  );
 });

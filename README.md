@@ -7,6 +7,7 @@ hand the collected results to the next stage explicitly.
 **[Field guide](https://snowyukitty.github.io/agent-orchestrator/)** ·
 [Getting started](docs/getting-started.md) ·
 [Features](docs/features.md) ·
+[Authoring workflows](docs/authoring-workflows.md) ·
 [Changelog](CHANGELOG.md) ·
 [Roadmap](docs/roadmap.md)
 

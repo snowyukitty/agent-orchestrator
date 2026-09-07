@@ -120,6 +120,7 @@ export async function runSelfTest() {
     await testAbortSpawnRaces(eq, ok);
     await testRoutedWorkflowBootstrap(eq, ok);
     await testAgentLaunchLiveness(eq, ok);
+    await testAgentProfilePreflight(eq, ok);
     await testSchedule(eq);
     await testSessionPromptManagement(eq, ok);
     await testTyping(eq, ok);
@@ -1279,6 +1280,117 @@ async function testAgentLaunchLiveness(eq, ok) {
   ok('vanished-lane-names-the-cause',
     !!sendMessage && sendMessage.includes('live workflow lane'));
   eq('vanished-lane-is-never-typed-into', typedAfterDeath, false);
+}
+
+// ── Agent account preflight ──────────────────────────────────
+// A workflow outlives the accounts it names, and a scheduled run discovers
+// that at 05:15. The whole cast is resolved before anything launches.
+async function testAgentProfilePreflight(eq, ok) {
+  const preflightEngine = (agentsResult, blocks) => {
+    const created = [];
+    const errors = [];
+    const live = [];
+    const engine = new ExecutionEngine({
+      getSessions: () => live,
+      api: {
+        listAgents: async () => {
+          if (agentsResult instanceof Error) throw agentsResult;
+          return agentsResult;
+        },
+        createSession: async params => {
+          created.push(params.profileId);
+          return {
+            id: `s-${created.length}`,
+            pid: 100 + created.length,
+            session: {
+              id: `s-${created.length}`,
+              profileId: params.profileId,
+              label: params.profileId,
+              agent: 'claude',
+              assurance: 'L2-env',
+              resultInputCapable: false,
+              status: 'running',
+            },
+          };
+        },
+        waitForSession: async () => ({ reason: 'idle', outputSeq: 1 }),
+        cancelSessionWait: async () => true,
+        killProcess: async () => true,
+      },
+    });
+    engine.onLog = (message, type) => { if (type === 'stderr') errors.push(message); };
+    // Adopting the lane is what makes it live; without it the launch liveness
+    // proof would fail these cases for the wrong reason.
+    engine.onSessionSpawned = session => live.push(session);
+    return {
+      engine,
+      created,
+      run: async () => {
+        await engine.execute(blocks, '.', { runId: 'run-preflight' });
+        return errors.join(' | ');
+      },
+    };
+  };
+
+  const twoLanes = [
+    { id: 'p1', type: 'agentStart', params: { profileId: 'codex:a', settleMs: 0 } },
+    { id: 'p2', type: 'agentStart', params: { profileId: 'claude:gone', settleMs: 0 } },
+  ];
+
+  // One unavailable account stops the whole run before any PTY is opened.
+  const missing = preflightEngine(
+    { local: [{ id: 'claude:work' }], routed: [{ id: 'codex:a' }], routedError: null },
+    twoLanes
+  );
+  const missingMessage = await missing.run();
+  eq('preflight-missing-account-fails-the-run', missing.engine.lastOutcome.status, 'failed');
+  eq('preflight-missing-account-opens-nothing', missing.created, []);
+  ok('preflight-missing-account-is-named', missingMessage.includes('claude:gone'));
+  ok('preflight-does-not-blame-a-healthy-account', !missingMessage.includes('codex:a'));
+
+  // Failed routed discovery makes every alias look deleted; say which it is.
+  const unreachable = preflightEngine(
+    { local: [], routed: [], routedError: 'discovery failed' },
+    [{ id: 'p1', type: 'agentStart', params: { profileId: 'codex:a', settleMs: 0 } }]
+  );
+  const unreachableMessage = await unreachable.run();
+  ok('preflight-distinguishes-unreachable-from-deleted',
+    unreachableMessage.includes('unreachable'));
+
+  // A lane left unset by a half-finished edit is caught the same way.
+  const unset = preflightEngine(
+    { local: [], routed: [{ id: 'codex:a' }], routedError: null },
+    [
+      { id: 'p1', type: 'agentStart', params: { profileId: 'codex:a', settleMs: 0 } },
+      { id: 'p2', type: 'agentStart', params: { profileId: '', settleMs: 0 } },
+    ]
+  );
+  const unsetMessage = await unset.run();
+  eq('preflight-unset-account-opens-nothing', unset.created, []);
+  ok('preflight-unset-account-is-explained', unsetMessage.includes('no account selected'));
+
+  // A fully resolvable cast runs untouched.
+  const healthy = preflightEngine(
+    { local: [{ id: 'claude:work' }], routed: [{ id: 'codex:a' }], routedError: null },
+    [
+      { id: 'p1', type: 'agentStart', params: { profileId: 'codex:a', settleMs: 0 } },
+      { id: 'p2', type: 'agentStart', params: { profileId: 'claude:work', settleMs: 0 } },
+    ]
+  );
+  const healthyMessage = await healthy.run();
+  eq('preflight-resolvable-cast-runs', healthy.engine.lastOutcome.status, 'completed');
+  eq('preflight-resolvable-cast-opens-both', healthy.created, ['codex:a', 'claude:work']);
+  eq('preflight-resolvable-cast-is-quiet', healthyMessage, '');
+
+  // The check is advisory: if listing itself breaks, the run still proceeds.
+  const broken = preflightEngine(
+    new Error('agent listing unavailable'),
+    [{ id: 'p1', type: 'agentStart', params: { profileId: 'codex:a', settleMs: 0 } }]
+  );
+  await broken.run();
+  eq('preflight-failure-does-not-block-the-run',
+    broken.engine.lastOutcome.status, 'completed');
+  eq('preflight-failure-still-opens-the-lane', broken.created, ['codex:a']);
 }
 
 // ── Schedule time math ───────────────────────────────────────

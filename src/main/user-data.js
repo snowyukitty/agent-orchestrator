@@ -199,6 +199,42 @@ function prepareUserData({
   };
 }
 
+/**
+ * Locate the directory the app is *currently* reading, without touching disk.
+ *
+ * `prepareUserData` is the app's own startup path: it creates directories and
+ * performs the one-time legacy migration. Any other reader — a CLI, a script,
+ * an agent installing a workflow — must not do either. Creating the canonical
+ * directory early is the specific trap: `prepareUserData` skips migration
+ * whenever that directory already exists, so a well-meaning `mkdir` strands
+ * the user's real settings and workflows in the legacy location.
+ *
+ * Returns the directory to read or write today, plus whether the app still
+ * owes it a migration (in which case anything written to the legacy directory
+ * is carried forward on the next launch).
+ */
+function resolveExistingUserData({
+  appDataRoot,
+  fsImpl = fs,
+  pathImpl = path,
+} = {}) {
+  if (!pathImpl.isAbsolute(appDataRoot || '')) {
+    fail('USER_DATA_PATH_INVALID', 'Application data root must be an absolute path.');
+  }
+  const canonicalPath = pathImpl.join(appDataRoot, CANONICAL_STORAGE_NAME);
+  const legacyPath = pathImpl.join(appDataRoot, LEGACY_STORAGE_NAME);
+
+  if (isDirectory(fsImpl, canonicalPath)) {
+    return { path: canonicalPath, canonical: true, migrationPending: false, exists: true };
+  }
+  if (isDirectory(fsImpl, legacyPath)) {
+    // The app has not launched since the rename. It reads the legacy directory
+    // now and copies app-owned JSON forward on its next start.
+    return { path: legacyPath, canonical: false, migrationPending: true, exists: true };
+  }
+  return { path: canonicalPath, canonical: true, migrationPending: false, exists: false };
+}
+
 module.exports = {
   CANONICAL_STORAGE_NAME,
   LEGACY_STORAGE_NAME,
@@ -207,4 +243,5 @@ module.exports = {
   UserDataMigrationError,
   hasOwnedData,
   prepareUserData,
+  resolveExistingUserData,
 };

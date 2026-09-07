@@ -19,6 +19,16 @@ form for people deciding whether a specific behavior exists.
   to still be running. A lane whose agent exited while starting fails that
   block by name instead of being handed to a later Send. A still-painting
   provider at the timeout keeps its lane and logs a warning.
+- **Account Preflight**: A run resolves every `Agent Session` account against
+  live discovery before it opens anything. A workflow naming a renamed routed
+  alias, a deleted local profile, or a lane left unset fails at once and by
+  name, with nothing launched — instead of half-running and stranding open
+  sessions. A failure of the check itself never blocks the run.
+- **Headless Authoring**: `npm run workflow` validates a workflow document
+  with the app's own loader, resolves its accounts, reports its next trigger,
+  and installs it into the correct user-data directory — for workflows written
+  by a script or an agent rather than in the editor. See
+  [authoring workflows](authoring-workflows.md).
 - **Signal-Aware Team Stages**: `Send to Agent` can prompt one session or all workflow-owned agent sessions. A single `Join Agents` barrier then tracks every workflow-owned session prompted since the previous wait/join and reports live `N / M ready` progress. Timeout and premature exit stop downstream blocks by default without closing the remaining sessions; an explicit continue policy keeps the warning-and-continue behavior when that is intentional.
 - **Explicit Result Handoff**: A Send block can issue a unique bounded result
   contract to every targeted lane. A named Join captures complete framed

@@ -75,6 +75,7 @@ src/main/            Main-process modules, CommonJS, unit-tested with node --tes
   store.js             atomic JSON read/write
   validate.js          IPC payload validation
   promo-capture.js     inert real-renderer capture fixture + hashed receipts
+  user-data.js         canonical/legacy user-data location and one-time migration
 src/js/              Renderer, ES modules, tested by the Electron self-test
   app.js               wiring: editor, toolbar, scheduler, workflow storage
   sessions.js          SessionManager: one xterm per session, tabs, quick-send
@@ -85,6 +86,8 @@ src/js/              Renderer, ES modules, tested by the Electron self-test
   typing.js            human-paced typing, shared by engine and quick-send
   schedule.js          pure scheduling time math
   selftest.js          the renderer regression suite
+scripts/
+  workflow-tool.mjs    headless workflow authoring: validate, resolve accounts, install
 tests/               node --test suites for src/main/
 ```
 
@@ -95,6 +98,7 @@ npm run check       # syntax-check every JS file under the source roots
 npm test            # test:unit (node --test) + test:app (Electron self-test)
 npm run smoke       # Electron startup/shutdown cleanup path
 npm run verify      # complete checkpoint gate: check, tests, audit, build/package verification
+npm run workflow -- check <file>   # headless: validate a workflow, resolve its accounts, show its next trigger
 npm run verify:direct-live -- --confirm-live  # opt-in real-provider acceptance; never automated
 ```
 

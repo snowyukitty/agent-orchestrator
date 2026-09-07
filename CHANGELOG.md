@@ -19,6 +19,29 @@ the product story; this file keeps the history.
   lane is alive, which is what later blocks depend on — but it is logged. A
   fan-out that finds a lane gone between resolving its targets and writing to
   them now says so instead of surfacing an unexplained typing failure.
+- **A run resolves its whole cast before it opens anything**: every Agent
+  Session account is checked against live discovery first, so a workflow that
+  outlived an alias rename or a deleted local profile fails immediately and by
+  name instead of half-running and stranding open sessions — the difference
+  between one clear message and a surprise found the next morning. The check
+  is provider-neutral: routed Codex aliases and local Claude/Grok/Gemini
+  profiles are resolved the same way. A lane left unset by a half-finished
+  edit is caught here too, and a failure of the check itself never blocks a
+  run, because an unverifiable cast is not a failed one.
+- **Headless workflow authoring** (`npm run workflow`): `where`, `list`,
+  `validate`, `check`, and `install`, so a workflow written outside the editor
+  — by a script, or by an agent acting for you — is validated by the app's own
+  loader, has its accounts resolved against real discovery, and lands in the
+  right directory. `check` and `install` exit non-zero, so they gate a script.
+  `install` also encodes the user-data rule that a hand-rolled `mkdir` gets
+  wrong: creating the canonical directory early cancels the pending migration
+  and strands the real settings and workflows in the pre-rename one. New
+  `docs/authoring-workflows.md` carries the schema, the block catalog, and the
+  verification steps a document cannot promise on its own.
+- **`schedule` follows the repository's module convention**: the implementation
+  moved to `schedule.mjs` with `schedule.js` re-exporting it, matching
+  `blocks` and `workflow-document`, so Node can import the scheduling clock
+  without a module-type warning and the tool shares one clock with the editor.
 - **Usage-window pre-warm for two accounts** ships as a template: one lane per
   account, one `Send to All`, one `Join Agents`, defaulting to a daily cron,
   because a missed one-shot pre-warm is simply lost. Its barrier continues on
