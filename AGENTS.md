@@ -113,7 +113,14 @@ Manual checks that the suites cannot cover:
 - two accounts of one agent keep separate logins across concurrent sessions;
 - `codex doctor <alias>` inside a routed tab reports
   `activeHomeMatches=True activeSqliteMatches=True`;
-- Stop mid-run leaves no orphaned `pwsh` / agent process.
+- Stop mid-run leaves no orphaned `pwsh` / agent process;
+- an unattended run's *effect* is verified at the provider, not in the Run
+  Journal. A block reaching `completed` means the engine got past it. For a
+  usage-window pre-warm that means reading the account's own fresh
+  `window_minutes: 300` / `used_percent: 0` rate-limit block; a lane that came
+  up onto a trust, login, or quota screen is alive, quiet, and did no work.
+  Block-error detail lives in an encrypted journal proof and is readable only
+  through protected-evidence inspection in the app.
 
 ## Conventions
 
