@@ -1,0 +1,132 @@
+{
+  "baseline": "e0cca66",
+  "current": "3873319",
+  "scenarios": [
+    {
+      "size": "1440x900",
+      "before": {
+        "viewport": [
+          1440,
+          900
+        ],
+        "fullyVisibleSteps": 6,
+        "stepHeights": [
+          89,
+          63,
+          87,
+          147,
+          104,
+          63
+        ],
+        "paletteWidth": 210,
+        "editorWidth": 726,
+        "terminalWidth": 500,
+        "headerHeight": 36,
+        "shellOverflow": false
+      },
+      "rejected": {
+        "viewport": [
+          1440,
+          900
+        ],
+        "fullyVisibleSteps": 3,
+        "stepHeights": [
+          144,
+          100,
+          142,
+          226,
+          167,
+          100
+        ],
+        "paletteWidth": 228,
+        "editorWidth": 848,
+        "terminalWidth": 360,
+        "headerHeight": 64,
+        "shellOverflow": false
+      },
+      "restored": {
+        "viewport": [
+          1440,
+          900
+        ],
+        "fullyVisibleSteps": 6,
+        "stepHeights": [
+          89,
+          63,
+          87,
+          141,
+          104,
+          63
+        ],
+        "paletteWidth": 210,
+        "editorWidth": 726,
+        "terminalWidth": 500,
+        "headerHeight": 36,
+        "shellOverflow": false
+      }
+    },
+    {
+      "size": "1100x700",
+      "before": {
+        "viewport": [
+          1100,
+          700
+        ],
+        "fullyVisibleSteps": 5,
+        "stepHeights": [
+          89,
+          63,
+          87,
+          147,
+          104,
+          63
+        ],
+        "paletteWidth": 180,
+        "editorWidth": 656,
+        "terminalWidth": 260,
+        "headerHeight": 36,
+        "shellOverflow": false
+      },
+      "rejected": {
+        "viewport": [
+          1100,
+          700
+        ],
+        "fullyVisibleSteps": 3,
+        "stepHeights": [
+          144,
+          100,
+          142,
+          226,
+          167,
+          100
+        ],
+        "paletteWidth": 196,
+        "editorWidth": 610,
+        "terminalWidth": 290,
+        "headerHeight": 64,
+        "shellOverflow": false
+      },
+      "restored": {
+        "viewport": [
+          1100,
+          700
+        ],
+        "fullyVisibleSteps": 5,
+        "stepHeights": [
+          89,
+          63,
+          87,
+          141,
+          104,
+          63
+        ],
+        "paletteWidth": 180,
+        "editorWidth": 656,
+        "terminalWidth": 260,
+        "headerHeight": 36,
+        "shellOverflow": false
+      }
+    }
+  ]
+}

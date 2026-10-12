@@ -20,9 +20,14 @@ any provider usage-window reset or additional allowance.
 
 The block library supports search, single-click insertion, keyboard activation,
 and drag-to-position. **Workflows**, **Templates**, **Agents**, and **Schedules**
-are in the top navigation; execution, saving, and export stay in the bottom bar.
+stay in the compact bottom toolbar alongside execution, saving, and export.
+The **Load** button opens the saved-workflow picker.
 Existing workflows and templates remain available. Templates that skip
 permission prompts are labeled in the picker.
+
+The original compact visual theme is restored. UI comparisons use real
+Chromium captures with identical workflows and synthetic accounts; run
+`npm run compare:ui` to regenerate [the evidence](docs/ui-comparison/README.md).
 
 ## Project Status
 

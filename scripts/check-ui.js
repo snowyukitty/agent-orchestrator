@@ -57,6 +57,13 @@ async function run() {
   await evaluate(() => { document.getElementById('hello-account').value = 'codex:demo'; document.getElementById('hello-form').requestSubmit(); });
   await settle();
   assert.equal(await evaluate(() => window.app.workflow.scheduleEnabled), false, 'Hello must begin as a disabled draft');
+  const countVisibleSteps = await evaluate(() => {
+    const canvas = document.getElementById('editor-canvas').getBoundingClientRect();
+    return [...document.querySelectorAll('.workflow-block')].filter(el => {
+      const r = el.getBoundingClientRect(); return r.top >= canvas.top && r.bottom <= canvas.bottom;
+    }).length;
+  });
+  assert.equal(countVisibleSteps, 6, 'Compact 1440px workspace must show all six hello steps');
   const callsBefore = await evaluate(() => window.api.testFixture.snapshot());
   await evaluate(() => {
     const savedTime = window.app.workflow.blocks[0].params.datetime;

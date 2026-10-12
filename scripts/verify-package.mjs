@@ -4,7 +4,9 @@ import { fileURLToPath } from 'node:url';
 import { extractFile, listPackage } from '@electron/asar';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const packageRoot = path.join(projectRoot, 'dist', 'AgentOrchestrator-win32-x64');
+const packageRoot = process.argv[2]
+  ? path.resolve(projectRoot, process.argv[2])
+  : path.join(projectRoot, 'dist', 'AgentOrchestrator-win32-x64');
 const asarPath = path.join(packageRoot, 'resources', 'app.asar');
 const executablePath = path.join(packageRoot, 'AgentOrchestrator.exe');
 

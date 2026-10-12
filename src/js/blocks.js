@@ -226,7 +226,7 @@ export function renderPaletteBlock(typeDef) {
   el.setAttribute('draggable', 'true');
 
   el.innerHTML = `
-    <span class="block-icon" aria-hidden="true">${esc(blockSymbol(typeDef.type))}</span>
+    <span class="block-icon" aria-hidden="true">${esc(typeDef.icon)}</span>
     <div class="block-info">
       <div class="block-label">${esc(typeDef.label)}</div>
       <div class="block-desc">${esc(typeDef.description)}</div>
@@ -254,7 +254,7 @@ export function renderWorkflowBlock(block, index) {
     <div class="block-stripe ${block.type}"></div>
     <div class="block-content">
       <div class="block-header">
-        <span class="block-icon" aria-hidden="true">${esc(blockSymbol(block.type))}</span>
+        <span class="block-icon" aria-hidden="true">${esc(def.icon)}</span>
         <span class="block-type-label">${esc(def.label)}</span>
       </div>
       <div class="block-params">${paramsHtml}</div>
@@ -360,9 +360,6 @@ function buildParamField(paramDef, params, blockId) {
   `;
 }
 
-function blockSymbol(type) {
-  return { schedule: '◷', directory: '▱', agentStart: '◇', agentSend: '↗', agentWait: '◌', command: '›_', wait: 'Ⅱ', input: '↳', keypress: '⌘', loop: '↻', loopEnd: '↲', log: '≡', sleep: '☾' }[type] || '·';
-}
 
 // ── Helpers ──────────────────────────────────────────────────
 

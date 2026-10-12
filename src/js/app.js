@@ -1196,7 +1196,7 @@ class App {
       tabs: document.getElementById('session-tabs'),
       target: document.getElementById('quick-target'),
     });
-    this._applyTerminalTheme('dark'); // default until settings load
+    this._applyTerminalTheme('ps'); // default until settings load
 
     // The app owns the single, persistent set of process IPC listeners.
     // They are registered exactly once here and never removed, so terminals
