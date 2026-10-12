@@ -22,10 +22,14 @@ npm run verify
 npm run smoke
 ```
 
-`npm run verify` checks syntax and static docs, runs unit and Electron self-tests,
+`npm run verify` checks syntax and static docs, runs unit, Electron self-tests,
+and Chromium UI checks with synthetic accounts and a mocked process API,
 audits dependencies, builds the Windows package, and verifies its identity and
 privacy boundary. `npm run smoke` separately exercises normal startup and quit
 cleanup.
+
+`npm run test:ui` writes screenshot artifacts to a temporary directory and
+prints its location. It never uses production IPC, real PTYs, or account homes.
 
 Please also:
 

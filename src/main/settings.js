@@ -14,7 +14,7 @@ const SCHEMA_VERSION = 1;
 
 const DEFAULTS = Object.freeze({
   schemaVersion: SCHEMA_VERSION,
-  theme: 'ps',
+  theme: 'dark',
   /** Absolute path to the ai-agent-entrypoint checkout; '' = auto-detect. */
   entrypointPath: '',
   /** { x, y, width, height } or null to let Electron centre a default. */

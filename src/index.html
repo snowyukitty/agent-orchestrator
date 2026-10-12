@@ -7,15 +7,24 @@
   <title>Agent Orchestrator</title>
   <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css">
   <link rel="stylesheet" href="styles/main.css">
+  <link rel="stylesheet" href="styles/workspace.css">
 </head>
 <body>
 
   <!-- ═══ Title Bar ═══ -->
   <header class="titlebar" id="titlebar">
     <div class="titlebar-drag">
-      <span class="titlebar-icon">🎛️</span>
+      <img class="titlebar-icon" src="assets/icon.png" alt="" width="24" height="24">
       <span class="titlebar-text">Agent Orchestrator</span>
+      <span class="titlebar-divider"></span>
+      <span class="titlebar-context">Workspace</span>
     </div>
+    <nav class="workspace-nav" aria-label="Workspace">
+      <button class="btn btn-secondary" id="btn-load">Workflows</button>
+      <button class="btn btn-secondary" id="btn-templates">Templates</button>
+      <button class="btn btn-secondary" id="btn-agents" title="Agent accounts and sessions">Agents <span class="sched-badge" id="agents-badge">0</span></button>
+      <button class="btn btn-secondary" id="btn-schedules" title="Scheduled workflow runs">Schedules <span class="sched-badge" id="sched-badge">0</span></button>
+    </nav>
     <div class="titlebar-version" id="app-version">—</div>
   </header>
 
@@ -33,36 +42,55 @@
     <!-- ── Left Panel: Block Palette ── -->
     <aside class="panel panel-palette" id="palette-panel">
       <div class="panel-header">
-        <h2>⬡ Blocks</h2>
+        <h2>Block library</h2><span class="panel-caption">BUILD</span>
       </div>
+      <div class="palette-search"><input id="block-search" type="search" placeholder="Find a block…" aria-label="Find a block" autocomplete="off"></div>
+      <p class="palette-no-results hidden" id="palette-no-results" role="status">No matching blocks.</p>
       <div class="palette-blocks" id="palette-blocks">
         <!-- Palette blocks rendered by JS -->
       </div>
       <div class="palette-footer">
-        <span class="palette-hint">Double-click or drag to add</span>
+        <span class="palette-hint">Click to add · Drag to position</span>
       </div>
     </aside>
 
     <!-- ── Center Panel: Workflow Editor ── -->
     <main class="panel panel-editor" id="editor-panel">
-      <div class="panel-header">
+      <div class="panel-header editor-heading">
         <div class="workflow-info">
+          <span class="editor-eyebrow">WORKFLOW</span>
           <input type="text" class="workflow-name" id="workflow-name"
-                 value="New Workflow" placeholder="Workflow Name" spellcheck="false">
+                 value="New Workflow" placeholder="Workflow Name" spellcheck="false" aria-label="Workflow name">
           <span class="dirty-dot hidden" id="dirty-dot" title="Unsaved changes">●</span>
           <span class="workflow-status" id="workflow-status">Idle</span>
         </div>
         <div class="editor-actions">
           <button class="btn btn-icon" id="btn-clear" title="Clear All Blocks">
-            <span>🗑️</span>
+            <span aria-hidden="true">×</span>
           </button>
         </div>
       </div>
+      <div class="editor-meta"><span id="block-count">0 steps</span><span>Runs from top to bottom</span></div>
+      <div class="schedule-draft hidden" id="schedule-draft">DRAFT · Review the account and time below. Save &amp; enable schedule when ready.</div>
       <div class="editor-canvas" id="editor-canvas">
         <div class="editor-empty" id="editor-empty">
-          <div class="empty-icon">🧱</div>
-          <p class="empty-title">Build Your Automation</p>
-          <p class="empty-hint">Drag blocks from the palette or double-click to add</p>
+          <span class="welcome-eyebrow">YOUR AGENTS. YOUR RHYTHM.</span>
+          <h1 class="empty-title">A little planning.<br>A smoother workday.</h1>
+          <p class="empty-hint">Turn a prompt, a command, or a routine into a workflow you can run on your terms.</p>
+          <div class="starter-cards">
+            <button class="starter-card starter-featured" id="btn-scheduled-hello">
+              <span class="starter-symbol" aria-hidden="true">◷</span><span class="starter-tag">SCHEDULE AHEAD</span>
+              <strong>Send a scheduled hello</strong>
+              <span>Choose an account and a time. Let a simple prompt get the day started.</span>
+              <span class="starter-link">Set up a hello <span aria-hidden="true">↗</span></span>
+            </button>
+            <button class="starter-card" id="btn-starter-command">
+              <span class="starter-symbol" aria-hidden="true">›_</span><span class="starter-tag">START SMALL</span>
+              <strong>Run a command</strong><span>A working directory and one command. The simplest place to begin.</span>
+              <span class="starter-link">Use this starter <span aria-hidden="true">↗</span></span>
+            </button>
+          </div>
+          <div class="welcome-footer"><span>Already have a routine?</span><button class="text-button" id="btn-welcome-templates">Browse all templates →</button></div>
         </div>
         <div class="loop-validation hidden" id="loop-validation"></div>
         <div class="block-list" id="block-list">
@@ -79,21 +107,21 @@
       <!-- Tab bar -->
       <div class="panel-header output-tabs">
         <div class="tab-group">
-          <button class="tab-btn active" id="tab-log" data-tab="log">📋 Log</button>
-          <button class="tab-btn" id="tab-term" data-tab="term">⬡ Terminal</button>
+          <button class="tab-btn active" id="tab-log" data-tab="log">Activity</button>
+          <button class="tab-btn" id="tab-term" data-tab="term">Terminal</button>
         </div>
         <div class="tab-actions">
           <button class="btn btn-icon btn-sm" id="btn-clear-log" title="Clear Log">
-            <span>🧹</span>
+            <span aria-hidden="true">↺</span>
           </button>
           <button class="btn btn-icon btn-sm" id="btn-clear-terminal" title="Clear Terminal">
-            <span>🗑️</span>
+            <span aria-hidden="true">×</span>
           </button>
         </div>
       </div>
       <!-- Log pane -->
       <div class="output-log" id="output-log">
-        <div class="log-line system">❯ Ready. Build a workflow and hit <strong>▶ Run</strong>.</div>
+        <div class="activity-welcome"><span class="panel-caption">ACTIVITY</span><p>Everything in its own time.</p><span>Run a workflow to follow each step here.</span></div>
       </div>
       <!-- Horizontal resizer -->
       <div class="resizer-h" id="resizer-h"></div>
@@ -109,11 +137,12 @@
       <div class="output-term" id="terminal-output"></div>
 
       <!-- Quick-send: fire a prompt at one agent, one account, or all of them -->
+      <div class="quick-send-label">QUICK SEND <span>To your live sessions</span></div>
       <div class="quick-send" id="quick-send">
         <select class="quick-target" id="quick-target" title="Where to send"></select>
         <input type="text" class="quick-input" id="quick-input" spellcheck="false"
                placeholder="Type a command or prompt, then Enter…">
-        <button class="btn btn-primary btn-sm" id="btn-quick-send" title="Send (Enter)">⏎ Send</button>
+        <button class="btn btn-primary btn-sm" id="btn-quick-send" title="Send (Enter)">Send ↗</button>
       </div>
     </aside>
   </div>
@@ -130,27 +159,15 @@
     </div>
     <div class="toolbar-center">
       <button class="btn btn-secondary" id="btn-save">
-        <span>💾</span> Save
-      </button>
-      <button class="btn btn-secondary" id="btn-load">
-        <span>📂</span> Load
-      </button>
-      <button class="btn btn-secondary" id="btn-templates" title="Start from a pre-built template">
-        <span>🧩</span> Templates
+        Save
       </button>
       <button class="btn btn-secondary" id="btn-export">
-        <span>📤</span> Export
-      </button>
-      <button class="btn btn-secondary" id="btn-agents" title="Agent accounts and sessions">
-        <span>🤖</span> Agents <span class="sched-badge" id="agents-badge">0</span>
-      </button>
-      <button class="btn btn-secondary" id="btn-schedules" title="Scheduled workflow runs">
-        <span>⏱</span> Schedules <span class="sched-badge" id="sched-badge">0</span>
+        Export
       </button>
       <span class="schedule-next" id="schedule-next"></span>
       <select id="theme-selector" class="theme-select" title="Terminal Theme">
+        <option value="dark">Terminal · Dark</option>
         <option value="ps">PowerShell Blue</option>
-        <option value="dark">Hacker Dark</option>
         <option value="light">Light Mode</option>
       </select>
     </div>
@@ -160,19 +177,41 @@
     </div>
   </footer>
 
+  <!-- Scheduled hello creates an editable draft; it does not send a prompt. -->
+  <div class="modal-overlay hidden" id="hello-modal">
+    <div class="modal-card hello-card" role="dialog" aria-modal="true" aria-labelledby="hello-title">
+      <div class="modal-header"><div><span class="welcome-eyebrow">SCHEDULE AHEAD</span><h2 id="hello-title">A hello, before you begin.</h2></div><button class="btn btn-icon" id="btn-close-hello" aria-label="Close scheduled hello">×</button></div>
+      <div class="modal-body">
+        <p class="hello-intro">Send a short prompt to an account at a time you choose. Review the workflow before saving its schedule.</p>
+        <form id="hello-form" class="agent-form">
+          <label class="agent-field"><span>1 · Choose an account</span><select id="hello-account" required><option value="">Choose an account…</option></select><small id="hello-account-hint">Account assurance is shown beside each name.</small></label>
+          <button type="button" class="text-button" id="btn-hello-accounts">Manage accounts →</button>
+          <div class="hello-time-row">
+            <label class="agent-field"><span>2 · Send at</span><input id="hello-time" type="datetime-local" required><small id="hello-timezone"></small></label>
+            <label class="agent-field"><span>Repeat</span><select id="hello-repeat"><option value="once">Once</option><option value="cron">Every day</option></select></label>
+          </div>
+          <label class="agent-field"><span>3 · Your prompt</span><input id="hello-prompt" type="text" value="hello. reply ok only." required maxlength="4000" spellcheck="false"></label>
+          <div class="hello-expectations"><strong>You stay in control.</strong><p>The app must be running and your computer awake. This schedules a prompt; usage limits and reset times are determined by your provider.</p></div>
+          <div class="agent-form-error hidden" id="hello-error" role="alert"></div>
+        </form>
+      </div>
+      <div class="modal-footer"><span class="modal-hint">Creates a draft. Nothing is sent now.</span><button class="btn btn-primary" type="submit" form="hello-form" id="btn-create-hello">Create workflow →</button></div>
+    </div>
+  </div>
+
   <!-- ═══ Scheduled Runs Modal ═══ -->
   <div class="modal-overlay hidden" id="schedule-modal">
     <div class="modal-card">
       <div class="modal-header">
-        <h2>⏱ Scheduled Runs</h2>
+        <h2>Scheduled runs</h2>
         <button class="btn btn-icon btn-sm" id="btn-close-schedules" title="Close">✕</button>
       </div>
       <div class="modal-body" id="schedule-list">
         <!-- Scheduled workflow rows rendered by JS -->
       </div>
       <div class="modal-footer">
-        <span class="modal-hint">Workflows with a <strong>Schedule</strong> block appear here. Save a workflow to keep it scheduled across restarts.</span>
-        <button class="btn btn-secondary btn-sm" id="btn-refresh-schedules" title="Reload from disk">🔄 Refresh</button>
+        <span class="modal-hint">Pause stops future runs; Stop ends the current workflow. Save a workflow to keep its schedule across restarts.</span>
+        <button class="btn btn-secondary btn-sm" id="btn-refresh-schedules" title="Reload from disk">Refresh</button>
       </div>
     </div>
   </div>
@@ -181,7 +220,7 @@
   <div class="modal-overlay hidden" id="workflows-modal">
     <div class="modal-card">
       <div class="modal-header">
-        <h2>📁 My Workflows</h2>
+        <h2>My workflows</h2>
         <button class="btn btn-icon btn-sm" id="btn-close-workflows" title="Close">✕</button>
       </div>
       <div class="modal-body" id="workflows-list">
@@ -190,7 +229,7 @@
       <div class="modal-footer">
         <span class="modal-hint">Saved workflows live in your app data folder. Click one to open it.</span>
         <div class="modal-footer-actions">
-          <button class="btn btn-secondary btn-sm" id="btn-import-workflow" title="Open a .json from disk">📥 Import file…</button>
+          <button class="btn btn-secondary btn-sm" id="btn-import-workflow" title="Open a .json from disk">Import file…</button>
           <button class="btn btn-primary btn-sm" id="btn-new-workflow" title="Start a blank workflow">＋ New</button>
         </div>
       </div>
@@ -201,7 +240,7 @@
   <div class="modal-overlay hidden" id="agents-modal">
     <div class="modal-card modal-wide">
       <div class="modal-header">
-        <h2>🤖 Agent Accounts</h2>
+        <h2>Agent accounts</h2>
         <button class="btn btn-icon btn-sm" id="btn-close-agents" title="Close">✕</button>
       </div>
 
@@ -223,7 +262,7 @@
                      placeholder="Auto-detect a sibling ai-agent-entrypoint checkout"
                      spellcheck="false">
               <button class="btn btn-icon btn-sm" id="btn-browse-entrypoint"
-                      type="button" title="Choose ai-agent-entrypoint folder">📂</button>
+                      type="button" title="Choose ai-agent-entrypoint folder">…</button>
               <button class="btn btn-secondary btn-sm" id="btn-save-entrypoint"
                       type="button">Save</button>
             </div>
@@ -253,7 +292,7 @@
       <div class="modal-footer">
         <span class="modal-hint" id="agents-hint">Click an account to start a session.</span>
         <div class="modal-footer-actions">
-          <button class="btn btn-secondary btn-sm" id="btn-refresh-agents" title="Re-run account discovery">🔄 Refresh</button>
+          <button class="btn btn-secondary btn-sm" id="btn-refresh-agents" title="Re-run account discovery">Refresh</button>
           <button class="btn btn-primary btn-sm" id="btn-new-agent" title="Add a local profile">＋ New profile</button>
         </div>
       </div>
@@ -286,7 +325,7 @@
             <span>State directory</span>
             <span class="agent-dir-row">
               <input type="text" id="agent-field-home" placeholder="Pick a folder for this account…" spellcheck="false">
-              <button class="btn btn-icon btn-sm" id="btn-browse-home" type="button" title="Browse">📂</button>
+              <button class="btn btn-icon btn-sm" id="btn-browse-home" type="button" title="Browse">…</button>
             </span>
             <small id="agent-field-home-hint">Sets the agent's config/state directory for this session only.</small>
           </label>
@@ -298,7 +337,7 @@
             <span>Working directory</span>
             <span class="agent-dir-row">
               <input type="text" id="agent-field-cwd" placeholder="(workflow default)" spellcheck="false">
-              <button class="btn btn-icon btn-sm" id="btn-browse-cwd" type="button" title="Browse">📂</button>
+              <button class="btn btn-icon btn-sm" id="btn-browse-cwd" type="button" title="Browse">…</button>
             </span>
           </label>
           <div class="agent-form-error hidden" id="agent-form-error"></div>
@@ -308,7 +347,7 @@
         <span class="modal-hint">Paths and flags only. Credentials stay in the agent's own state directory.</span>
         <div class="modal-footer-actions">
           <button class="btn btn-secondary btn-sm" id="btn-cancel-agent">Cancel</button>
-          <button class="btn btn-primary btn-sm" id="btn-save-agent">💾 Save profile</button>
+          <button class="btn btn-primary btn-sm" id="btn-save-agent">Save profile</button>
         </div>
       </div>
     </div>
@@ -318,11 +357,12 @@
   <div class="modal-overlay hidden" id="template-modal">
     <div class="modal-card">
       <div class="modal-header">
-        <h2>🧩 Templates</h2>
+        <h2>Templates</h2>
         <button class="btn btn-icon btn-sm" id="btn-close-templates" title="Close">✕</button>
       </div>
-      <div class="modal-body" id="template-list">
-        <!-- Template rows rendered by JS -->
+      <div class="modal-body">
+        <button class="template-hello" id="btn-template-hello"><span><strong>Send a scheduled hello</strong><span>Choose your account, time, and prompt with guided setup.</span></span><span aria-hidden="true">↗</span></button>
+        <div id="template-list"><!-- Template rows rendered by JS --></div>
       </div>
       <div class="modal-footer">
         <span class="modal-hint">Pick a template to replace the current workflow with a pre-built starting point.</span>

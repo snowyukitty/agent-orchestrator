@@ -4,6 +4,26 @@ A desktop orchestrator application built with Electron, allowing users to automa
 
 Several agents can run at once — one session per account — with a tab per session and a quick-send bar for ad-hoc prompts.
 
+![Agent Orchestrator workspace](docs/assets/workspace.png)
+
+## Getting started
+
+Launch opens a welcome screen. Choose **Send a scheduled hello** to select an
+account, a future local time, a repeat setting, and a short prompt. The setup
+creates a disabled draft: inspect its blocks, then select **Save & enable
+schedule**. The same setup is available from **Templates** at any time.
+
+Use **Schedules → Pause** to stop future runs; the paused setting persists for
+saved workflows. **Stop** ends a running workflow. The app must be running and
+the computer awake when a schedule is due. Scheduling a prompt does not promise
+any provider usage-window reset or additional allowance.
+
+The block library supports search, single-click insertion, keyboard activation,
+and drag-to-position. **Workflows**, **Templates**, **Agents**, and **Schedules**
+are in the top navigation; execution, saving, and export stay in the bottom bar.
+Existing workflows and templates remain available. Templates that skip
+permission prompts are labeled in the picker.
+
 ## Project Status
 
 **Version**: 0.4.0 · **Platform**: Windows x64 · **Runtime**: Electron 43

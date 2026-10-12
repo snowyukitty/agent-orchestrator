@@ -82,6 +82,24 @@ Manually opened sessions survive. Closing a session first requests graceful
 termination, then force-kills that exact process tree after a grace period.
 Application shutdown serializes native PTY exits to avoid ConPTY teardown races.
 
+## Scheduled hello and paused schedules
+
+`src/js/starters.js` builds a scheduled hello from explicit account and local
+time selections. It creates a workflow with `scheduleEnabled: false`; creating
+or exporting this draft cannot arm its schedule. The first **Save & enable
+schedule** validates a future time, persists an enabled copy, and only then
+enables the in-memory job. A failed save leaves the draft disabled.
+
+`scheduleEnabled` is additive: missing flags in older workflows mean enabled.
+Paused jobs remain visible but do not fire or keep the machine awake. Pause
+updates only the saved schedule flag, preserving unsaved editor changes.
+Unsaved workflows can be paused in memory without writing them to disk. Pause
+affects future triggers; it does not terminate an already running workflow.
+Existing manually added schedule blocks still arm while open in the editor.
+
+The starter consumes the existing profile list and launch blocks. It never
+constructs account environments, reads account homes, or infers usage limits.
+
 ## Persistence and identity migration
 
 App-owned data lives under `%APPDATA%/agent-orchestrator`:
@@ -108,8 +126,10 @@ settings or workflows.
 2. validate field-guide links, anchors, and static security constraints;
 3. run main-process unit tests;
 4. run the Electron renderer self-test without real accounts or PTYs;
-5. audit installed dependencies at moderate severity or above;
-6. build the Windows package and inspect its identity, contents, privacy
+5. run Chromium UI checks with mocked APIs and temporary storage, including
+   layout, disabled drafts, failed saves, persistent pauses, and dialog focus;
+6. audit installed dependencies at moderate severity or above;
+7. build the Windows package and inspect its identity, contents, privacy
    boundary, and unpacked native PTY module.
 
 Real account login separation, routed in-session identity, and orphan-process

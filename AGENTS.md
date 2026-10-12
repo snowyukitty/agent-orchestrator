@@ -85,7 +85,7 @@ tests/               node --test suites for src/main/
 
 ```powershell
 npm run check       # syntax-check every JS file under the source roots
-npm test            # test:unit (node --test) + test:app (Electron self-test)
+npm test            # unit + Electron self-test + mocked Chromium UI checks
 npm run smoke       # Electron startup/shutdown cleanup path
 npm run verify      # complete checkpoint gate: check, tests, audit, build/package verification
 ```

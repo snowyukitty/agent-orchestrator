@@ -14,6 +14,8 @@ import { computeJobTarget, isDue, formatCountdown, DEFAULT_GRACE_MS } from './sc
 import { runSelfTest } from './selftest.js';
 import { SessionManager, TARGET_ACTIVE } from './sessions.js';
 import { AgentsUI } from './agents-ui.js';
+import { buildScheduledHello, isScheduleEnabled } from './starters.js';
+import { initAccessibility } from './accessibility.js';
 
 class App {
   constructor() {
@@ -40,7 +42,6 @@ class App {
     }
 
     this._init();
-    this._loadDemoWorkflow();
     this._loadDefaultDirectory();
   }
 
@@ -61,12 +62,8 @@ class App {
   }
 
   // ── Templates ──────────────────────────────────────────────
-  // Pre-built starting points. The first one is loaded on launch; the rest are
-  // available from the Templates picker. Definitions live in templates.js.
-
-  _loadDemoWorkflow() {
-    if (TEMPLATES.length > 0) this._applyTemplate(TEMPLATES[0], { silent: true });
-  }
+  // Pre-built starting points are chosen explicitly from the welcome screen
+  // or Templates picker. Launch starts with an empty workflow.
 
   /** Instantiate a template into the editor, filling in dir/time placeholders. */
   _applyTemplate(tpl, { silent = false } = {}) {
@@ -112,6 +109,7 @@ class App {
     const close = () => modal?.classList.add('hidden');
 
     document.getElementById('btn-templates')?.addEventListener('click', open);
+    document.getElementById('btn-welcome-templates')?.addEventListener('click', open);
     document.getElementById('btn-close-templates')?.addEventListener('click', close);
     modal?.addEventListener('click', (e) => { if (e.target === modal) close(); });
 
@@ -131,13 +129,14 @@ class App {
     list.innerHTML = TEMPLATES.map(t => {
       const count = t.blocks.length;
       return `
-        <div class="tpl-row" data-template-id="${this._esc(t.id)}">
+        <button type="button" class="tpl-row" data-template-id="${this._esc(t.id)}">
           <div class="tpl-main">
             <div class="tpl-name">${this._esc(t.name)}</div>
             <div class="tpl-desc">${this._esc(t.description)}</div>
+            ${t.blocks.some(b => b.params?.command?.includes('bypassPermissions')) ? '<span class="tpl-warning">Skips permission prompts</span>' : ''}
           </div>
           <div class="tpl-meta">${count} block${count === 1 ? '' : 's'} ›</div>
-        </div>`;
+        </button>`;
     }).join('');
   }
 
@@ -177,10 +176,7 @@ class App {
    * so adding a modal never means adding another key listener.
    */
   _initModalDismissal() {
-    document.addEventListener('keydown', (e) => {
-      if (e.key !== 'Escape') return;
-      document.querySelectorAll('.modal-overlay:not(.hidden)').forEach(m => m.classList.add('hidden'));
-    });
+    initAccessibility();
   }
 
   async _refreshWorkflowsList() {
@@ -313,10 +309,72 @@ class App {
     this._initTemplates();
     this._initWorkflows();
     this._initAgents();
+    this._initStarters();
     this._initModalDismissal();
     this._initVersionLabel();
     this._restoreSettings();
     this._updateEmptyState();
+  }
+
+  _initStarters() {
+    const modal = document.getElementById('hello-modal');
+    const account = document.getElementById('hello-account');
+    const error = document.getElementById('hello-error');
+    const close = () => modal.classList.add('hidden');
+    document.getElementById('btn-starter-command').addEventListener('click', () => {
+      this._applyTemplate(TEMPLATES.find(t => t.id === 'tpl-quick-command'));
+    });
+    const openHello = async () => {
+      modal.classList.remove('hidden');
+      error.classList.add('hidden');
+      document.getElementById('hello-time').value = currentDateTimeLocalValue(new Date(Date.now() + 3600000));
+      document.getElementById('hello-timezone').textContent = `Local time · ${Intl.DateTimeFormat().resolvedOptions().timeZone}`;
+      account.innerHTML = '<option value="">Loading accounts…</option>';
+      document.getElementById('btn-create-hello').disabled = true;
+      await this.agents.refresh();
+      const profiles = this.agents.allProfiles().filter(p => p.agent !== 'shell' && p.status !== 'error');
+      account.replaceChildren(new Option('Choose an account…', ''));
+      for (const p of profiles) account.add(new Option(`${p.displayName} · ${p.assurance || 'Unknown assurance'}`, p.id));
+      document.getElementById('hello-account-hint').textContent = profiles.length
+        ? 'L1 routed · L2 env-only · L0 native. Choose a signed-in account.'
+        : 'No agent accounts available. Add a profile or configure routed accounts first.';
+      document.getElementById('btn-create-hello').disabled = profiles.length === 0;
+      if (!modal.classList.contains('hidden')) account.focus();
+    };
+    document.getElementById('btn-scheduled-hello').addEventListener('click', openHello);
+    document.getElementById('btn-template-hello').addEventListener('click', () => {
+      document.getElementById('template-modal').classList.add('hidden');
+      openHello();
+    });
+    document.getElementById('btn-close-hello').addEventListener('click', close);
+    document.getElementById('btn-hello-accounts').addEventListener('click', () => { close(); this.agents.open(); });
+    modal.addEventListener('click', e => { if (e.target === modal) close(); });
+    document.getElementById('hello-form').addEventListener('submit', e => {
+      e.preventDefault();
+      try {
+        const profile = this.agents.allProfiles().find(p => p.id === account.value && p.status !== 'error' && p.agent !== 'shell');
+        if (!profile) throw new Error('Choose an available agent account.');
+        const draft = buildScheduledHello({
+          profileId: profile.id,
+          datetime: document.getElementById('hello-time').value,
+          mode: document.getElementById('hello-repeat').value,
+          text: document.getElementById('hello-prompt').value,
+          directory: this._defaultDirectory || '.',
+        }, Date.now());
+        if (!this._confirmDiscardIfDirty()) return;
+        this.workflow = this._normalizeWorkflow({ ...draft, id: `wf-${Date.now()}` });
+        this._pendingHelloId = this.workflow.id;
+        document.getElementById('workflow-name').value = this.workflow.name;
+        this.renderBlocks();
+        this._markDirty();
+        this._onWorkflowChanged();
+        close();
+        this._flashStatus('Draft ready · review, then Save & enable', 6000);
+      } catch (err) {
+        error.textContent = err.message;
+        error.classList.remove('hidden');
+      }
+    });
   }
 
   /** Re-apply preferences persisted by a previous session. */
@@ -421,6 +479,7 @@ class App {
       defaultDirectory: typeof source.defaultDirectory === 'string'
         ? source.defaultDirectory
         : this._defaultDirectory,
+      scheduleEnabled: isScheduleEnabled(source),
       blocks,
     };
   }
@@ -488,26 +547,47 @@ class App {
 
   _initPalette() {
     const container = document.getElementById('palette-blocks');
+    const groups = [
+      ['Setup', ['schedule', 'directory', 'agentStart']],
+      ['Actions', ['agentSend', 'agentWait', 'command', 'input', 'keypress']],
+      ['Flow control', ['wait', 'loop', 'loopEnd', 'log', 'sleep']],
+    ];
+    for (const [name, types] of groups) {
+      const group = document.createElement('section');
+      group.className = 'palette-group';
+      const heading = document.createElement('h3');
+      heading.textContent = name;
+      group.appendChild(heading);
+      container.appendChild(group);
+      for (const type of types) {
+        const def = BLOCK_TYPES[type];
+        const el = renderPaletteBlock(def);
+        el.addEventListener('click', () => this.addBlock(type));
 
-    for (const [type, def] of Object.entries(BLOCK_TYPES)) {
-      const el = renderPaletteBlock(def);
+        // Drag from palette
+        el.addEventListener('dragstart', (e) => {
+          e.dataTransfer.setData('application/x-block-type', type);
+          e.dataTransfer.effectAllowed = 'copy';
+          el.style.opacity = '0.4';
+        });
 
-      // Double-click → add to end
-      el.addEventListener('dblclick', () => this.addBlock(type));
+        el.addEventListener('dragend', () => {
+          el.style.opacity = '1';
+        });
 
-      // Drag from palette
-      el.addEventListener('dragstart', (e) => {
-        e.dataTransfer.setData('application/x-block-type', type);
-        e.dataTransfer.effectAllowed = 'copy';
-        el.style.opacity = '0.4';
-      });
-
-      el.addEventListener('dragend', () => {
-        el.style.opacity = '1';
-      });
-
-      container.appendChild(el);
+        group.appendChild(el);
+      }
     }
+    document.getElementById('block-search').addEventListener('input', e => {
+      const query = e.target.value.trim().toLowerCase();
+      for (const group of container.children) {
+        for (const block of group.querySelectorAll('.palette-block')) {
+          block.classList.toggle('hidden', !block.textContent.toLowerCase().includes(query));
+        }
+        group.classList.toggle('hidden', !group.querySelector('.palette-block:not(.hidden)'));
+      }
+      document.getElementById('palette-no-results').classList.toggle('hidden', !!container.querySelector('.palette-block:not(.hidden)'));
+    });
   }
 
   // ── Editor Canvas Drop Zone ────────────────────────────────
@@ -1033,10 +1113,29 @@ class App {
     this._onWorkflowChanged();
 
     try {
-      const path = await window.api.saveWorkflow({ workflow: this.workflow });
+      const pending = this._pendingHelloId === this.workflow.id;
+      const saved = pending ? { ...this.workflow, scheduleEnabled: true } : this.workflow;
+      if (pending) {
+        const schedule = this._scheduleOf(saved);
+        if (!schedule || new Date(schedule.params.datetime).getTime() <= Date.now()) {
+          throw new Error('Choose a future schedule time before enabling this draft.');
+        }
+      }
+      const path = await window.api.saveWorkflow({ workflow: saved });
+      // Keep the saved copy available immediately for schedule-only updates,
+      // even before the periodic disk refresh has completed.
+      this._diskJobs = this._diskJobs.filter(wf => wf.id !== saved.id);
+      if (this._scheduleOf(saved)) this._diskJobs.push(this._normalizeWorkflow(JSON.parse(JSON.stringify(saved))));
+      if (this.workflow.id === saved.id && pending) {
+        this.workflow.scheduleEnabled = true;
+        this._pendingHelloId = null;
+        this._updateEmptyState();
+        this._onWorkflowChanged();
+      }
       this._termLog(`💾 Saved → ${path}`, 'system');
       this._setDirty(false);
-      this._flashStatus('Saved');
+      this._onWorkflowChanged();
+      this._flashStatus(pending ? 'Saved · schedule enabled' : 'Saved');
     } catch (err) {
       this._termLog(`❌ Save failed: ${err.message}`, 'stderr');
     }
@@ -1097,7 +1196,7 @@ class App {
       tabs: document.getElementById('session-tabs'),
       target: document.getElementById('quick-target'),
     });
-    this._applyTerminalTheme('ps'); // default until settings load
+    this._applyTerminalTheme('dark'); // default until settings load
 
     // The app owns the single, persistent set of process IPC listeners.
     // They are registered exactly once here and never removed, so terminals
@@ -1315,6 +1414,35 @@ class App {
     document.getElementById('btn-schedules')?.addEventListener('click', openModal);
     document.getElementById('btn-close-schedules')?.addEventListener('click', closeModal);
     document.getElementById('btn-refresh-schedules')?.addEventListener('click', () => this._refreshScheduledJobs());
+    document.getElementById('schedule-list')?.addEventListener('click', async e => {
+      const button = e.target.closest('[data-toggle-schedule]');
+      if (!button) return;
+      const job = this._scheduledJobs.find(j => j.id === button.dataset.toggleSchedule);
+      if (!job) return;
+      if (this._pendingHelloId === job.id) {
+        closeModal();
+        this._flashStatus('Review the draft, then Save & enable schedule', 6000);
+        return;
+      }
+      button.disabled = true;
+      const enabled = !isScheduleEnabled(job.workflow);
+      const stored = this._diskJobs.find(wf => wf.id === job.id);
+      const workflow = { ...(stored || job.workflow), scheduleEnabled: enabled };
+      const previous = job.workflow.scheduleEnabled;
+      job.workflow.scheduleEnabled = enabled;
+      try {
+        // A pause action changes only the stored schedule flag, preserving
+        // unsaved editor changes. Unsaved workflows remain memory-only.
+        if (stored) await window.api.saveWorkflow({ workflow });
+        if (this.workflow.id === workflow.id) this.workflow.scheduleEnabled = workflow.scheduleEnabled;
+        await this._refreshScheduledJobs();
+        this._flashStatus(workflow.scheduleEnabled ? 'Schedule enabled' : 'Schedule paused');
+      } catch (err) {
+        job.workflow.scheduleEnabled = previous;
+        button.disabled = false;
+        this._termLog(`Schedule update failed: ${err.message}`, 'stderr');
+      }
+    });
     modal?.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
 
     this._refreshScheduledJobs();
@@ -1406,6 +1534,7 @@ class App {
     if (this.engine && this.engine.isRunning) return;
 
     for (const job of this._scheduledJobs) {
+      if (!isScheduleEnabled(job.workflow)) continue;
       const target = this._jobTarget(job, now);
       if (target <= 0) continue;
       // Due, and not stale beyond the grace window (so a late/throttled tick
@@ -1474,6 +1603,7 @@ class App {
           <div class="sched-right">
             <div class="sched-countdown" data-job-id="${id}">—</div>
             <div class="sched-state" data-job-id="${id}"></div>
+            <button class="btn btn-secondary btn-sm" data-toggle-schedule="${id}">${this._pendingHelloId === job.id ? 'Review draft' : (isScheduleEnabled(job.workflow) ? 'Pause' : 'Enable')}</button>
           </div>
         </div>`;
     }).join('');
@@ -1488,21 +1618,23 @@ class App {
       const remaining = target - now;
       const running = !!(this.engine?.isRunning && this.workflow?.id === job.id);
       const handled = this._firedTargets[job.id] === target;
+      const paused = !isScheduleEnabled(job.workflow);
       const passed = job.mode !== 'cron' && now > target + this._graceMs;
       const sel = `[data-job-id="${this._cssEscape(job.id)}"]`;
       const cdEl = document.querySelector(`#schedule-list .sched-countdown${sel}`);
       const stEl = document.querySelector(`#schedule-list .sched-state${sel}`);
 
       if (cdEl) {
-        cdEl.textContent = running ? 'running' : (passed ? 'passed' : (handled ? 'set' : this._formatCountdown(remaining)));
-        cdEl.classList.toggle('due', !running && !passed && !handled && remaining <= 0);
-        cdEl.classList.toggle('running', running);
-        cdEl.classList.toggle('passed', passed);
-        cdEl.classList.toggle('handled', handled && !running && !passed);
+        cdEl.textContent = paused ? (this._pendingHelloId === job.id ? 'draft' : 'paused') : (running ? 'running' : (passed ? 'passed' : (handled ? 'set' : this._formatCountdown(remaining))));
+        cdEl.classList.toggle('due', !paused && !running && !passed && !handled && remaining <= 0);
+        cdEl.classList.toggle('running', !paused && running);
+        cdEl.classList.toggle('passed', !paused && passed);
+        cdEl.classList.toggle('handled', !paused && handled && !running && !passed);
+        cdEl.classList.toggle('paused', paused);
       }
-      if (stEl) stEl.textContent = running ? '▶' : (passed ? '·' : (handled ? '✓' : (remaining <= 0 ? '⏰' : '')));
+      if (stEl) stEl.textContent = paused ? '' : (running ? '▶' : (passed ? '·' : (handled ? '✓' : (remaining <= 0 ? '⏰' : ''))));
 
-      if (!running && !passed && !handled && remaining > 0 && (next === null || remaining < next)) next = remaining;
+      if (!paused && !running && !passed && !handled && remaining > 0 && (next === null || remaining < next)) next = remaining;
     }
 
     const nextEl = document.getElementById('schedule-next');
@@ -1619,6 +1751,11 @@ class App {
   _updateEmptyState() {
     const el = document.getElementById('editor-empty');
     el.classList.toggle('hidden', this.workflow.blocks.length > 0);
+    document.getElementById('block-count').textContent = `${this.workflow.blocks.length} steps`;
+    if (this._pendingHelloId === this.workflow.id && !this._scheduleOf(this.workflow)) this._pendingHelloId = null;
+    const pending = this._pendingHelloId === this.workflow.id;
+    document.getElementById('btn-save').textContent = pending ? 'Save & enable schedule' : 'Save';
+    document.getElementById('schedule-draft').classList.toggle('hidden', !pending);
   }
 
   _scrollToBlock(id) {

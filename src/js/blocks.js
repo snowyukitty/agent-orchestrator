@@ -17,7 +17,7 @@ export const BLOCK_TYPES = {
         key: 'mode', label: 'Mode', type: 'select',
         options: [
           { value: 'once', label: 'Once' },
-          { value: 'cron', label: 'Cron' }
+          { value: 'cron', label: 'Every day' }
         ]
       }
     ]
@@ -80,7 +80,7 @@ export const BLOCK_TYPES = {
     color: 'command',
     defaultParams: { command: '' },
     params: [
-      { key: 'command', label: 'Cmd', type: 'text', placeholder: 'e.g. claude --permission-mode bypassPermissions' }
+      { key: 'command', label: 'Command', type: 'text', placeholder: 'e.g. claude' }
     ]
   },
   wait: {
@@ -218,13 +218,15 @@ export function createBlock(type) {
 
 // ── Palette Block Renderer ───────────────────────────────────
 export function renderPaletteBlock(typeDef) {
-  const el = document.createElement('div');
+  const el = document.createElement('button');
+  el.type = 'button';
   el.className = 'palette-block';
+  el.title = `${typeDef.label}: ${typeDef.description}`;
   el.setAttribute('data-type', typeDef.type);
   el.setAttribute('draggable', 'true');
 
   el.innerHTML = `
-    <span class="block-icon">${esc(typeDef.icon)}</span>
+    <span class="block-icon" aria-hidden="true">${esc(blockSymbol(typeDef.type))}</span>
     <div class="block-info">
       <div class="block-label">${esc(typeDef.label)}</div>
       <div class="block-desc">${esc(typeDef.description)}</div>
@@ -244,7 +246,7 @@ export function renderWorkflowBlock(block, index) {
   el.setAttribute('data-type', block.type);
 
   // Build parameter fields
-  const paramsHtml = def.params.map(p => buildParamField(p, block.params)).join('');
+  const paramsHtml = def.params.map(p => buildParamField(p, block.params, block.id)).join('');
 
   el.innerHTML = `
     <div class="drag-handle" title="Drag to reorder">⠿</div>
@@ -252,14 +254,14 @@ export function renderWorkflowBlock(block, index) {
     <div class="block-stripe ${block.type}"></div>
     <div class="block-content">
       <div class="block-header">
-        <span class="block-icon">${esc(def.icon)}</span>
+        <span class="block-icon" aria-hidden="true">${esc(blockSymbol(block.type))}</span>
         <span class="block-type-label">${esc(def.label)}</span>
       </div>
       <div class="block-params">${paramsHtml}</div>
     </div>
     <div class="block-actions">
-      <button class="block-action-btn duplicate" title="Duplicate">📋</button>
-      <button class="block-action-btn delete" title="Delete">✕</button>
+      <button class="block-action-btn duplicate" title="Duplicate" aria-label="Duplicate ${esc(def.label)}">⧉</button>
+      <button class="block-action-btn delete" title="Delete" aria-label="Delete ${esc(def.label)}">×</button>
     </div>
   `;
 
@@ -267,7 +269,7 @@ export function renderWorkflowBlock(block, index) {
 }
 
 // ── Parameter Field Builder ──────────────────────────────────
-function buildParamField(paramDef, params) {
+function buildParamField(paramDef, params, blockId) {
   const value = params[paramDef.key] ?? '';
   const key = esc(String(paramDef.key));
   let inputHtml;
@@ -320,7 +322,7 @@ function buildParamField(paramDef, params) {
           ? [`<option value="${esc(String(value))}" selected>⚠ ${esc(String(value))} (not on this machine)</option>`]
           : []),
         ...profiles.map(p =>
-          `<option value="${esc(p.id)}" ${String(value) === p.id ? 'selected' : ''}>${esc(p.icon)} ${esc(p.displayName)}</option>`
+          `<option value="${esc(p.id)}" ${String(value) === p.id ? 'selected' : ''}>${esc(p.displayName)} · ${esc(p.assurance || 'Unknown assurance')}</option>`
         ),
       ].join('');
       inputHtml = `<select data-param="${key}" class="param-profile">${opts}</select>`;
@@ -339,7 +341,7 @@ function buildParamField(paramDef, params) {
             placeholder="${esc(String(paramDef.placeholder || 'Select directory...'))}"
             spellcheck="false" />
           <button class="btn btn-icon btn-sm browse-dir-btn"
-            data-param="${key}" title="Browse" type="button">📂</button>
+            data-param="${key}" title="Browse" type="button" aria-label="Browse ${esc(paramDef.label)}">…</button>
         </div>`;
       break;
 
@@ -348,12 +350,18 @@ function buildParamField(paramDef, params) {
         value="${esc(String(value))}" />`;
   }
 
+  const fieldId = esc(`${blockId}-${paramDef.key}`);
+  inputHtml = inputHtml.replace(/<(input|select|textarea)\b/, `<$1 id="${fieldId}"`);
   return `
     <div class="block-param">
-      <label>${esc(paramDef.label)}</label>
+      <label class="param-label" for="${fieldId}">${esc(paramDef.label)}</label>
       ${inputHtml}
     </div>
   `;
+}
+
+function blockSymbol(type) {
+  return { schedule: '◷', directory: '▱', agentStart: '◇', agentSend: '↗', agentWait: '◌', command: '›_', wait: 'Ⅱ', input: '↳', keypress: '⌘', loop: '↻', loopEnd: '↲', log: '≡', sleep: '☾' }[type] || '·';
 }
 
 // ── Helpers ──────────────────────────────────────────────────

@@ -12,6 +12,14 @@ if (!fs.existsSync(asarPath) || !fs.existsSync(executablePath)) {
   throw new Error('Packaged singular runtime is incomplete. Run npm run build first.');
 }
 
+// npm's hidden lock can report a newer Electron while leaving an older binary
+// installed. Check the runtime copied into the package, not only dependency data.
+const installedElectron = JSON.parse(fs.readFileSync(path.join(projectRoot, 'node_modules/electron/package.json'), 'utf8'));
+const runtimeVersion = fs.readFileSync(path.join(packageRoot, 'version'), 'utf8').trim();
+if (runtimeVersion !== installedElectron.version) {
+  throw new Error(`Packaged Electron ${runtimeVersion} differs from installed dependency ${installedElectron.version}. Reinstall the runtime before packaging.`);
+}
+
 const entries = listPackage(asarPath, { isPack: false }).map((entry) => {
   const normalized = entry.replaceAll('\\', '/');
   return normalized.startsWith('/') ? normalized : `/${normalized}`;
@@ -32,6 +40,8 @@ const required = [
   '/src/js/app.js',
   '/src/js/engine.js',
   '/src/js/sessions.js',
+  '/src/js/starters.js',
+  '/src/js/accessibility.js',
   '/src/js/selftest.js',
   '/src/main/agents.js',
   '/src/main/sessions.js',
@@ -39,6 +49,7 @@ const required = [
   '/src/main/store.js',
   '/src/main/user-data.js',
   '/src/styles/main.css',
+  '/src/styles/workspace.css',
 ];
 
 const leakedEntries = entries.filter(entry => forbidden.some(pattern => pattern.test(entry)));

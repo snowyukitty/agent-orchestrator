@@ -15,6 +15,7 @@ import { TEMPLATES } from './templates.js';
 import { computeJobTarget, isDue, formatCountdown, DEFAULT_GRACE_MS } from './schedule.js';
 import { typeInto } from './typing.js';
 import { SessionManager, TARGET_ACTIVE, TARGET_ALL, AGENT_TARGET_PREFIX } from './sessions.js';
+import { buildScheduledHello, isScheduleEnabled } from './starters.js';
 
 /**
  * Run every case and return a result summary.
@@ -36,6 +37,7 @@ export async function runSelfTest() {
     await testSchedule(eq);
     await testTyping(eq, ok);
     await testSessionTargets(eq);
+    testHelloStarter(eq, ok);
   } catch (err) {
     failures.push(`exception: ${err && err.message ? err.message : err}`);
   }
@@ -46,6 +48,24 @@ export async function runSelfTest() {
     failures,
     details: passed ? 'all engine self-tests passed' : failures.join('; '),
   };
+}
+
+function testHelloStarter(eq, ok) {
+  const now = new Date(2026, 0, 15, 4, 30).getTime();
+  const input = { profileId: 'codex:work', datetime: '2026-01-15T05:30', text: ' hello ', directory: '.' };
+  const draft = buildScheduledHello(input, now);
+  eq('hello-starts-disabled', isScheduleEnabled(draft), false);
+  eq('legacy-schedules-stay-enabled', isScheduleEnabled({ blocks: [] }), true);
+  eq('explicit-paused-schedule', isScheduleEnabled({ scheduleEnabled: false }), false);
+  eq('hello-keeps-selected-account', draft.blocks.filter(b => b.params.profileId).map(b => b.params.profileId), ['codex:work', 'codex:work', 'codex:work']);
+  eq('hello-trims-prompt', draft.blocks.find(b => b.type === 'agentSend').params.text, 'hello');
+  ok('hello-no-permission-bypass', !draft.blocks.some(b => b.type === 'command'));
+  eq('hello-daily-mode', buildScheduledHello({ ...input, mode: 'cron' }, now).blocks[0].params.mode, 'cron');
+  for (const bad of [{ profileId: '' }, { datetime: 'invalid' }, { datetime: '2026-01-15T04:00' }, { mode: 'weekly' }, { text: ' ' }]) {
+    let rejected = false;
+    try { buildScheduledHello({ ...input, ...bad }, now); } catch { rejected = true; }
+    ok(`hello-rejects-${JSON.stringify(bad)}`, rejected);
+  }
 }
 
 // ── Engine loop control flow ─────────────────────────────────
