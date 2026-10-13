@@ -104,6 +104,10 @@ Manual checks that the suites cannot cover:
 
 ## Conventions
 
+- Preserve the compact, information-dense, modular workspace. Improve hierarchy,
+  alignment, and state clarity without inflating cards or hiding useful steps.
+  Follow `docs/ui-design.md`; compare the same workflow and viewport before
+  accepting visual changes.
 - English for code, comments, commits, and docs.
 - The renderer owns the single, persistent set of process IPC listeners; the
   engine reacts through hooks rather than registering its own.

@@ -39,6 +39,8 @@ Project references:
 - [Interactive field guide](docs/README.md)
 - [Security policy](SECURITY.md)
 - [Contribution and verification guide](CONTRIBUTING.md)
+- [UI design principles](docs/ui-design.md)
+- [Compact UI checkpoint and integration notes](docs/checkpoint-compact-ui.md)
 
 ## Field guide
 
@@ -79,6 +81,13 @@ buffering while hidden. The quick-send bar targets the current session, every
 session of one agent, or all of them at once.
 
 ### Release Notes
+
+#### Unreleased (compact workspace checkpoint)
+- Keep the original compact visual theme, panel proportions, and modular blocks.
+- Add guided scheduled hello setup with disabled drafts and explicit save-to-enable.
+- Persist schedule Pause independently of unsaved workflow edits.
+- Add searchable block groups, single-click insertion, keyboard controls, and dialog focus handling.
+- Verify layout in real Chromium with synthetic accounts, including a six-step density regression check.
 
 #### v0.4.0 (singular identity migration)
 - **One canonical name everywhere**: repository, npm package, checkout, AppData, documentation, and build artifact now use `agent-orchestrator` / **Agent Orchestrator**.
@@ -198,12 +207,16 @@ npm run check
 # Run a quick Electron startup/shutdown smoke test
 npm run smoke
 
-# Run both suites: main-process unit tests + the headless renderer self-test
+# Run unit, renderer, and mocked Chromium UI suites
 npm test
 
-# Either half on its own
+# Individual suites
 npm run test:unit   # node --test over src/main/
 npm run test:app    # electron . --self-test
+npm run test:ui     # real Chromium, synthetic accounts, no provider calls
+
+# Reproduce the original / rejected / restored UI comparisons
+npm run compare:ui
 
 # Regenerate icon assets (icon.png + icon.ico) from src/assets/icon-source.png
 npm run icons

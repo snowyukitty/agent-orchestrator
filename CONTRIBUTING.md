@@ -31,6 +31,11 @@ cleanup.
 `npm run test:ui` writes screenshot artifacts to a temporary directory and
 prints its location. It never uses production IPC, real PTYs, or account homes.
 
+For visual changes, follow the [UI design principles](docs/ui-design.md).
+Compare identical workflows at identical viewport sizes and include the
+number of fully visible steps. Use `npm run compare:ui` for the restoration
+baseline; screenshots must contain synthetic data only.
+
 Please also:
 
 - add a regression test for behavior changes;
