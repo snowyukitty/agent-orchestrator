@@ -384,6 +384,13 @@ window, or launch record exists and the host keeps answering. Rows marked
 | Provider waits at an onboarding or approval screen | Untrusted folders are made trusted only per opted-in workspace; approval prompts are denied by policy; anything else shows in the window and ends at the turn timeout or Stop, never answered by injected keys | first live run (trust screen), qualification run |
 | Session or route change mid-task, approved Matrix direction | — | *W2b* |
 
+## Unattended remote starts
+
+When and how a target may start a task requested from another machine with
+nobody present (W2b) is decided in [w2b-unattended-policy.md](w2b-unattended-policy.md):
+session states, power, per-host profiles, and the gates before the first
+unattended start.
+
 ## Verification
 
 - `npm run test:unit` covers strict JSON, request validation and digest, the
