@@ -5,6 +5,22 @@ the product story; this file keeps the history.
 
 ## Unreleased (Journal v2 + Evidence-First Field Guide)
 
+- **Desktop task host, W2a (fixture-verified, off by default)**: one typed,
+  digest-bound launch request now becomes one fresh agent in its own new
+  window and its own Git worktree, through a loopback-only ingress with a
+  user-private capability token and fixed operations. The instruction travels
+  in a private file the provider is pointed at, never in argv or an existing
+  terminal; a per-launch nonce shows the provider read it. The result joins
+  separate axes — delivery, an authenticated turn-complete receipt, the AI's
+  framed report, checks the host ran itself (with disagreement called out),
+  and a complete diff from base that includes staged, unstaged, untracked,
+  binary, and renamed files without touching the task's index. Double starts
+  return the same launch, conflicting bytes are refused, a restart reports
+  rather than respawns, closing a task window only detaches it, and Stop still
+  collects evidence. Only the fixture provider runs; Codex is built but refused
+  until a separately authorized live turn qualifies it. `npm run
+  verify:task-host` drives the real ingress, windows, and PTYs end to end.
+
 - **An Agent Session block now proves its provider came up**: the fixed
   `settleMs` sleep after launching an agent was a guess, and it hid two
   different failures behind a completed block. A provider that booted more

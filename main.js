@@ -59,12 +59,17 @@ const {
 const {
   asPlainObject, asId, asText, asCols, asRows,
 } = require('./src/main/validate');
+const { TaskHost } = require('./src/main/task-host/host');
+const { TaskIngress } = require('./src/main/task-host/ingress');
+const { createCodexAdapter, createFixtureAdapter } = require('./src/main/task-host/adapters');
+const { createTaskWindowPresentation } = require('./src/main/task-host/task-windows');
 
 // Establish the singular identity before Electron creates storage, sessions,
 // or its single-instance lock. Test modes never touch production AppData.
 const isSmokeTest = process.argv.includes('--smoke-test');
 const isSelfTest = process.argv.includes('--self-test');
 const isVisualTest = process.argv.includes('--visual-test');
+const isTaskHostFixture = process.argv.includes('--task-host-fixture');
 const promoCapture = parsePromoCaptureOptions(process.argv, __dirname);
 if (promoCapture) {
   // Capture receipts are portable only when the output pixel ratio is fixed
@@ -80,7 +85,7 @@ const userDataState = prepareUserData({
   tempRoot: app.getPath('temp'),
   // Visual QA uses the normal renderer while remaining unable to read or
   // mutate production settings, workflows, local profiles, or Run Journal files.
-  testMode: isSmokeTest || isSelfTest || isVisualTest || Boolean(promoCapture),
+  testMode: isSmokeTest || isSelfTest || isVisualTest || isTaskHostFixture || Boolean(promoCapture),
 });
 app.setPath('userData', userDataState.path);
 const sessionDataPath = path.join(userDataState.path, 'session');
@@ -88,6 +93,7 @@ fs.mkdirSync(sessionDataPath, { recursive: true });
 app.setPath('sessionData', sessionDataPath);
 
 const RENDERER_ENTRY_FILE = path.join(__dirname, 'src', 'index.html');
+const TASK_WINDOW_ENTRY_FILE = path.join(__dirname, 'src', 'task-window.html');
 
 // ── Timestamped Logging ──────────────────────────────────────
 // Prefix every main-process console line with a local HH:MM:SS.mmm
@@ -134,6 +140,9 @@ let sessionPromptStore = null;
 let sessionPromptScheduler = null;
 let sessionPromptHandlers = null;
 let sessionContinuation = null;
+let taskHost = null;    // TaskHost, only when enabled or in fixture mode
+let taskIngress = null;
+let taskHostLocked = false;
 let testDataCleanupScheduled = false;
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 const isDev = process.argv.includes('--dev');
@@ -697,6 +706,10 @@ if (!gotSingleInstanceLock) {
       console.warn(`[Session prompts] direct-agent lifecycle unavailable (${error.code || 'error'})`);
       codexLifecycleBroker = null;
     }
+    if (isTaskHostFixture) {
+      await runTaskHostFixtureMode();
+      return;
+    }
     sessions = createSessionRegistry();
     sessionContinuation = new SessionContinuationCore({
       backends: [createOrchestratorPtyContinuationBackend({ registry: sessions })],
@@ -808,7 +821,123 @@ if (!gotSingleInstanceLock) {
       createTray();
       startSchedulerHeartbeat();
     }
+    if (!isSmokeTest && !isSelfTest && !isVisualTest && !promoCapture && loadSettings(settingsFile()).taskHostEnabled) {
+      startTaskHost().catch((error) => {
+        console.warn(`[TaskHost] unavailable (${error.code || 'error'})`);
+      });
+    }
   });
+}
+
+// ── Desktop Task Host (W2a) ──────────────────────────────────
+// Off unless settings.json sets taskHostEnabled. One typed, loopback-only
+// ingress; one new window, worktree, and PTY per task. See docs/task-host.md.
+
+function fixtureAgentScript() {
+  return path.join(__dirname, 'tests', 'fixtures', 'task-host', 'fixture-agent.js');
+}
+
+/**
+ * The fixture needs a console-subsystem Node: electron.exe is a GUI binary,
+ * so even as ELECTRON_RUN_AS_NODE its stdio is not attached to a ConPTY.
+ */
+function fixtureNodePath() {
+  const candidates = [process.env.npm_node_execpath];
+  for (const dir of String(process.env.PATH || '').split(path.delimiter)) {
+    if (dir) candidates.push(path.join(dir, process.platform === 'win32' ? 'node.exe' : 'node'));
+  }
+  return candidates.find(file => file && path.isAbsolute(file) && fs.existsSync(file)) || null;
+}
+
+async function startTaskHost({ fixture = false } = {}) {
+  if (taskHost) return taskHost;
+  if (!codexLifecycleBroker) {
+    const error = new Error('lifecycle receipts unavailable');
+    error.code = 'lifecycle-unavailable';
+    throw error;
+  }
+  const dataDir = path.join(app.getPath('userData'), 'task-host');
+  const presentation = createTaskWindowPresentation({
+    BrowserWindow,
+    ipcMain,
+    entryFile: TASK_WINDOW_ENTRY_FILE,
+    preload: path.join(__dirname, 'preload-task.js'),
+    icon: getWindowIcon(),
+    getHost: () => taskHost,
+    activate: !fixture,
+    log: message => console.warn(message),
+  });
+  const adapters = {
+    // Refused at admission until a separately authorized live turn qualifies it.
+    codex: createCodexAdapter({
+      resolveProfile: async route => (await findProfile(`codex:${route}`))?.profile || null,
+      buildLaunchSpec: agentProfiles.buildLaunchSpec,
+      launchContext: async () => ({
+        baseEnv: process.env,
+        entrypointPath: entrypointPath(),
+        notifyScriptPath: codexNotifyScriptPath(),
+      }),
+    }),
+  };
+  if (fixture) {
+    const execPath = fixtureNodePath();
+    if (!execPath) throw new Error('the task-host fixture needs node.exe on PATH');
+    adapters.fixture = createFixtureAdapter({ script: fixtureAgentScript(), execPath });
+  }
+  try {
+    powerMonitor.on('lock-screen', () => { taskHostLocked = true; });
+    powerMonitor.on('unlock-screen', () => { taskHostLocked = false; });
+  } catch (_error) {
+    console.warn('[TaskHost] lock state unavailable');
+  }
+  const host = new TaskHost({
+    dataDir,
+    pty,
+    lifecycleBroker: codexLifecycleBroker,
+    adapters,
+    presentation,
+    isSessionLocked: () => taskHostLocked,
+    terminateTree: process.platform === 'win32' ? killProcessTree : null,
+    killTree: killProcessTree,
+    log: message => console.log(message),
+  });
+  const recovered = host.recover();
+  if (recovered) console.log(`[TaskHost] marked ${recovered} unfinished launch(es) interrupted or uncertain`);
+  const ingress = new TaskIngress({ host, dir: dataDir, log: message => console.warn(`[TaskHost] ${message}`) });
+  await ingress.start();
+  taskHost = host;
+  taskIngress = ingress;
+  console.log('[TaskHost] loopback ingress ready');
+  return { host, presentation };
+}
+
+async function runTaskHostFixtureMode() {
+  const { runTaskHostFixture } = require('./src/main/task-host/fixture-run');
+  let passed = false;
+  let presentation = null;
+  try {
+    // The fixture provider lives under tests/, which is never packaged.
+    if (app.isPackaged) throw new Error('fixture mode is available only from a source checkout');
+    const started = await startTaskHost({ fixture: true });
+    presentation = started.presentation;
+    const report = await runTaskHostFixture({
+      host: started.host,
+      presentation,
+      dataDir: path.join(app.getPath('userData'), 'task-host'),
+      BrowserWindow,
+    });
+    passed = report.passed;
+    console.log(`[TaskHostFixture] ${report.results.filter(r => r.ok).length}/${report.results.length} checks passed`);
+  } catch (error) {
+    console.error(`[TaskHostFixture] aborted: ${error.message}`);
+  }
+  taskIngress?.stop();
+  taskIngress = null;
+  presentation?.closeAll();
+  await taskHost?.shutdown();
+  app.isQuitting = true;
+  cleanupForQuit();
+  app.exit(passed ? 0 : 1);
 }
 
 // ── Scheduler Heartbeat ──────────────────────────────────────
@@ -885,6 +1014,9 @@ function cleanupNonProcessState() {
   app.isQuitting = true;
   stopSchedulerHeartbeat();
   sessionPromptScheduler?.stop();
+  // Refuse new task requests first; the drain below interrupts active tasks.
+  taskIngress?.stop();
+  taskIngress = null;
   codexLifecycleBroker?.stop();
   cancelSleepTimer();
   stopKeepAwake();
@@ -938,7 +1070,10 @@ const shutdownCoordinator = new ShutdownCoordinator({
   cleanup: cleanupNonProcessState,
   // A claimed occurrence must finish or be consumed before ConPTY teardown.
   // This also prevents binding loss caused by shutdown from rewriting rows.
-  beforeDrain: () => sessionPromptScheduler?.whenIdle(),
+  beforeDrain: () => Promise.all([
+    sessionPromptScheduler?.whenIdle(),
+    taskHost?.shutdown(),
+  ]),
   requestQuit: () => app.quit(),
   onError: (err) => console.error(`[Sessions] sequential shutdown failed: ${err.message}`),
 });

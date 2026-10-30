@@ -76,6 +76,11 @@ src/main/            Main-process modules, CommonJS, unit-tested with node --tes
   validate.js          IPC payload validation
   promo-capture.js     inert real-renderer capture fixture + hashed receipts
   user-data.js         canonical/legacy user-data location and one-time migration
+  task-host/           W2a desktop task host (docs/task-host.md): strict request
+                       and loopback ingress, host lifecycle, adapters, worktree,
+                       diff and check evidence, per-task windows, fixture run
+preload-task.js      task-window bridge; main binds each call to its window
+src/task-window.html one task's terminal, state, and Stop
 src/js/              Renderer, ES modules, tested by the Electron self-test
   app.js               wiring: editor, toolbar, scheduler, workflow storage
   sessions.js          SessionManager: one xterm per session, tabs, quick-send
@@ -97,6 +102,7 @@ tests/               node --test suites for src/main/
 npm run check       # syntax-check every JS file under the source roots
 npm test            # test:unit (node --test) + test:app (Electron self-test)
 npm run smoke       # Electron startup/shutdown cleanup path
+npm run verify:task-host   # task host end to end with the fixture provider only
 npm run verify      # complete checkpoint gate: check, tests, audit, build/package verification
 npm run workflow -- check <file>   # headless: validate a workflow, resolve its accounts, show its next trigger
 npm run verify:direct-live -- --confirm-live  # opt-in real-provider acceptance; never automated
@@ -125,6 +131,22 @@ Manual checks that the suites cannot cover:
   up onto a trust, login, or quota screen is alive, quiet, and did no work.
   Block-error detail lives in an encrypted journal proof and is readable only
   through protected-evidence inspection in the app.
+
+## Desktop task host
+
+The task host (`docs/task-host.md`) is off unless `taskHostEnabled` is set.
+Keep these properties, each covered by a test:
+
+- the ingress binds loopback only, authenticates with the token in the
+  user-private discovery file, and accepts only the fixed typed operations —
+  never a command line, executable, path, environment, or raw PTY input;
+- admission is synchronous and the accepted record is durable before the ack;
+  a restart reports unfinished launches and never respawns or re-adopts;
+- the task window exists before the provider starts; closing it detaches;
+- delivery, lifecycle receipt, AI-reported result, host-observed checks, and
+  diff stay separate axes, and nothing reports success — only `needs-review`;
+- a provider is admitted only when its adapter is qualified. Codex is not yet:
+  qualifying it needs a separately authorized live turn, never a test.
 
 ## Conventions
 

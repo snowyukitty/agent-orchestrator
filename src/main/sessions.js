@@ -525,19 +525,26 @@ class SessionRegistry {
    *                                            termination while root is alive
    * @param {function} [deps.killTree]   (pid) => void, force-kill a process tree
    * @param {function} [deps.log]        (message) => void
+   * @param {function} [deps.onLifecycle] ({ id, incarnationId, type }) => void,
+   *                                       after an accepted provider receipt
    * @param {string} [deps.continuationBackendId] public scheduling backend id
+   * @param {boolean} [deps.conptyInheritCursor] false for PTYs that may run
+   *        before any terminal is attached: ConPTY otherwise blocks on a
+   *        cursor-position query nobody answers
    */
   constructor({
     pty,
     onOutput,
     onExit,
     onStatus,
+    onLifecycle,
     terminateTree,
     killTree,
     log,
     terminationTimeoutMs = TERMINATION_TIMEOUT_MS,
     lifecycleBroker = null,
     continuationBackendId = 'orchestrator-pty',
+    conptyInheritCursor = true,
     now = Date.now,
     uuid = randomUUID,
   } = {}) {
@@ -545,12 +552,14 @@ class SessionRegistry {
     this._onOutput = onOutput || (() => {});
     this._onExit = onExit || (() => {});
     this._onStatus = onStatus || (() => {});
+    this._onLifecycle = onLifecycle || (() => {});
     this._terminateTree = typeof terminateTree === 'function' ? terminateTree : null;
     this._killTree = killTree || (() => {});
     this._log = log || (() => {});
     this._terminationTimeoutMs = terminationTimeoutMs;
     this._lifecycleBroker = lifecycleBroker;
     this._continuationBackendId = continuationBackendId;
+    this._conptyInheritCursor = conptyInheritCursor !== false;
     this._now = now;
     this._uuid = uuid;
     /** @type {Map<string, object>} id → session record */
@@ -594,6 +603,9 @@ class SessionRegistry {
 
     const incarnationId = this._uuid();
     const sessionMode = spec.sessionMode === 'direct-agent' ? 'direct-agent' : 'account-shell';
+    // A provider launched with its instruction as the initial prompt starts
+    // with that turn already submitted; its first receipt completes it.
+    const initialTurnSubmitted = sessionMode === 'direct-agent' && spec.initialTurnSubmitted === true;
     let lifecycleRegistration = null;
     if (sessionMode === 'direct-agent') {
       if (!this._lifecycleBroker) {
@@ -615,7 +627,7 @@ class SessionRegistry {
         cwd: spec.cwd,
         env: { ...(spec.env || {}), ...(lifecycleRegistration?.env || {}) },
         useConpty: true,
-        conptyInheritCursor: true,
+        conptyInheritCursor: this._conptyInheritCursor,
       });
     } catch (error) {
       lifecycleRegistration?.release?.();
@@ -635,9 +647,9 @@ class SessionRegistry {
       assurance: spec.assurance || 'L0-native',
       resultInputCapable: spec.resultInputCapable === true,
       sessionMode,
-      agentState: sessionMode === 'direct-agent' ? 'starting' : 'unavailable',
+      agentState: initialTurnSubmitted ? 'running' : (sessionMode === 'direct-agent' ? 'starting' : 'unavailable'),
       lifecycleConfirmedAt: null,
-      pendingTurnCount: 0,
+      pendingTurnCount: initialTurnSubmitted ? 1 : 0,
       inputRevision: 0,
       lastExternalInputAt: 0,
       draftDirty: false,
@@ -954,6 +966,7 @@ class SessionRegistry {
     // Only an app-observed submit may clear a draft; otherwise a late or
     // duplicate receipt could make foreign text eligible for unattended Enter.
     this._onStatus(this.describe(id));
+    this._onLifecycle({ id, incarnationId, type: event.type });
     return true;
   }
 

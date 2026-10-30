@@ -1,0 +1,65 @@
+:root {
+  --bg: #0a0a0f;
+  --panel: #14141c;
+  --line: #262633;
+  --text: #e6e6ef;
+  --muted: #8a8aa0;
+  --warn: #f2b84b;
+  --stop: #e5534b;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 "Segoe UI", system-ui, sans-serif;
+}
+
+body {
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+}
+
+.task-bar {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  padding: 10px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.task-identity { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.task-label { color: var(--muted); text-transform: uppercase; font-size: 11px; letter-spacing: 0.06em; }
+.task-route { color: var(--muted); font-family: Consolas, monospace; }
+
+.task-facts { display: flex; gap: 20px; margin: 0; flex: 1; }
+.task-facts div { display: flex; flex-direction: column; }
+.task-facts dt { color: var(--muted); font-size: 11px; }
+.task-facts dd { margin: 0; font-family: Consolas, monospace; }
+.task-facts dd[data-tone="warn"] { color: var(--warn); }
+
+.task-stop {
+  border: 1px solid var(--stop);
+  background: transparent;
+  color: var(--stop);
+  padding: 6px 14px;
+  border-radius: 4px;
+  font: inherit;
+  cursor: pointer;
+}
+.task-stop[data-armed="true"] { background: var(--stop); color: #fff; }
+.task-stop:disabled { opacity: 0.4; cursor: default; }
+
+.task-terminal { min-height: 0; padding: 6px 8px; }
+
+.task-note {
+  padding: 6px 16px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}

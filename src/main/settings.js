@@ -23,6 +23,8 @@ const DEFAULTS = Object.freeze({
   terminalPanelWidth: null,
   /** Log pane height in px within the right panel, or null. */
   logPaneHeight: null,
+  /** Start the loopback desktop task host (docs/task-host.md). Off by default. */
+  taskHostEnabled: false,
 });
 
 const THEMES = new Set(['ps', 'dark', 'light']);
@@ -34,6 +36,7 @@ function normalizeSettings(raw) {
 
   if (THEMES.has(src.theme)) out.theme = src.theme;
   if (typeof src.entrypointPath === 'string') out.entrypointPath = src.entrypointPath.trim();
+  if (src.taskHostEnabled === true) out.taskHostEnabled = true;
 
   const b = src.windowBounds;
   if (b && typeof b === 'object'

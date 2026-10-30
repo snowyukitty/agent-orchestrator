@@ -99,6 +99,22 @@ does not have. Everything below is current for v0.4.0.
   paste mode, but the provider-side parser contract remains Codex-specific.
   Re-run the documented direct-session manual check when Codex changes its TUI
   input or `notify` behavior; unsupported providers remain fail-closed.
+- <a id="desktop-task-host"></a>**The desktop task host is fixture-verified
+  only** (W2a, [design](task-host.md)): no real provider is admitted. The Codex
+  adapter is built but refused as unqualified until a separately authorized
+  live turn proves argv-pointer delivery and its receipt. The host is off by
+  default and has no cross-machine carrier yet (W2b). Turn-started and
+  waiting-for-input are not observable; a task that asks a question shows
+  `running` until a receipt, an exit, or Stop. Host-observed checks run the
+  repository's own scripts, which the agent may have changed — the record
+  flags a changed definition but cannot prove the check meaningful. Diff
+  evidence covers the worktree only, not writes elsewhere, global
+  configuration, or external effects. The loopback ingress and its token
+  protect against other users and the network, not against malicious code
+  already running as the same user. Tasks end when the app quits; a crash
+  leaves records `interrupted` or `uncertain` and processes possibly running,
+  which the host reports but never re-adopts. Launch records, prompts,
+  worktrees, and diffs are never pruned automatically.
 - **Terminal Layout Shifts**: Xterm dimensions may occasionally desync with the internal PTY dimensions if the window is resized very rapidly while a process is initializing.
 
 Planned work lives in the [roadmap](roadmap.md); the accepted resume safety

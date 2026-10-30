@@ -153,6 +153,7 @@ The full list, with the reasoning, is in
 | [Exact-session prompt scheduling](docs/session-prompt-scheduling.md) | Identity binding, readiness proof, claims, crash and restart behavior |
 | [Session continuation backends](docs/session-continuation-backends.md) | Capability gate, backend authority, migration, and adapter review contract |
 | [Interrupted-run resume design](docs/resume-design.md) | The accepted evidence-without-replay contract |
+| [Desktop task host (W2a)](docs/task-host.md) | Loopback typed ingress, one window and worktree per task, joined evidence; fixture-verified only |
 | [Five-hour window](docs/five-hour-window.md) | The scheduling trick, tuned |
 | [Limits and unfinished work](docs/limitations.md) | Stated boundaries |
 | [Promo standard](docs/promo-creative-brief.md) · [Website plan](docs/website-plan.md) | How the outward face is allowed to be made |
@@ -164,6 +165,7 @@ The full list, with the reasoning, is in
 npm run check       # syntax-check every JS file, then validate the static guide
 npm test            # main-process unit tests + headless renderer self-test
 npm run smoke       # Electron startup/shutdown cleanup path
+npm run verify:task-host  # task host end to end: real ingress, windows, PTYs; fixture provider only
 npm run visual      # normal UI with disposable resume-evidence scenarios
 npm run promo:capture   # reproduce twice, verify, then atomically refresh the frames
 npm run icons       # regenerate icon.png + icon.ico from src/assets/icon-source.png

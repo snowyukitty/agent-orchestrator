@@ -28,8 +28,20 @@ const forbidden = [
 const required = [
   '/main.js',
   '/preload.js',
+  '/preload-task.js',
   '/package.json',
   '/src/index.html',
+  '/src/task-window.html',
+  '/src/js/task-window.js',
+  '/src/styles/task-window.css',
+  '/src/main/task-host/adapters.js',
+  '/src/main/task-host/checks.js',
+  '/src/main/task-host/git.js',
+  '/src/main/task-host/host.js',
+  '/src/main/task-host/ingress.js',
+  '/src/main/task-host/request.js',
+  '/src/main/task-host/strict-json.js',
+  '/src/main/task-host/task-windows.js',
   '/src/js/app.js',
   '/src/js/engine.js',
   '/src/js/session-prompt-schedules.js',
@@ -63,10 +75,12 @@ const archivePath = (entry) => entry.replace(/^\//, '').replaceAll('/', path.sep
 const authoredText = entries.filter(entry =>
   entry === '/main.js' ||
   entry === '/preload.js' ||
+  entry === '/preload-task.js' ||
   entry === '/package.json' ||
   entry === '/src/index.html' ||
-  entry.startsWith('/src/js/') ||
-  entry.startsWith('/src/main/')
+  entry === '/src/task-window.html' ||
+  // Directory entries (such as /src/main/task-host) carry no extension.
+  ((entry.startsWith('/src/js/') || entry.startsWith('/src/main/')) && path.extname(entry) !== '')
 );
 const privatePathPattern = /(?:[A-Za-z]:\\(?:[^\\\r\n]+\\)+|\/(?:home|Users)\/[A-Za-z0-9._-]+\/)/i;
 for (const entry of authoredText) {

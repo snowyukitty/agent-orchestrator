@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';">
+  <title>Task</title>
+  <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css">
+  <link rel="stylesheet" href="styles/task-window.css">
+</head>
+<body>
+  <header class="task-bar">
+    <div class="task-identity">
+      <span class="task-label">Task</span>
+      <strong id="task-id">—</strong>
+      <span id="task-route" class="task-route"></span>
+    </div>
+    <dl class="task-facts">
+      <div><dt>State</dt><dd id="task-state">—</dd></div>
+      <div><dt>Turn complete</dt><dd id="task-turn">not observed</dd></div>
+      <div><dt>Process</dt><dd id="task-process">—</dd></div>
+    </dl>
+    <button id="task-stop" type="button" class="task-stop">Stop task</button>
+  </header>
+  <main id="terminal" class="task-terminal" aria-label="Task terminal"></main>
+  <footer class="task-note">
+    Closing this window only hides the view; the task keeps running. Stop ends
+    it. Nothing here means the task succeeded: a finished task waits for review.
+  </footer>
+  <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="js/task-window.js"></script>
+</body>
+</html>

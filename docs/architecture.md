@@ -67,7 +67,12 @@ testable:
 - `store.js` provides atomic JSON persistence;
 - `settings.js` normalizes machine-local preferences;
 - `user-data.js` performs the one-time singular identity migration;
-- `validate.js` constrains renderer-supplied IPC payloads.
+- `validate.js` constrains renderer-supplied IPC payloads;
+- `task-host/` is the opt-in W2a desktop task host: a loopback-only typed
+  ingress, one new window, worktree, and PTY per task (in its own
+  `SessionRegistry`), and evidence that keeps delivery, provider receipt,
+  AI-reported result, host-observed checks, and diff apart. See
+  [`task-host.md`](task-host.md).
 
 ### Preload boundary
 
