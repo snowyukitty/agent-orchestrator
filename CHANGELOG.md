@@ -30,6 +30,12 @@ the product story; this file keeps the history.
   and partial output — a result frame that began but never ended is now
   `truncated` rather than `missing`.
 
+- **The task host recognizes a workspace however its path is spelled**: the
+  work-tree-root check compared Git's `--show-toplevel` with the registered
+  path as strings, so an 8.3 short name (hosted Windows runners use
+  `RUNNER~1`), a junction, or a different spelling refused the workspace.
+  Git now answers directly: the root is where `--show-cdup` is empty.
+
 - **Stopping a terminal right after it starts no longer crashes on Windows**:
   when tree termination was unavailable, the registry closed the root PTY with
   `SIGTERM`, which node-pty's Windows terminal rejects. Before the first output
