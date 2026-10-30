@@ -27,9 +27,16 @@ function scriptDefinition(packageJsonText, name) {
   }
 }
 
-function runProcess(file, args, { cwd, timeoutMs, maxOutputBytes, spawnImpl = spawn, signal = null }) {
+function runProcess(file, args, {
+  cwd, timeoutMs, maxOutputBytes, spawnImpl = spawn, signal = null, processTree = null,
+}) {
   return new Promise((resolve) => {
     const startedAt = Date.now();
+    // Decided to skip before anything started: start nothing.
+    if (signal?.aborted) {
+      resolve({ startedAt, finishedAt: startedAt, exitCode: null, timedOut: false, cancelled: true, notStarted: true, spawnFailed: false, output: Buffer.alloc(0), truncated: false });
+      return;
+    }
     let child;
     try {
       child = spawnImpl(file, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -53,28 +60,46 @@ function runProcess(file, args, { cwd, timeoutMs, maxOutputBytes, spawnImpl = sp
     let timedOut = false;
     let cancelled = false;
     let settled = false;
-    // The check's tree is ended while its root is still running (not yet
-    // closed), so its pid still names it.
+    let exitedAt = null;
+    let afterExit = null;
+    child.on('exit', () => { exitedAt = Date.now(); });
+    // Until Node reports the exit it holds the root's handle, so its pid still
+    // names it and a tree kill by pid is safe. After the exit (descendants may
+    // still hold its output open) the pid is never used again: its
+    // descendants are found by creation time and ended one by one.
     const endTree = () => {
       if (settled) return;
-      try {
-        if (process.platform === 'win32') {
-          spawnImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-        } else {
-          child.kill('SIGKILL');
-        }
-      } catch (_error) { /* already gone */ }
+      if (exitedAt === null) {
+        try {
+          if (process.platform === 'win32') {
+            spawnImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+          } else {
+            child.kill('SIGKILL');
+          }
+        } catch (_error) { /* already gone */ }
+        return;
+      }
+      if (!processTree || afterExit) return;
+      const anchor = {
+        pid: child.pid,
+        // No later than its true creation, which followed this moment.
+        created: processTree.toCreated(startedAt),
+        lastSeen: processTree.toCreated(exitedAt),
+      };
+      afterExit = processTree.settle([anchor]).catch(() => ({ observed: false }));
     };
     const timer = setTimeout(() => { timedOut = true; endTree(); }, timeoutMs);
     const onAbort = () => { cancelled = true; endTree(); };
     if (signal?.aborted) onAbort();
     else signal?.addEventListener('abort', onAbort, { once: true });
-    const finish = (code, spawnFailed) => {
+    const finish = async (code, spawnFailed) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
+      const descendantsAfterCancel = afterExit ? await afterExit : null;
       resolve({
+        descendantsAfterCancel,
         startedAt,
         finishedAt: Date.now(),
         exitCode: typeof code === 'number' ? code : null,
@@ -95,7 +120,7 @@ function runProcess(file, args, { cwd, timeoutMs, maxOutputBytes, spawnImpl = sp
  * check started; `logFile` receives the bounded output privately.
  */
 async function runCheck({
-  worktree, base, check, tree, logFile, timeoutMs = CHECK_TIMEOUT_MS, spawnImpl, signal = null,
+  worktree, base, check, tree, logFile, timeoutMs = CHECK_TIMEOUT_MS, spawnImpl, signal = null, processTree = null,
 }) {
   const record = {
     kind: check.kind,
@@ -123,6 +148,11 @@ async function runCheck({
   }
   const baseText = await showFile(worktree, base, 'package.json');
   record.definitionChangedFromBase = scriptDefinition(baseText || '', check.name) !== definition;
+  if (signal?.aborted) {
+    // Cancelled while preparing: the repository's script never starts.
+    record.outcome = 'cancelled';
+    return record;
+  }
 
   // The name is restricted to [A-Za-z0-9:._-], so it cannot carry a cmd.exe
   // metacharacter; npm is a .cmd shim on Windows and needs cmd to run.
@@ -130,8 +160,16 @@ async function runCheck({
     ? ['cmd.exe', ['/d', '/s', '/c', `npm run ${check.name}`]]
     : ['npm', ['run', check.name]];
   const run = await runProcess(file, args, {
-    cwd: worktree, timeoutMs, maxOutputBytes: MAX_CHECK_OUTPUT_BYTES, spawnImpl, signal,
+    cwd: worktree, timeoutMs, maxOutputBytes: MAX_CHECK_OUTPUT_BYTES, spawnImpl, signal, processTree,
   });
+  if (run.notStarted) {
+    record.outcome = 'cancelled';
+    return record;
+  }
+  if (run.descendantsAfterCancel) {
+    const { observed, survivors, unresolved } = run.descendantsAfterCancel;
+    record.descendantsAfterCancel = { observed: !!observed, survivors: survivors ?? null, unresolved: unresolved ?? null };
+  }
   record.startedAt = new Date(run.startedAt).toISOString();
   record.durationMs = run.finishedAt - run.startedAt;
   record.exitCode = run.exitCode;

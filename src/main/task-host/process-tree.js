@@ -6,10 +6,20 @@
 // root's descendants; afterwards it requires that none of them, and nothing
 // they started, is still alive.
 //
-// A process is identified by (pid, creation time), so a reused pid is never
-// mistaken for a survivor or for a member of the tree. A child must have been
-// created no earlier than its parent; an older process whose parent pid
-// happens to match is a pid-reuse coincidence, not a descendant.
+// A process is identified by (pid, creation time). Parentage is proven by
+// time, never assumed from a parent pid alone, because Windows reuses pids:
+// a listed process belongs to the task only if its parent pid names an
+// anchor and it was created while that anchor was known to be alive (from
+// its creation to `lastSeen`). A child created after its anchor might have
+// exited, but before the anchor was seen to be gone (`goneBy`), cannot be
+// attributed either way: it is `unresolved`, never signalled, and keeps the
+// collection unstable. A child of a live process that reused the anchor's
+// pid belongs to that process.
+//
+// Windows does not reuse a pid while a handle to the process is open. The
+// PTY and Node hold a handle to the processes they spawn until they report
+// the exit, so a root is known alive from its creation until its exit was
+// observed.
 
 const { execFile } = require('child_process');
 
@@ -61,36 +71,65 @@ function parseList(stdout) {
 
 const key = entry => `${entry.pid}:${entry.created}`;
 
+/** Milliseconds since the epoch, in the units `created` uses. */
+function toCreated(ms) {
+  return process.platform === 'win32'
+    ? Math.floor((ms + 11_644_473_600_000) * 100) // FILETIME / 100
+    : Math.floor(ms / 1000);
+}
+
 /**
- * The live processes descending from any member of `roots` (entries from an
- * earlier list), in one listing. Roots themselves are included when alive.
- *
- * A child belongs to an anchor only if it was created no earlier than the
- * anchor, and no later than a live process that has since reused the
- * anchor's pid: a child of the replacement is the replacement's, not ours.
+ * Sort one listing against the known anchors.
+ * @param {object[]} processes  { pid, ppid, created }
+ * @param {object[]} anchors    { pid, created, lastSeen, goneBy? }
+ * @returns {{ found: object[], unresolved: object[] }} live members, and live
+ *   processes whose parentage cannot be established
  */
-function descendantsOf(processes, roots) {
+function classify(processes, anchors) {
   const live = new Map(processes.map(entry => [entry.pid, entry]));
-  const members = new Map(roots.map(root => [root.pid, root]));
+  const byPid = new Map();
+  const add = (identity) => {
+    const list = byPid.get(identity.pid) || [];
+    list.push(identity);
+    byPid.set(identity.pid, list);
+  };
+  for (const anchor of anchors) add(anchor);
   const found = new Map();
+  const unresolved = new Map();
   for (const entry of processes) {
-    if (members.get(entry.pid)?.created === entry.created) found.set(key(entry), entry);
+    if ((byPid.get(entry.pid) || []).some(identity => !identity.unresolved && identity.created === entry.created)) {
+      found.set(key(entry), entry);
+      add({ pid: entry.pid, created: entry.created, lastSeen: Infinity });
+    }
   }
-  // Walk children until no new member appears; each pass is linear.
+  // Walk children until no new process is placed; each pass is linear.
   for (let grew = true; grew;) {
     grew = false;
     for (const entry of processes) {
-      if (found.has(key(entry))) continue;
-      const parent = members.get(entry.ppid);
-      if (!parent || entry.created < parent.created) continue;
+      const id = key(entry);
+      if (found.has(id) || unresolved.has(id)) continue;
+      const parents = byPid.get(entry.ppid);
+      if (!parents) continue;
+      const whileAlive = parent => parent.created <= entry.created && entry.created <= parent.lastSeen;
+      if (parents.some(parent => !parent.unresolved && whileAlive(parent))) {
+        found.set(id, entry);
+        add({ pid: entry.pid, created: entry.created, lastSeen: Infinity });
+        grew = true;
+        continue;
+      }
       const holder = live.get(entry.ppid);
-      if (holder && holder.created !== parent.created && entry.created >= holder.created) continue;
-      found.set(key(entry), entry);
-      members.set(entry.pid, entry);
-      grew = true;
+      const holderIsOurs = holder && parents.some(parent => parent.created === holder.created);
+      if (holder && !holderIsOurs && holder.created <= entry.created) continue; // the replacement's child
+      const maybe = parent => parent.created <= entry.created &&
+        (parent.goneBy === undefined || entry.created <= parent.goneBy);
+      if (parents.some(maybe)) {
+        unresolved.set(id, entry);
+        add({ pid: entry.pid, created: entry.created, lastSeen: Infinity, unresolved: true });
+        grew = true;
+      }
     }
   }
-  return [...found.values()];
+  return { found: [...found.values()], unresolved: [...unresolved.values()] };
 }
 
 /**
@@ -98,51 +137,69 @@ function descendantsOf(processes, roots) {
  * @param {function} [deps.list]     () => Promise<process entries>
  * @param {function} [deps.killPid]  (pid) => void, ends that one process (never a tree:
  *                                     the walk here decides what belongs to the task)
+ * @param {function} [deps.now]      () => milliseconds since the epoch
  */
-function createProcessTree({ list = listProcesses, killPid, delay } = {}) {
+function createProcessTree({ list = listProcesses, killPid, delay, now = Date.now } = {}) {
   const wait = delay || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const clock = () => toCreated(now());
   return {
-    /** The live process with this pid, as an identity, or null. */
+    toCreated,
+
+    /** The live process with this pid, as an anchor, or null. */
     async identify(pid) {
       try {
-        return (await list()).find(entry => entry.pid === pid) || null;
+        const startedAt = clock();
+        const entry = (await list()).find(candidate => candidate.pid === pid);
+        return entry ? { ...entry, lastSeen: startedAt } : null;
       } catch (_error) {
         return null;
       }
     },
 
-    /** The live members of the trees under `roots`, or null when unobservable. */
-    async members(roots) {
+    /** The live members under `anchors`, as anchors, or null when unobservable. */
+    async members(anchors) {
       try {
-        return descendantsOf(await list(), roots);
+        const startedAt = clock();
+        return classify(await list(), anchors).found.map(entry => ({ ...entry, lastSeen: startedAt }));
       } catch (_error) {
         return null;
       }
     },
 
     /**
-     * After the tree was asked to end: find anything under `roots` that is
+     * After the tree was asked to end: find anything under `anchors` that is
      * still alive, end it, and look again until nothing survives or the time
-     * runs out. A process that already exited still anchors its children,
-     * and every process found on the way is kept as an anchor too, so a
-     * grandchild whose parent exits between two looks is still found.
+     * runs out. Every process found stays an anchor, and an anchor seen gone
+     * bounds what it can have started. Unresolved processes are never ended.
      */
-    async settle(roots, { timeoutMs = 10_000 } = {}) {
+    async settle(anchors, { timeoutMs = 10_000 } = {}) {
       const started = Date.now();
       const ended = new Set();
-      const anchors = new Map(roots.map(root => [key(root), root]));
+      const known = new Map(anchors.map(anchor => [key(anchor), { ...anchor }]));
       for (;;) {
-        let alive;
+        let listing;
+        const listedFrom = clock();
         try {
-          alive = descendantsOf(await list(), [...anchors.values()]);
-          for (const entry of alive) anchors.set(key(entry), entry);
+          listing = await list();
         } catch (_error) {
-          return { observed: false, survivors: null, endedByHost: ended.size };
+          return { observed: false, survivors: null, unresolved: null, endedByHost: ended.size };
         }
-        if (!alive.length || Date.now() - started >= timeoutMs) {
-          return { observed: true, survivors: alive.length, endedByHost: ended.size };
+        const listedTo = clock();
+        const { found, unresolved } = classify(listing, [...known.values()]);
+        const alive = new Set(listing.map(key));
+        for (const anchor of known.values()) {
+          if (!alive.has(key(anchor)) && anchor.goneBy === undefined) anchor.goneBy = listedTo;
         }
-        for (const entry of alive) {
+        for (const entry of found) {
+          const anchor = known.get(key(entry)) || { ...entry, lastSeen: -Infinity };
+          anchor.lastSeen = Math.max(anchor.lastSeen, listedFrom);
+          known.set(key(entry), anchor);
+        }
+        const done = !found.length && !unresolved.length;
+        if (done || Date.now() - started >= timeoutMs) {
+          return { observed: true, survivors: found.length, unresolved: unresolved.length, endedByHost: ended.size };
+        }
+        for (const entry of found) {
           try {
             killPid?.(entry.pid);
             ended.add(key(entry));
@@ -154,4 +211,4 @@ function createProcessTree({ list = listProcesses, killPid, delay } = {}) {
   };
 }
 
-module.exports = { createProcessTree, descendantsOf, listProcesses, parseList };
+module.exports = { classify, createProcessTree, listProcesses, parseList, toCreated };

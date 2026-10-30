@@ -567,8 +567,17 @@ class TaskHost {
     // with the `collecting` state.
     // Snapshot the provider's descendants first: once the root is gone, a
     // tree kill can no longer find them by walking from it.
-    const root = await launch.rootIdentity;
-    const before = root ? await this._processTree.members([root]) : null;
+    const identity = await launch.rootIdentity;
+    // The PTY holds a handle to the root until it reports the exit, and
+    // Windows does not reuse a pid while a handle is open: the root is known
+    // alive (its pid is its own) from creation until the exit is observed.
+    const rootAnchor = () => identity && {
+      ...identity,
+      lastSeen: Math.max(identity.lastSeen, this._processTree.toCreated(
+        launch.record.process?.exitedAt ? Date.parse(launch.record.process.exitedAt) : Date.now(),
+      )),
+    };
+    const before = identity ? await this._processTree.members([rootAnchor()]) : null;
     const endedByHost = this._requestKill(launch, 'collect');
     const rootExited = await Promise.race([launch.exited.then(() => true), delay(10_000).then(() => false)]);
     // While the root is alive, ask for its whole tree. Once it has exited its
@@ -585,22 +594,24 @@ class TaskHost {
     }
     // Then require that nothing from the snapshot, or started by it since,
     // is still alive; end any survivor and look again.
-    const settled = root && before
-      ? await this._processTree.settle([root, ...before])
-      : { observed: false, survivors: null, endedByHost: 0 };
+    const settled = identity && before
+      ? await this._processTree.settle([...before, rootAnchor()])
+      : { observed: false, survivors: null, unresolved: null, endedByHost: 0 };
     launch.record.collection = {
       providerEndedByHost: endedByHost,
       rootExitObserved: rootExited,
       treeTermination,
       descendants: {
         observed: settled.observed,
-        atBoundary: before ? before.filter(entry => entry.pid !== root.pid).length : null,
+        atBoundary: before ? before.filter(entry => entry.pid !== identity.pid).length : null,
         survivors: settled.survivors,
+        unresolved: settled.unresolved,
         endedAfterRoot: settled.endedByHost,
       },
-      // Stable only when the root exited and no descendant survived: anything
-      // else may have raced the snapshot. Qualification never accepts that.
-      stable: rootExited && settled.observed && settled.survivors === 0,
+      // Stable only when the root exited, no descendant survived, and nothing
+      // of uncertain parentage was left: anything else may have raced the
+      // snapshot. Qualification never accepts that.
+      stable: rootExited && settled.observed && settled.survivors === 0 && settled.unresolved === 0,
       boundaryAt: new Date().toISOString(),
     };
     if (this._closed) return undefined;
@@ -647,6 +658,7 @@ class TaskHost {
         tree,
         logFile: path.join(checksDir, `${index}.log`),
         signal: launch.checkAbort.signal,
+        processTree: this._processTree,
       }));
     }
 

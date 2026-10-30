@@ -196,10 +196,16 @@ interrupted (host restart before any spawn intent)
   is still alive (an exited root's pid may already name another process), and
   then looks again: anything from that snapshot, or started by it since, that
   is still alive is ended one process at a time and looked for again, for up
-  to 10 seconds. Every process found stays an anchor, so a grandchild whose
-  parent exited between two looks is still found. A process older than its
-  supposed parent is a reused pid, not a descendant, and a child of a live
-  process that has reused an anchor's pid belongs to that process.
+  to 10 seconds. Parentage is proven by time, never by a parent pid alone: a
+  process belongs to the task only if it was created while its parent was
+  known to be alive. The root is known alive until its exit is observed (the
+  PTY holds its handle, and Windows does not reuse a pid while a handle is
+  open); every process found stays an anchor, known alive until the last
+  listing that showed it, so a grandchild whose parent exited between two
+  looks is still found. A process created after its parent was last seen but
+  before it was seen gone could be either, so it is never ended and the
+  collection is unstable (`descendants.unresolved`); one created later, or the
+  child of a live process that reused the parent's pid, is not the task's.
   `collection` records whether the host ended the provider, whether the root
   exit was observed, the tree request, and `descendants` (how many were alive
   at the boundary, how many were ended after the root, how many survived). It
@@ -213,8 +219,10 @@ interrupted (host restart before any spawn intent)
   `prevent-app-suspension`, released as soon as none is (the display may still
   sleep). When the machine goes on battery, every active task is stopped and
   its evidence is collected without host checks (`checks.skipped:
-  "on-battery"`); a check already running is ended with its process tree and
-  recorded as `cancelled`.
+  "on-battery"`); a check already running is ended and recorded as
+  `cancelled`, and one not yet started never starts. A check root that has
+  already exited (its descendants may still hold its output open) is never
+  killed by pid; its descendants are found by time as above.
 - **Quiet windows.** A task window opens without taking focus, and its title
   and state line name the task and the provider, never the route alias or the
   instruction. Only an explicit `show` may bring a window forward.

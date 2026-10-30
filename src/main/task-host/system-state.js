@@ -48,7 +48,9 @@ function parseObservation(line) {
 /**
  * @param {object} [deps]
  * @param {function} [deps.spawnHelper] () => child process speaking the helper protocol
- * @param {function} [deps.onChange]    (observation, previous) => void after each new answer
+ * @param {function} [deps.onChange]    (effective, previous) => void whenever the effective
+ *                                      session or power changes, including when an answer
+ *                                      ages into unknown because the helper stopped answering
  */
 function createSystemObserver({
   spawnHelper = defaultSpawnHelper, onChange = () => {}, pollMs = POLL_MS, maxAgeMs = MAX_AGE_MS,
@@ -60,6 +62,7 @@ function createSystemObserver({
   let timer = null;
   let stopped = false;
   let waiters = [];
+  let reported = null; // the effective state last passed to onChange
 
   function ensureChild() {
     if (child || stopped) return child;
@@ -76,11 +79,10 @@ function createSystemObserver({
       for (let index = buffer.indexOf('\n'); index >= 0; index = buffer.indexOf('\n')) {
         const line = buffer.slice(0, index);
         buffer = buffer.slice(index + 1);
-        const previous = latest;
         latest = { ...parseObservation(line), at: now() };
         for (const resolve of waiters) resolve(true);
         waiters = [];
-        try { onChange(latest, previous); } catch (_error) { /* observer callbacks never break polling */ }
+        report();
       }
       if (buffer.length > 4096) buffer = '';
     });
@@ -95,7 +97,22 @@ function createSystemObserver({
     return child;
   }
 
+  function effective() {
+    const answer = fresh();
+    return { session: answer?.session || 'unknown', power: answer?.power || 'unknown', sid: answer?.sid || null };
+  }
+
+  function report() {
+    const current = effective();
+    if (reported && current.session === reported.session && current.power === reported.power) return;
+    const previous = reported;
+    reported = current;
+    try { onChange(current, previous); } catch (_error) { /* observer callbacks never break polling */ }
+  }
+
   function poll() {
+    // An answer that aged out is a change too, even if the helper is silent.
+    if (reported) report();
     const current = ensureChild();
     try { current?.stdin.write('q\n'); } catch (_error) { /* restarted next time */ }
   }

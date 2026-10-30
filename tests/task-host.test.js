@@ -18,7 +18,7 @@ const {
 } = require('../src/main/task-host/request');
 const { TaskIngress, readDiscovery, sendIngressCommand } = require('../src/main/task-host/ingress');
 const { collectDiffEvidence, isWorkTreeRoot, summarizeStatus } = require('../src/main/task-host/git');
-const { compareCheckClaims } = require('../src/main/task-host/checks');
+const { compareCheckClaims, runCheck } = require('../src/main/task-host/checks');
 const {
   CODEX_ADAPTER_CONTRACT, createCodexAdapter, createFixtureAdapter, createResultFrame, parseResultFrame, readResultFile,
   renderPromptFile,
@@ -28,7 +28,7 @@ const {
   REQUIRED_EVIDENCE, qualificationEvidence, qualificationFile, qualificationShortfall, readQualification, writeQualification,
 } = require('../src/main/task-host/qualification');
 const { PROFILES, POLICY_KIND, checkRemoteAuthorization, readPolicy } = require('../src/main/task-host/policy');
-const { createProcessTree, descendantsOf } = require('../src/main/task-host/process-tree');
+const { classify, createProcessTree } = require('../src/main/task-host/process-tree');
 const { createSystemObserver, parseObservation } = require('../src/main/task-host/system-state');
 
 const TEST_SID = 'S-1-5-21-1000-2000-3000-1001';
@@ -113,9 +113,10 @@ function fakePresentation() {
  * identified and nothing is left behind. One test drives the real listing.
  */
 const settledTree = Object.freeze({
-  identify: async pid => ({ pid, ppid: 0, created: 1 }),
+  toCreated: ms => ms,
+  identify: async pid => ({ pid, ppid: 0, created: 1, lastSeen: 1 }),
   members: async roots => [...roots],
-  settle: async () => ({ observed: true, survivors: 0, endedByHost: 0 }),
+  settle: async () => ({ observed: true, survivors: 0, unresolved: 0, endedByHost: 0 }),
 });
 
 async function hostFixture(t, { limits = {}, adapters = null, hostOptions = {} } = {}) {
@@ -573,7 +574,7 @@ test('a file-channel report is read from the private outbox, outside the diff', 
   assert.deepEqual([result.collection.providerEndedByHost, result.collection.rootExitObserved], [true, true],
     'the provider tree ends before evidence is frozen');
   assert.equal(result.collection.stable, true);
-  assert.deepEqual(result.collection.descendants, { observed: true, atBoundary: 0, survivors: 0, endedAfterRoot: 0 });
+  assert.deepEqual(result.collection.descendants, { observed: true, atBoundary: 0, survivors: 0, unresolved: 0, endedAfterRoot: 0 });
   assert.equal(result.collection.treeTermination, 'not-needed', 'an exited root is never signalled by pid');
   assert.equal(host.windowInput(req.launchId, 'more\r'), false, 'input is closed once collection starts');
   const prompt = fs.readFileSync(path.join(dataDir, 'launches', req.launchId, 'prompt.md'), 'utf8');
@@ -1037,19 +1038,28 @@ test('task windows open with a neutral title', async (t) => {
   assert.equal(host.windowAttach(req.launchId).state.route, undefined);
 });
 
-test('descendants are found by creation order, never by a reused pid', () => {
+test('parentage is proven by time, never by a parent pid alone', () => {
   const processes = [
     { pid: 10, ppid: 1, created: 100 },
     { pid: 11, ppid: 10, created: 110 },
     { pid: 12, ppid: 11, created: 120 },
     { pid: 13, ppid: 10, created: 50 }, // older than its "parent": pid reuse
-    { pid: 14, ppid: 99, created: 130 }, // parent 99 exited; anchored by the snapshot
+    { pid: 14, ppid: 99, created: 130 }, // parent 99 exited after being seen at 140
   ];
   const keys = list => list.map(entry => entry.pid).sort((a, b) => a - b);
-  assert.deepEqual(keys(descendantsOf(processes, [{ pid: 10, ppid: 1, created: 100 }])), [10, 11, 12]);
-  assert.deepEqual(keys(descendantsOf(processes, [{ pid: 10, ppid: 1, created: 90 }])), [],
+  const sort = anchors => {
+    const { found, unresolved } = classify(processes, anchors);
+    return { found: keys(found), unresolved: keys(unresolved) };
+  };
+  assert.deepEqual(sort([{ pid: 10, created: 100, lastSeen: 100 }]), { found: [10, 11, 12], unresolved: [] });
+  assert.deepEqual(sort([{ pid: 10, created: 90, lastSeen: 95 }]), { found: [], unresolved: [] },
     'a live process with another creation time replaced the root; its children belong to it, not the task');
-  assert.deepEqual(keys(descendantsOf(processes, [{ pid: 99, ppid: 1, created: 125 }])), [14]);
+  assert.deepEqual(sort([{ pid: 99, created: 125, lastSeen: 140 }]), { found: [14], unresolved: [] },
+    'created while its exited parent was known alive');
+  assert.deepEqual(sort([{ pid: 99, created: 125, lastSeen: 126 }]), { found: [], unresolved: [14] },
+    'created after the parent was last seen, before it was seen gone: not provable either way');
+  assert.deepEqual(sort([{ pid: 99, created: 125, lastSeen: 126, goneBy: 128 }]), { found: [], unresolved: [] },
+    'created after the parent was seen gone: not its child');
 });
 
 test('a descendant left behind by the provider is ended before evidence is frozen', async (t) => {
@@ -1113,17 +1123,104 @@ test('a locked qualification is kept across an unlocked one of the same version 
 // ── independent review (2026-10-31) regressions ────────────────
 
 test('a child of a process that reused an anchor pid is not the task\'s', () => {
-  const root = { pid: 10, ppid: 1, created: 100 };
+  const root = { pid: 10, created: 100, lastSeen: 160 };
   const processes = [
     { pid: 10, ppid: 5, created: 200 }, // pid 10 now belongs to another process
     { pid: 11, ppid: 10, created: 210 }, // ...whose child this is
-    { pid: 12, ppid: 10, created: 150 }, // created before the reuse: the task's orphan
+    { pid: 12, ppid: 10, created: 150 }, // created while the root was alive: the task's orphan
   ];
-  assert.deepEqual(descendantsOf(processes, [root]).map(entry => entry.pid), [12]);
+  assert.deepEqual(classify(processes, [root]).found.map(entry => entry.pid), [12]);
+});
+
+test('a child of an exited replacement is never ended, and keeps the collection unresolved', async () => {
+  // The task's anchor (pid 10) exited; an unrelated process reused pid 10,
+  // started pid 11, and exited before the listing.
+  const killed = [];
+  const tree = createProcessTree({
+    list: async () => [{ pid: 11, ppid: 10, created: 210 }],
+    killPid: pid => killed.push(pid),
+    delay: async () => {},
+  });
+  const settled = await tree.settle([{ pid: 10, created: 100, lastSeen: 150 }], { timeoutMs: 0 });
+  assert.deepEqual(killed, []);
+  assert.deepEqual(settled, { observed: true, survivors: 0, unresolved: 1, endedByHost: 0 });
+});
+
+test('identities that share a pid are all kept, so a surviving child is still found', async () => {
+  const anchors = [
+    { pid: 10, created: 100, lastSeen: 160 }, // A, exited
+    { pid: 20, created: 110, lastSeen: 160 }, // B, A's child
+  ];
+  const listings = [
+    [
+      { pid: 10, ppid: 20, created: 200 }, // C: B's child, reusing A's pid
+      { pid: 20, ppid: 10, created: 110 }, // B
+      { pid: 30, ppid: 10, created: 150 }, // D: A's surviving child
+    ],
+    [{ pid: 30, ppid: 10, created: 150 }], // B and C ended; D still alive
+    [],
+  ];
+  const killed = [];
+  const tree = createProcessTree({
+    list: async () => listings.shift() || [],
+    killPid: pid => killed.push(pid),
+    delay: async () => {},
+  });
+  const settled = await tree.settle(anchors);
+  assert.deepEqual([...killed].sort((a, b) => a - b), [10, 20, 30, 30], 'D is found again on the second look');
+  assert.deepEqual(settled, { observed: true, survivors: 0, unresolved: 0, endedByHost: 3 });
+});
+
+function fakeCheckChild() {
+  const { PassThrough } = require('node:stream');
+  const child = new (require('node:events'))();
+  child.pid = 4242;
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.kill = () => {};
+  return child;
+}
+
+test('a cancelled check is never started, and an exited check root is never killed by pid', async (t) => {
+  const { repo, base } = fixtureRepo(t);
+  const check = { kind: 'npm-script', name: 'test' };
+  let spawned = 0;
+  const aborted = new AbortController();
+  aborted.abort();
+  const notStarted = await runCheck({
+    worktree: repo, base, check, tree: 'x', signal: aborted.signal, spawnImpl: () => { spawned += 1; return fakeCheckChild(); },
+  });
+  assert.equal(notStarted.outcome, 'cancelled');
+  assert.equal(spawned, 0, 'the repository script never started');
+
+  // The root exits while a descendant keeps its output open; then power goes.
+  const calls = [];
+  const child = fakeCheckChild();
+  const settledWith = [];
+  const processTree = {
+    toCreated: ms => ms,
+    settle: async (anchors) => { settledWith.push(anchors); return { observed: true, survivors: 0, unresolved: 0 }; },
+  };
+  const abort = new AbortController();
+  const running = runCheck({
+    worktree: repo, base, check, tree: 'x', signal: abort.signal, processTree,
+    spawnImpl: (file, args) => { calls.push(file); return file === 'taskkill' ? fakeCheckChild() : child; },
+  });
+  await waitFor(() => calls.length === 1);
+  child.emit('exit', 0);
+  abort.abort();
+  await new Promise(resolve => setImmediate(resolve));
+  child.emit('close', 0);
+  const record = await running;
+  assert.deepEqual(calls.filter(file => file === 'taskkill'), [], 'no taskkill by an exited pid');
+  assert.equal(settledWith.length, 1);
+  assert.equal(settledWith[0][0].pid, 4242);
+  assert.equal(record.outcome, 'cancelled');
+  assert.deepEqual(record.descendantsAfterCancel, { observed: true, survivors: 0, unresolved: 0 });
 });
 
 test('settling keeps every process it found, so a grandchild of an exited child is still ended', async () => {
-  const root = { pid: 10, ppid: 1, created: 100 };
+  const root = { pid: 10, ppid: 1, created: 100, lastSeen: 125 };
   const listings = [
     [{ pid: 20, ppid: 10, created: 120 }], // child started after the boundary
     [{ pid: 30, ppid: 20, created: 130 }], // the child exited, leaving a grandchild
@@ -1137,7 +1234,7 @@ test('settling keeps every process it found, so a grandchild of an exited child 
   });
   const settled = await tree.settle([root]);
   assert.deepEqual(killed, [20, 30]);
-  assert.deepEqual(settled, { observed: true, survivors: 0, endedByHost: 2 });
+  assert.deepEqual(settled, { observed: true, survivors: 0, unresolved: 0, endedByHost: 2 });
 });
 
 test('the system observer reads the session, power, and account from Windows, and ages into unknown', async () => {
@@ -1151,6 +1248,7 @@ test('the system observer reads the session, power, and account from Windows, an
 
   const { EventEmitter, PassThrough } = require('node:stream');
   let clock = 0;
+  let silent = false;
   const answers = ['1 0 1|1|S-1-5-21-1-2-3-1001', '1 0 0|0|S-1-5-21-1-2-3-1001'];
   const changes = [];
   const observer = createSystemObserver({
@@ -1162,7 +1260,7 @@ test('the system observer reads the session, power, and account from Windows, an
       child.stdout = new PassThrough();
       child.stderr = new PassThrough();
       child.stdin = new PassThrough();
-      child.stdin.on('data', () => child.stdout.write(`${answers.shift() ?? 'error|error|error'}\n`));
+      child.stdin.on('data', () => { if (!silent) child.stdout.write(`${answers.shift() ?? 'error|error|error'}\n`); });
       child.kill = () => {};
       return child;
     },
@@ -1176,6 +1274,9 @@ test('the system observer reads the session, power, and account from Windows, an
   assert.deepEqual(changes, [[null, 'ac'], ['ac', 'battery']]);
   clock += 16_000;
   assert.deepEqual([observer.session(), observer.power(), observer.account()], ['unknown', 'unknown', null], 'a stale answer is unknown');
+  silent = true;
+  observer.refresh(); // the helper no longer answers
+  assert.deepEqual(changes.at(-1), ['battery', 'unknown'], 'aging into unknown is reported without an answer');
   observer.stop();
   void EventEmitter;
 });

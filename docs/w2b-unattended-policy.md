@@ -129,7 +129,12 @@ all fixed with a regression test each: an exited root's pid could be
 signalled after reuse, and children of a process that reused an anchor pid
 were counted; the re-check forgot processes it had found; Electron's session
 view fails open; an unknown AC status read as AC; a running host check
-survived going on battery; and the owner was matched by name, not SID.
+survived going on battery; and the owner was matched by name, not SID. A
+re-review found five gaps in those fixes (stale ancestry through an exited
+replacement, identities collapsed by pid, a check root killed by pid after
+exit, aging into unknown power not reported, a cancelled check still
+started); parentage is now proven by time and left unresolved when it cannot
+be, and each gap has a regression test.
 
 ## Deviations from the advice
 

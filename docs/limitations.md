@@ -115,8 +115,9 @@ does not have. Everything below is current for v0.4.0.
   workstation is locked Codex is refused until a locked-session qualification
   completes. Process ownership is a snapshot and re-check of the provider's
   descendants, not a Job Object, so a process started from outside the tree
-  is not seen, and a pid reused in the instant between a listing and its
-  termination is not excluded. A disconnected session is treated as locked.
+  is not seen, a pid reused in the instant between a listing and its
+  termination is not excluded, and a process whose parentage cannot be proven
+  by time is left running (the collection is then unstable). A disconnected session is treated as locked.
   Turn-started and
   waiting-for-input are not observable; a task that asks a question shows
   `running` until a receipt, an exit, or Stop. Host-observed checks run the
