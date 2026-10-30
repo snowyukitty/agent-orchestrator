@@ -17,7 +17,7 @@ const {
   MAX_INSTRUCTION_CHARS, taskRequestDigest, validateEnvelope, validateTaskRequest,
 } = require('../src/main/task-host/request');
 const { TaskIngress, readDiscovery, sendIngressCommand } = require('../src/main/task-host/ingress');
-const { collectDiffEvidence, summarizeStatus } = require('../src/main/task-host/git');
+const { collectDiffEvidence, isWorkTreeRoot, summarizeStatus } = require('../src/main/task-host/git');
 const { compareCheckClaims } = require('../src/main/task-host/checks');
 const {
   createCodexAdapter, createFixtureAdapter, createResultFrame, parseResultFrame, renderPromptFile,
@@ -267,6 +267,26 @@ test('diff evidence covers commits, staged, unstaged, untracked, binary, and ren
   assert.deepEqual(fs.readFileSync(path.join(repo, '.git', 'index')), indexBefore,
     'the real index is untouched');
   assert.ok(evidence.notDetected.includes('writes-outside-worktree'));
+});
+
+test('a workspace is its work tree root however its path is spelled', async (t) => {
+  const { repo } = fixtureRepo(t, tempDir(t, 'ao-task-root-long-name-'));
+  assert.equal(await isWorkTreeRoot(repo), true);
+  assert.equal(await isWorkTreeRoot(repo.toUpperCase()), true, 'letter case');
+  fs.mkdirSync(path.join(repo, 'sub'));
+  assert.equal(await isWorkTreeRoot(path.join(repo, 'sub')), false, 'a subdirectory is not the root');
+  assert.equal(await isWorkTreeRoot(path.join(repo, '.git')), false, 'the Git directory is not a work tree');
+  if (process.platform !== 'win32') return;
+  // Hosted Windows runners hand out an 8.3 temp path (RUNNER~1); Git reports
+  // the long name, so a string comparison refused every workspace there.
+  const short = execFileSync('powershell', ['-NoProfile', '-Command',
+    `(New-Object -ComObject Scripting.FileSystemObject).GetFolder('${repo.replace(/'/g, "''")}').ShortPath`],
+  { encoding: 'utf8', windowsHide: true }).trim();
+  if (short.toLowerCase() === repo.toLowerCase()) {
+    t.diagnostic('8.3 names are disabled on this volume; the short-path case is not exercised');
+    return;
+  }
+  assert.equal(await isWorkTreeRoot(short), true, '8.3 short path');
 });
 
 test('porcelain v2 status summary consumes rename source fields', () => {

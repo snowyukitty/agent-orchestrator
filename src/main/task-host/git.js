@@ -35,10 +35,12 @@ function git(cwd, args, { env = null, maxBuffer = 4 * 1024 * 1024, encoding = 'u
   });
 }
 
+// Ask Git rather than compare path strings: an 8.3 short name, a junction, or
+// letter case makes the same directory spell differently than --show-toplevel.
 async function isWorkTreeRoot(dir) {
   try {
-    const top = (await git(dir, ['rev-parse', '--show-toplevel'])).trim();
-    return path.resolve(top).toLowerCase() === path.resolve(dir).toLowerCase();
+    const [inside, cdup = ''] = (await git(dir, ['rev-parse', '--is-inside-work-tree', '--show-cdup'])).split(/\r?\n/);
+    return inside === 'true' && cdup === '';
   } catch (_error) {
     return false;
   }
