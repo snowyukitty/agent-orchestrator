@@ -37,6 +37,7 @@ const ADAPTER_REFUSALS = new Set([
 ]);
 const MAX_RECORD_BYTES = 256 * 1024;
 const MAX_LISTED_LAUNCHES = 50;
+const JOB_SWEEP_MS = 2_000;
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -51,7 +52,7 @@ class TaskHost {
    * @param {function} [deps.observeSession] () => 'unlocked' | 'locked' | 'not-interactive' | 'unknown', read at admission
    * @param {function} [deps.observePower]   () => 'ac' | 'battery' | 'unknown', read at admission
    * @param {function} [deps.holdAwake]      () => release function; held while any task is active
-   * @param {object}   [deps.processTree]    see process-tree.js; without it no collection is stable
+   * @param {object}   [deps.jobs]           see process-jobs.js; without it no collection is stable
    * @param {function} [deps.account]        () => the SID of the account this host runs as, or null
    * @param {string[]} [deps.allowUnqualified] adapter ids allowed although unqualified
    */
@@ -64,7 +65,7 @@ class TaskHost {
     observeSession = () => 'unlocked',
     observePower = () => 'ac',
     holdAwake = null,
-    processTree = null,
+    jobs = null,
     account = () => null,
     allowUnqualified = [],
     terminateTree = null,
@@ -84,7 +85,7 @@ class TaskHost {
     this._observePower = observePower;
     this._holdAwake = holdAwake;
     this._releaseAwake = null;
-    this._processTree = processTree;
+    this._jobs = jobs;
     this._account = account;
     this._suspending = false;
     this._allowUnqualified = new Set(allowUnqualified);
@@ -505,6 +506,7 @@ class TaskHost {
     this._setState(launch, 'spawning', null, { spawnIntentAt: new Date().toISOString() });
     const sessionId = `task-${launch.launchId.slice(0, 8)}`;
     let created;
+    const spawnStartedAt = Date.now();
     try {
       created = this._registry.create(spec, { id: sessionId, cols: 120, rows: 32 });
     } catch (_error) {
@@ -515,9 +517,19 @@ class TaskHost {
     const spawnedAt = new Date().toISOString();
     launch.record.delivery.handedAt = spawnedAt;
     launch.record.process = { rootPid: created.pid, spawnedAt, exitCode: null, exitedAt: null };
-    // Identify the root now, while it is surely alive: its children stay
-    // anchored to this identity even after it exits on its own.
-    launch.rootIdentity = this._processTree ? this._processTree.identify(created.pid) : Promise.resolve(null);
+    // Put the provider in its own job right away: everything it starts from
+    // here on is a member, however it was started.
+    launch.adoption = this._jobs
+      ? this._jobs.adopt(launch.launchId, created.pid, spawnStartedAt).catch(() => ({ adopted: false, reason: 'helper-error' }))
+      : Promise.resolve({ adopted: false, reason: 'unavailable' });
+    // A process can be created outside its parent's job (PowerShell 7 starts
+    // native commands that way); bring such children in while their parents
+    // are still alive to name them, not only at the boundary.
+    launch.adoption.then((adoption) => {
+      if (!adoption.adopted || launch.sweepDone) return;
+      launch.sweep = setInterval(() => { this._jobs.escapes(launch.launchId).catch(() => {}); }, JOB_SWEEP_MS);
+      launch.sweep.unref?.();
+    });
     launch.exited = new Promise((resolve) => { launch.resolveExit = resolve; });
     launch.turnComplete = new Promise((resolve) => { launch.resolveTurn = resolve; });
     launch.stopped = new Promise((resolve) => { launch.resolveStop = resolve; });
@@ -565,26 +577,24 @@ class TaskHost {
     // the report, running checks, and taking the diff, so nothing the task
     // started is still writing while the evidence is frozen. Input closes
     // with the `collecting` state.
-    // Snapshot the provider's descendants first: once the root is gone, a
-    // tree kill can no longer find them by walking from it.
-    const identity = await launch.rootIdentity;
-    // The PTY holds a handle to the root until it reports the exit, and
-    // Windows does not reuse a pid while a handle is open: the root is known
-    // alive (its pid is its own) from creation until the exit is observed.
-    const rootAnchor = () => identity && {
-      ...identity,
-      lastSeen: Math.max(identity.lastSeen, this._processTree.toCreated(
-        launch.record.process?.exitedAt ? Date.parse(launch.record.process.exitedAt) : Date.now(),
-      )),
-    };
-    const before = identity ? await this._processTree.members([rootAnchor()]) : null;
+    const adoption = await launch.adoption;
+    launch.sweepDone = true;
+    clearInterval(launch.sweep);
+    // Bring in any member's child still outside the job, while the members
+    // are alive to name it; what cannot be adopted is counted, never ended
+    // by pid.
+    const escapes = adoption.adopted ? await this._jobs.escapes(launch.launchId) : null;
+    const atBoundary = adoption.adopted ? await this._jobs.active(launch.launchId) : null;
+    const escaped = escapes ? escapes.count : null;
     const endedByHost = this._requestKill(launch, 'collect');
     const rootExited = await Promise.race([launch.exited.then(() => true), delay(10_000).then(() => false)]);
-    // While the root is alive, ask for its whole tree. Once it has exited its
-    // pid may already belong to another process, so it is never signalled by
-    // pid again; its descendants are found and ended by identity below.
-    let treeTermination = rootExited ? 'not-needed' : 'unavailable';
-    if (!rootExited && this._killTree && launch.record.process?.rootPid) {
+    // End every member of the provider's job, however it was started and
+    // whether or not its parent is still alive, and read back what is left.
+    const left = adoption.adopted ? await this._jobs.end(launch.launchId, 10_000) : null;
+    // Without a job, a still-running root's tree can only be asked to end by
+    // pid, which proves nothing about what it left behind.
+    let treeTermination = adoption.adopted ? 'job' : 'unavailable';
+    if (!adoption.adopted && !rootExited && this._killTree && launch.record.process?.rootPid) {
       try {
         this._killTree(launch.record.process.rootPid);
         treeTermination = 'requested';
@@ -592,26 +602,23 @@ class TaskHost {
         treeTermination = 'failed';
       }
     }
-    // Then require that nothing from the snapshot, or started by it since,
-    // is still alive; end any survivor and look again.
-    const settled = identity && before
-      ? await this._processTree.settle([...before, rootAnchor()])
-      : { observed: false, survivors: null, unresolved: null, endedByHost: 0 };
+    if (adoption.adopted) await this._jobs.release(launch.launchId);
     launch.record.collection = {
       providerEndedByHost: endedByHost,
       rootExitObserved: rootExited,
       treeTermination,
-      descendants: {
-        observed: settled.observed,
-        atBoundary: before ? before.filter(entry => entry.pid !== identity.pid).length : null,
-        survivors: settled.survivors,
-        unresolved: settled.unresolved,
-        endedAfterRoot: settled.endedByHost,
+      ownership: {
+        job: adoption.adopted,
+        ...(adoption.adopted ? { childrenAdopted: adoption.childrenAdopted } : { reason: adoption.reason }),
+        aliveAtBoundary: atBoundary,
+        escapedAtBoundary: escaped,
+        ...(escapes?.names.length ? { escapedNames: escapes.names } : {}),
+        survivors: left,
       },
-      // Stable only when the root exited, no descendant survived, and nothing
-      // of uncertain parentage was left: anything else may have raced the
-      // snapshot. Qualification never accepts that.
-      stable: rootExited && settled.observed && settled.survivors === 0 && settled.unresolved === 0,
+      // Stable only when the root exited, nothing had left the job, and the
+      // job is empty: anything else may still be writing. Qualification never
+      // accepts that.
+      stable: rootExited && adoption.adopted && escaped === 0 && left === 0,
       boundaryAt: new Date().toISOString(),
     };
     if (this._closed) return undefined;
@@ -658,7 +665,8 @@ class TaskHost {
         tree,
         logFile: path.join(checksDir, `${index}.log`),
         signal: launch.checkAbort.signal,
-        processTree: this._processTree,
+        jobs: this._jobs,
+        jobKey: `${launch.launchId}.check${index}`,
       }));
     }
 
@@ -903,6 +911,8 @@ class TaskHost {
         this._setState(launch, 'interrupted', 'host-quit');
       }
       launch.resolveStop?.();
+      launch.sweepDone = true;
+      clearInterval(launch.sweep);
     }
     await this._registry.killAllSequential('task host shutdown');
     await this._registry.whenTerminationsComplete();

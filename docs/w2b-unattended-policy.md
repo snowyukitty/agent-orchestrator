@@ -93,9 +93,9 @@ Each is required and must be demonstrated, in this order of importance:
    A retry of an accepted launch ID returns its observation even after expiry
    and never authorizes a new spawn.
 2. **Process ownership at the collection boundary.** Before evidence is
-   frozen, the host snapshots the provider's descendants, ends the tree, and
-   requires that none of them survive; root exit alone no longer makes a
-   collection stable. Host checks run in their own bounded tree.
+   frozen, the host ends everything the provider started and requires that
+   nothing survives; root exit alone no longer makes a collection stable.
+   Host checks run in their own bounded job.
 3. **Session observation** as above, plus a **locked-session qualification**
    per adapter: one live turn started and completed while the target is
    locked.
@@ -115,7 +115,7 @@ Implemented in the task host (2026-10-31), with the exact codes and formats in
 | Gate | State |
 |---|---|
 | 1. Fresh, target-bound requests | Host side done: `remote-start`, `policy.json` with `hostId`, `ownerSid` and `remoteStarts`, 60 s validity, retry-safe. The relay from the controller (Matrix route and controller UI) is not built yet. |
-| 2. Process ownership | Done: descendant snapshot at the boundary, re-check until none survive; proven with a fixture that leaves a detached process behind, and on a live Codex turn (three descendants found and ended). |
+| 2. Process ownership | Done with Windows Job Objects: the provider and each host check run in their own job, strays outside it are adopted, and the job is terminated and must be empty; proven with a fixture that leaves a detached process behind, and on a live Codex turn (four processes in the job, none outside, none surviving). |
 | 3. Session observation | Done: read from Windows (WTS) through a helper, stale answers refused; `provider-session-unqualified` without a locked qualification. **The locked-session qualification of Codex is still open**: one attempt was admitted and completed while locked, but the workstation was unlocked before collection, so it does not count. |
 | 4. Power | Done: AC only (an unknown AC status is not AC), `prevent-app-suspension` while any task is active, stop on battery or unknown power and cancel a running host check, `host-suspending`. |
 | 5. Owner-visible activity | Host side done: `list` (public status only, from durable records). The controller view is not built yet. |
@@ -133,8 +133,11 @@ survived going on battery; and the owner was matched by name, not SID. A
 re-review found five gaps in those fixes (stale ancestry through an exited
 replacement, identities collapsed by pid, a check root killed by pid after
 exit, aging into unknown power not reported, a cancelled check still
-started); parentage is now proven by time and left unresolved when it cannot
-be, and each gap has a regression test.
+started). A third review showed that inferring membership from pids and
+creation times cannot be made sound (a PTY releases its handle before it
+reports the exit, the clock can move backwards, a check's creation is only
+bounded from below), so ownership moved to Job Objects, which the first
+review had named as the stronger option.
 
 ## Deviations from the advice
 
@@ -142,11 +145,12 @@ be, and each gap has a regression test.
   machines are on unmetered home networks and the providers bill by plan, not
   by traffic; reading Windows' connection cost from Electron needs a native
   bridge. It is recorded here as a known gap, to revisit for the laptop.
-- **Process ownership uses a descendant snapshot and verified tree end, not
-  Job Objects.** Assigning a ConPTY child to a job at creation needs a native
-  module under node-pty. The snapshot still makes "stable" mean "no surviving
-  descendants", which is the property that matters for evidence; Job Objects
-  stay the stronger later option.
+- **The job is joined just after spawn, not at creation.** node-pty cannot
+  create a process inside a job, so the helper adopts the root within
+  milliseconds of the spawn, together with any child it already started. A
+  child created and exited in that window, or a process started outside every
+  member's job by an intermediate that exited before the next sweep, is not
+  seen.
 - **Limits are larger on the twin primaries** (2 h, 24/day, 2 concurrent
   instead of 30 min, 8/day, 1) because real tasks there are full development
   work; the smaller machines keep the advice's conservative shape.

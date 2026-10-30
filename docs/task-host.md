@@ -190,39 +190,36 @@ interrupted (host restart before any spawn intent)
 - **Collection boundary.** However the turn ends, the host ends the provider's
   process tree and closes window input *before* it reads the report, runs
   checks, and takes the diff, so nothing the task started is still writing
-  while the evidence is frozen. The root is identified (pid and creation
-  time) when it spawns. At the boundary the host lists the root's live
-  descendants, ends the provider, asks for the whole tree only while the root
-  is still alive (an exited root's pid may already name another process), and
-  then looks again: anything from that snapshot, or started by it since, that
-  is still alive is ended one process at a time and looked for again, for up
-  to 10 seconds. Parentage is proven by time, never by a parent pid alone: a
-  process belongs to the task only if it was created while its parent was
-  known to be alive. The root is known alive until its exit is observed (the
-  PTY holds its handle, and Windows does not reuse a pid while a handle is
-  open); every process found stays an anchor, known alive until the last
-  listing that showed it, so a grandchild whose parent exited between two
-  looks is still found. A process created after its parent was last seen but
-  before it was seen gone could be either, so it is never ended and the
-  collection is unstable (`descendants.unresolved`); one created later, or the
-  child of a live process that reused the parent's pid, is not the task's.
-  `collection` records whether the host ended the provider, whether the root
-  exit was observed, the tree request, and `descendants` (how many were alive
-  at the boundary, how many were ended after the root, how many survived). It
-  is `stable` only when the root exited and no descendant survived; a listing
-  that fails is unstable, and an unstable collection never qualifies a
-  provider. This is a snapshot and re-check, not a Job Object: a process that
-  escapes the tree between two listings by being started from outside it is
-  not seen. The terminal stays readable in the window (and in the private
-  `terminal.log`); a follow-up conversation is a new task.
+  while the evidence is frozen. Membership is kept by Windows, not inferred:
+  right after the provider spawns, a long-lived helper (`process-jobs.ps1`)
+  opens it, checks it was created after the spawn began, and puts it in a new
+  **Job Object**, adopting any child it already started. Everything started
+  afterwards joins the job by itself, detached processes included, and the
+  helper keeps the root's handle open so its pid is never reused while the job
+  exists. A process can still be created outside its parent's job (PowerShell
+  7 was observed starting native commands that way, which is how the routed
+  launcher starts Codex), so every 2 seconds while the task runs, and again at
+  the boundary, the helper adopts any live child of a live member that is
+  outside the job. At the boundary the host counts what is in the job and what
+  could not be adopted, ends the provider, and terminates the whole job,
+  waiting up to 10 seconds for it to empty. `collection.ownership` records
+  whether the job was held, how many processes were in it and outside it at
+  the boundary, and how many survived. The collection is `stable` only when
+  the root exited, nothing was left outside the job, and the job is empty;
+  without a job (the helper failed, or another platform) it is never stable,
+  and an unstable collection never qualifies a provider. Pids and creation
+  times are never used to decide what to end. The terminal stays readable in
+  the window (and in the private `terminal.log`); a follow-up conversation is
+  a new task.
 - **Power.** While any task prepares, runs, or is checked, the host holds
   `prevent-app-suspension`, released as soon as none is (the display may still
   sleep). When the machine goes on battery, every active task is stopped and
   its evidence is collected without host checks (`checks.skipped:
   "on-battery"`); a check already running is ended and recorded as
-  `cancelled`, and one not yet started never starts. A check root that has
-  already exited (its descendants may still hold its output open) is never
-  killed by pid; its descendants are found by time as above.
+  `cancelled`, and one not yet started never starts. Each host check also runs
+  in its own job, so ending it reaches processes that outlived its root and
+  still hold its output; a check whose output never closes is given up after
+  5 seconds.
 - **Quiet windows.** A task window opens without taking focus, and its title
   and state line name the task and the provider, never the route alias or the
   instruction. Only an explicit `show` may bring a window forward.
@@ -408,6 +405,8 @@ host refused each one correctly, and each changed the adapter:
 | 7 | every axis held, including a stable collection | superseded by 8 |
 | 8 | every axis held under the stricter collection (no surviving descendant) | the current receipt (unlocked session) |
 | 9 (`--await-locked`) | admitted and started with the workstation locked; every axis held, and the boundary found and ended three Codex descendants; the workstation was unlocked before collection | no locked receipt: a locked qualification must stay locked to the end |
+| 10–14 | provider ownership moved to Job Objects after three review rounds; the first job turns showed Codex itself outside the job (started by the PowerShell launcher), so the collection was unstable and no receipt was written | strays adopted every 2 s and at the boundary |
+| 15 | every axis held; four processes in the job at the boundary, none outside, none surviving | the current receipt (unlocked session) |
 
 The locked-session qualification is still to be run with nobody at the
 console: start it, lock the workstation, and leave it locked until the run
@@ -442,7 +441,7 @@ window, or launch record exists and the host keeps answering. Rows marked
 | Unsupported or unqualified provider | `provider-unavailable` / `provider-unqualified` at admission | admission test, fixture run |
 | Missing login, full quota | Not observable by the fixture; with a real provider the task ends without a receipt or frame and stays `needs-review` with that evidence | *live* |
 | Locked console, or no window can be created | Admitted only for a provider qualified while locked (`provider-session-unqualified` otherwise); an unreadable session is `session-state-unknown`; no window means no spawn (`window-unavailable`) | admission test, locked qualification turn |
-| Provider leaves a process behind | Found from the boundary snapshot, ended, and looked for again; a survivor makes the collection unstable | `a descendant left behind…`, fixture run |
+| Provider leaves a process behind | Still in the provider's job, and ended with it; a member's child outside the job is adopted, and one that cannot be adopted makes the collection unstable | `a detached process left behind…`, fixture run, live qualification |
 | Machine goes on battery, or suspends | Active tasks stop and collect without host checks; new starts refused | power test |
 | Host crash around spawn | `spawnIntentAt` precedes the PTY; recovery reports `uncertain` / `interrupted` and never respawns | restart recovery test |
 | Nonzero child exit | `ending: process-exited` with exit code; evidence still collected; no completion claimed | host test |
@@ -502,8 +501,9 @@ and `light` (1, 20 min, 4).
   stale and absent hosts, duplicate and conflicting starts, busy admission,
   restart recovery, session and power admission, the host policy and remote
   authorization, profile limits, the awake hold, `list`, neutral titles, and
-  process ownership (one test lists the real process table and ends a
-  detached descendant the fixture leaves behind).
+  process ownership (two tests use real Job Objects: one ends a detached
+  process the fixture provider leaves behind, one ends a host check's job when
+  power goes).
 - `npm run verify:task-host` starts Electron with throwaway user data, drives
   the real ingress through the client, and requires a real task window per
   task, opened without taking focus. It also reads the real session and power

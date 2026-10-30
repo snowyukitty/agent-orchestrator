@@ -153,13 +153,16 @@ function createSystemObserver({
 }
 
 function defaultSpawnHelper() {
-  // Passed inline: the script may live inside an asar archive, which
-  // PowerShell cannot open by path.
+  // Read here, not run by path: the script may live inside an asar archive,
+  // which PowerShell cannot open.
   const script = fs.readFileSync(HELPER, 'utf8');
+  // The script travels in the environment: encoded on the command line it
+  // would exceed the 32K command-line limit.
+  const bootstrap = "Invoke-Expression ([Environment]::GetEnvironmentVariable('AO_TASK_HOST_SYSTEM_SCRIPT'))";
   return spawn('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-    '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
-  ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    '-EncodedCommand', Buffer.from(bootstrap, 'utf16le').toString('base64'),
+  ], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, AO_TASK_HOST_SYSTEM_SCRIPT: script } });
 }
 
 module.exports = { createSystemObserver, parseObservation };

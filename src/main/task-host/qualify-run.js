@@ -107,8 +107,8 @@ async function runTaskHostQualification({
   report('the provider version was observed through the route', !!providerVersion, providerVersion || 'unknown');
   log(`[TaskHostQualify] receipts for other turns in the provider process: ${result.lifecycle?.uncorrelatedReceipts || 0}`);
   log(`[TaskHostQualify] session at admission ${result.admission?.session ?? 'unknown'}, at collection ${sessionAtEnd}`);
-  const descendants = result.collection?.descendants;
-  log(`[TaskHostQualify] descendants at the boundary ${descendants?.atBoundary ?? 'unknown'}, ended after the root ${descendants?.endedAfterRoot ?? 'unknown'}, surviving ${descendants?.survivors ?? 'unknown'}`);
+  const ownership = result.collection?.ownership;
+  log(`[TaskHostQualify] provider job ${ownership?.job ? `held (${ownership.childrenAdopted} children adopted late)` : `unavailable (${ownership?.reason ?? 'unknown'})`}, processes at the boundary ${ownership?.aliveAtBoundary ?? 'unknown'}, outside the job ${ownership?.escapedAtBoundary ?? 'unknown'}${ownership?.escapedNames ? ` (${ownership.escapedNames.join(', ')})` : ''}, surviving ${ownership?.survivors ?? 'unknown'}`);
   if (awaitLocked) report('the turn ran in a locked session', session === 'locked');
   for (const [axis, value] of Object.entries(evidence)) {
     report(`qualification axis ${axis}`, !qualificationShortfall(evidence).includes(axis), String(value));

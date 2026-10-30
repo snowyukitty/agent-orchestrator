@@ -156,8 +156,9 @@ Keep these properties, each covered by a test:
   task's pointer sentence; side turns in the same process never do;
 - the session and power state are read from the system at admission, never
   assumed; a locked session admits only a provider qualified while locked;
-- a collection is `stable` only when the root exited and no descendant from
-  the boundary snapshot survived;
+- a collection is `stable` only when the root exited, the provider's Job
+  Object was held, nothing was left outside it, and it is empty after being
+  terminated; nothing is ever ended by a pid that could have been reused;
 - `remote-start` is refused unless `policy.json` enables it, names this host,
   binds the exact request digest, and has not expired (60 s at most);
 - task windows never take focus on open, and no window, title, or `list`

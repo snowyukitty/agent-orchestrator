@@ -113,11 +113,11 @@ does not have. Everything below is current for v0.4.0.
   cross-machine carrier yet (W2b): `remote-start` and its per-host policy
   exist, but nothing relays a request from another machine, and while the
   workstation is locked Codex is refused until a locked-session qualification
-  completes. Process ownership is a snapshot and re-check of the provider's
-  descendants, not a Job Object, so a process started from outside the tree
-  is not seen, a pid reused in the instant between a listing and its
-  termination is not excluded, and a process whose parentage cannot be proven
-  by time is left running (the collection is then unstable). A disconnected session is treated as locked.
+  completes. Process ownership uses a Windows Job Object joined just after
+  spawn (node-pty cannot create a process inside one), so a child created and
+  gone in those milliseconds, or a process started outside the job by an
+  intermediate that exited between two 2-second sweeps, is not seen. A
+  disconnected session is treated as locked.
   Turn-started and
   waiting-for-input are not observable; a task that asks a question shows
   `running` until a receipt, an exit, or Stop. Host-observed checks run the

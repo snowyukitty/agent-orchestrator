@@ -102,8 +102,8 @@ async function runTaskHostFixture({ host, presentation, dataDir, BrowserWindow, 
   check('it ran in a new visible window', result.window?.created && result.window.nativeHandle && windowVisible(result.window.windowId));
   check('the task window opened without taking focus', BrowserWindow.fromId(result.window?.windowId)?.isFocused() === false);
   check('nothing the provider started was alive when evidence was frozen',
-    result.collection?.stable === true && result.collection.descendants?.observed === true &&
-    result.collection.descendants.survivors === 0);
+    result.collection?.stable === true && result.collection.ownership?.job === true &&
+    result.collection.ownership.survivors === 0);
   const rendered = await BrowserWindow.fromId(result.window?.windowId)?.webContents.executeJavaScript(
     "[document.querySelector('.xterm-rows')?.textContent || '', document.getElementById('task-state')?.textContent || '']",
   ).catch(() => null);
@@ -142,9 +142,9 @@ async function runTaskHostFixture({ host, presentation, dataDir, BrowserWindow, 
   await start(orphan);
   await waitFor(orphan.launchId, s => TERMINAL.has(s.state));
   const orphanResult = await call({ op: 'result', launchId: orphan.launchId });
-  check('a descendant left behind is found and ended before evidence is frozen',
-    orphanResult.collection?.stable === true && orphanResult.collection.descendants?.endedAfterRoot >= 1,
-    `ended ${orphanResult.collection?.descendants?.endedAfterRoot ?? 'unknown'}`);
+  check('a descendant left behind is ended with the provider\'s job before evidence is frozen',
+    orphanResult.collection?.stable === true && orphanResult.collection.ownership?.aliveAtBoundary >= 1,
+    `alive at the boundary ${orphanResult.collection?.ownership?.aliveAtBoundary ?? 'unknown'}`);
 
   // No receipt: running until stopped; closing the window only detaches it.
   const silent = makeRequest('no-receipt');

@@ -12,6 +12,8 @@ const { createHash } = require('crypto');
 
 const { showFile } = require('./git');
 
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 const CHECK_TIMEOUT_MS = 10 * 60 * 1000;
 const MAX_CHECK_OUTPUT_BYTES = 256 * 1024;
 const SCRIPT_NAME = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,63}$/;
@@ -27,8 +29,12 @@ function scriptDefinition(packageJsonText, name) {
   }
 }
 
+// After a cancelled or timed-out check's job is ended, how long to wait for
+// its output to close before giving up on it.
+const CLOSE_GRACE_MS = 5_000;
+
 function runProcess(file, args, {
-  cwd, timeoutMs, maxOutputBytes, spawnImpl = spawn, signal = null, processTree = null,
+  cwd, timeoutMs, maxOutputBytes, spawnImpl = spawn, signal = null, jobs = null, jobKey = null,
 }) {
   return new Promise((resolve) => {
     const startedAt = Date.now();
@@ -60,33 +66,39 @@ function runProcess(file, args, {
     let timedOut = false;
     let cancelled = false;
     let settled = false;
-    let exitedAt = null;
-    let afterExit = null;
-    child.on('exit', () => { exitedAt = Date.now(); });
-    // Until Node reports the exit it holds the root's handle, so its pid still
-    // names it and a tree kill by pid is safe. After the exit (descendants may
-    // still hold its output open) the pid is never used again: its
-    // descendants are found by creation time and ended one by one.
+    let exited = false;
+    let termination = null;
+    child.on('exit', () => { exited = true; });
+    // The check runs in its own job, so ending it reaches every process it
+    // started, including ones that outlived it and still hold its output.
+    const owned = jobs && jobKey && child.pid
+      ? jobs.adopt(jobKey, child.pid, startedAt).catch(() => ({ adopted: false }))
+      : Promise.resolve({ adopted: false });
     const endTree = () => {
-      if (settled) return;
-      if (exitedAt === null) {
-        try {
-          if (process.platform === 'win32') {
-            spawnImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
-          } else {
-            child.kill('SIGKILL');
-          }
-        } catch (_error) { /* already gone */ }
-        return;
-      }
-      if (!processTree || afterExit) return;
-      const anchor = {
-        pid: child.pid,
-        // No later than its true creation, which followed this moment.
-        created: processTree.toCreated(startedAt),
-        lastSeen: processTree.toCreated(exitedAt),
-      };
-      afterExit = processTree.settle([anchor]).catch(() => ({ observed: false }));
+      if (settled || termination) return;
+      termination = (async () => {
+        const adoption = await owned;
+        if (adoption.adopted) return { job: true, survivors: await jobs.end(jobKey, 10_000) };
+        // Without a job, only a root that has not exited may be ended by pid:
+        // Node still holds its handle, so the pid still names it.
+        if (!exited) {
+          try {
+            if (process.platform === 'win32') {
+              spawnImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+            } else {
+              child.kill('SIGKILL');
+            }
+          } catch (_error) { /* already gone */ }
+        }
+        return { job: false, survivors: null };
+      })();
+      // Bounded even if something still holds the output open.
+      termination.then(() => delay(CLOSE_GRACE_MS)).then(() => {
+        if (settled) return;
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        finish(null, false);
+      });
     };
     const timer = setTimeout(() => { timedOut = true; endTree(); }, timeoutMs);
     const onAbort = () => { cancelled = true; endTree(); };
@@ -97,9 +109,10 @@ function runProcess(file, args, {
       settled = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
-      const descendantsAfterCancel = afterExit ? await afterExit : null;
+      const ended = termination ? await termination : null;
+      if ((await owned).adopted) await jobs.release(jobKey);
       resolve({
-        descendantsAfterCancel,
+        termination: ended,
         startedAt,
         finishedAt: Date.now(),
         exitCode: typeof code === 'number' ? code : null,
@@ -120,7 +133,7 @@ function runProcess(file, args, {
  * check started; `logFile` receives the bounded output privately.
  */
 async function runCheck({
-  worktree, base, check, tree, logFile, timeoutMs = CHECK_TIMEOUT_MS, spawnImpl, signal = null, processTree = null,
+  worktree, base, check, tree, logFile, timeoutMs = CHECK_TIMEOUT_MS, spawnImpl, signal = null, jobs = null, jobKey = null,
 }) {
   const record = {
     kind: check.kind,
@@ -160,16 +173,14 @@ async function runCheck({
     ? ['cmd.exe', ['/d', '/s', '/c', `npm run ${check.name}`]]
     : ['npm', ['run', check.name]];
   const run = await runProcess(file, args, {
-    cwd: worktree, timeoutMs, maxOutputBytes: MAX_CHECK_OUTPUT_BYTES, spawnImpl, signal, processTree,
+    cwd: worktree, timeoutMs, maxOutputBytes: MAX_CHECK_OUTPUT_BYTES, spawnImpl, signal, jobs, jobKey,
   });
   if (run.notStarted) {
     record.outcome = 'cancelled';
     return record;
   }
-  if (run.descendantsAfterCancel) {
-    const { observed, survivors, unresolved } = run.descendantsAfterCancel;
-    record.descendantsAfterCancel = { observed: !!observed, survivors: survivors ?? null, unresolved: unresolved ?? null };
-  }
+  // What ending a cancelled or timed-out check left behind.
+  if (run.termination) record.termination = run.termination;
   record.startedAt = new Date(run.startedAt).toISOString();
   record.durationMs = run.finishedAt - run.startedAt;
   record.exitCode = run.exitCode;

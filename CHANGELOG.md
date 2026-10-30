@@ -13,17 +13,19 @@ the product story; this file keeps the history.
   (`npm run qualify:task-host -- --confirm-live --await-locked`). Tasks start
   only on AC power; the machine is kept from suspending while one is active,
   and going on battery stops them without host checks. Evidence is frozen
-  only once no descendant of the provider survives: the host snapshots the
-  tree at the boundary, ends it, and looks again — on a live Codex turn it
-  found and ended three. A per-host `policy.json` picks a `primary`,
+  only once nothing the provider started survives: the provider and each host
+  check run in their own Windows Job Object, children created outside it
+  (PowerShell 7 starts native commands that way) are adopted, and the job is
+  terminated and must be empty. A per-host `policy.json` picks a `primary`,
   `secondary` or `light` profile (concurrency, turn limit, starts per day)
   and enables `remote-start`, whose authorization must name this host and the
   exact request and expires within 60 seconds. `list` shows recent launches
   without content, and task windows open without taking focus under a
-  neutral title. An independent Codex review via ATD found six defects in the
-  first cut (pid reuse, a forgetful re-check, fail-open session and power
-  views, a check surviving battery, owner by name); each is fixed with a
-  regression test. Codex 0.165.0 was re-qualified under the stricter boundary;
+  neutral title. Three rounds of independent Codex review via ATD found
+  fail-open session and power views, owner matching by name, a check
+  surviving battery, and, repeatedly, unsound pid-and-time reasoning about
+  which processes belonged to a task; that reasoning was replaced by Job
+  Objects. Codex 0.165.0 was re-qualified under the stricter boundary;
   its locked-session qualification is still to be run with nobody at the
   console. The relay from another machine and the controller view are not
   built yet.

@@ -64,7 +64,7 @@ const { TaskIngress } = require('./src/main/task-host/ingress');
 const { CODEX_ADAPTER_CONTRACT, createCodexAdapter, createFixtureAdapter } = require('./src/main/task-host/adapters');
 const { qualificationFile, readQualification } = require('./src/main/task-host/qualification');
 const { createTaskWindowPresentation } = require('./src/main/task-host/task-windows');
-const { createProcessTree } = require('./src/main/task-host/process-tree');
+const { createProcessJobs } = require('./src/main/task-host/process-jobs');
 const { createSystemObserver } = require('./src/main/task-host/system-state');
 
 // Establish the singular identity before Electron creates storage, sessions,
@@ -148,6 +148,7 @@ let sessionContinuation = null;
 let taskHost = null;    // TaskHost, only when enabled or in fixture mode
 let taskIngress = null;
 let taskHostSystem = null;  // system-state observer for task-host admission
+let taskHostJobs = null;    // Job Objects that own task providers and checks
 let testDataCleanupScheduled = false;
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 const isDev = process.argv.includes('--dev');
@@ -945,6 +946,8 @@ async function startTaskHost({ fixture = false, qualify = false } = {}) {
   // does not refuse its first request for no reason.
   await taskHostSystem.start();
   const system = taskHostSystem;
+  taskHostJobs = createProcessJobs({ log: message => console.warn(message) });
+  if (!await taskHostJobs.start()) console.warn('[TaskHost] process jobs unavailable; no collection will be stable');
   host = new TaskHost({
     dataDir,
     pty,
@@ -958,8 +961,7 @@ async function startTaskHost({ fixture = false, qualify = false } = {}) {
       const id = powerSaveBlocker.start('prevent-app-suspension');
       return () => { if (powerSaveBlocker.isStarted(id)) powerSaveBlocker.stop(id); };
     },
-    // One process at a time: the tree walk decides membership by identity.
-    processTree: createProcessTree({ killPid: pid => { try { process.kill(pid); } catch (_error) { /* gone */ } } }),
+    jobs: taskHostJobs,
     allowUnqualified: qualify ? ['codex'] : [],
     terminateTree: process.platform === 'win32' ? killProcessTree : null,
     killTree: killProcessTree,
@@ -1021,6 +1023,7 @@ async function runTaskHostFixtureMode() {
   }
   taskIngress?.stop();
   taskHostSystem?.stop();
+  taskHostJobs?.stop();
   taskIngress = null;
   presentation?.closeAll();
   await taskHost?.shutdown();
@@ -1079,6 +1082,7 @@ async function runTaskHostQualifyMode() {
   }
   taskIngress?.stop();
   taskHostSystem?.stop();
+  taskHostJobs?.stop();
   taskIngress = null;
   presentation?.closeAll();
   await taskHost?.shutdown();
@@ -1164,6 +1168,7 @@ function cleanupNonProcessState() {
   // Refuse new task requests first; the drain below interrupts active tasks.
   taskIngress?.stop();
   taskHostSystem?.stop();
+  taskHostJobs?.stop();
   taskIngress = null;
   codexLifecycleBroker?.stop();
   cancelSleepTimer();
