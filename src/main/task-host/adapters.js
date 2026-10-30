@@ -154,9 +154,15 @@ function readResultFile(file, maxBytes) {
     return unreadable;
   } finally {
     if (fd !== null) {
-      try { fs.closeSync(fd); } catch (_error) { /* already closed */ }
+      try {
+        fs.closeSync(fd);
+      } catch (_error) {
+        length = null;
+      }
     }
   }
+  // A handle that would not close is a failed read, whatever it returned.
+  if (length === null) return unreadable;
   if (length > maxBytes) return { complete: false, missingStart: false };
   let text;
   try {
@@ -188,7 +194,7 @@ function parseResultFrame(capture, frame) {
   const text = capture.channel === 'file' ? capture.text : capture.text.replace(/\r?\n/g, '');
   let body;
   try {
-    body = parseStrictJson(text.trim(), { maxDepth: 4 });
+    body = parseStrictJson(text, { maxDepth: 4 });
   } catch (_error) {
     return { frame: 'invalid', nonce: 'not-observed', aiReported: null };
   }

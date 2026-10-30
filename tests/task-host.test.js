@@ -596,6 +596,15 @@ test('a file report must be one bounded regular file', (t) => {
   fs.writeFileSync(file, JSON.stringify({ nonce: frame.nonce, summary: 'kept  as\twritten', checks: [] }));
   assert.equal(parseResultFrame(readResultFile(file, 4096), frame).aiReported.summary, 'kept  as\twritten');
 
+  fs.writeFileSync(file, ` ${JSON.stringify({ nonce: frame.nonce, summary: 's', checks: [] })}\u000B`);
+  assert.equal(parseResultFrame(readResultFile(file, 4096), frame).frame, 'invalid', 'non-JSON whitespace is not trimmed away');
+  fs.writeFileSync(file, `\r\n ${JSON.stringify({ nonce: frame.nonce, summary: 's', checks: [] })}\t\n`);
+  assert.equal(parseResultFrame(readResultFile(file, 4096), frame).frame, 'complete', 'JSON whitespace is allowed');
+
+  // A handle that will not close is a failed read, not an accepted report.
+  const close = t.mock.method(fs, 'closeSync', () => { throw Object.assign(new Error('io'), { code: 'EIO' }); });
+  assert.equal(parseResultFrame(readResultFile(file, 4096), frame).frame, 'invalid');
+  close.mock.restore();
   // A read that fails after inspection is an unreadable report, not a crash.
   t.mock.method(fs, 'openSync', () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); });
   assert.equal(parseResultFrame(readResultFile(file, 4096), frame).frame, 'invalid');
