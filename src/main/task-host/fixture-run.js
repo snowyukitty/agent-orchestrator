@@ -80,6 +80,8 @@ async function runTaskHostFixture({ host, presentation, dataDir, BrowserWindow, 
   check('only the fixture provider is admitted',
     caps.providers?.find(p => p.provider === 'fixture')?.admitted === true &&
     caps.providers?.find(p => p.provider === 'codex')?.admitted === false);
+  check('the session and power state are read from the system',
+    ['unlocked', 'locked'].includes(caps.session) && ['ac', 'battery'].includes(caps.power), `${caps.session} / ${caps.power}`);
   check('a wrong token is refused',
     (await sendIngressCommand({ ...discovery, token: '0'.repeat(64) }, { op: 'capabilities' })).error === 'unauthorized');
   check('an unqualified provider is refused at admission',
@@ -98,6 +100,10 @@ async function runTaskHostFixture({ host, presentation, dataDir, BrowserWindow, 
   check('the complete task reaches needs-review', done.state === 'needs-review', done.state);
   const result = await call({ op: 'result', launchId: complete.launchId });
   check('it ran in a new visible window', result.window?.created && result.window.nativeHandle && windowVisible(result.window.windowId));
+  check('the task window opened without taking focus', BrowserWindow.fromId(result.window?.windowId)?.isFocused() === false);
+  check('nothing the provider started was alive when evidence was frozen',
+    result.collection?.stable === true && result.collection.descendants?.observed === true &&
+    result.collection.descendants.survivors === 0);
   const rendered = await BrowserWindow.fromId(result.window?.windowId)?.webContents.executeJavaScript(
     "[document.querySelector('.xterm-rows')?.textContent || '', document.getElementById('task-state')?.textContent || '']",
   ).catch(() => null);
@@ -130,6 +136,15 @@ async function runTaskHostFixture({ host, presentation, dataDir, BrowserWindow, 
   check('a false AI check claim is reported as disagreement',
     claimResult.evidence?.checks?.comparison?.[0]?.agreement === 'disagree');
   check('each task gets its own window', claimResult.window?.windowId !== result.window?.windowId);
+
+  // A provider that exits on its own but leaves a detached process behind.
+  const orphan = makeRequest('orphan');
+  await start(orphan);
+  await waitFor(orphan.launchId, s => TERMINAL.has(s.state));
+  const orphanResult = await call({ op: 'result', launchId: orphan.launchId });
+  check('a descendant left behind is found and ended before evidence is frozen',
+    orphanResult.collection?.stable === true && orphanResult.collection.descendants?.endedAfterRoot >= 1,
+    `ended ${orphanResult.collection?.descendants?.endedAfterRoot ?? 'unknown'}`);
 
   // No receipt: running until stopped; closing the window only detaches it.
   const silent = makeRequest('no-receipt');

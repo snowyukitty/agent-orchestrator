@@ -11,6 +11,10 @@
 // When every qualification axis holds, it writes a receipt to the production
 // task-host directory binding the result to the adapter contract and the
 // exact Codex version observed. When any axis fails, no receipt is written.
+//
+// With `awaitLocked`, it first waits for the owner to lock the workstation
+// and records a locked-session qualification only when the session was
+// locked both when the task was admitted and when it was collected.
 
 const fs = require('fs');
 const path = require('path');
@@ -27,6 +31,7 @@ const {
 const TERMINAL = new Set(['needs-review', 'failed-to-start', 'interrupted', 'uncertain']);
 // The harmless task takes well under a minute; a stalled turn should not burn quota.
 const TURN_TIMEOUT_MS = 3 * 60_000;
+const LOCK_WAIT_MS = 10 * 60_000;
 
 const INSTRUCTION = [
   'Create a file named fixture-output.txt in the current working directory',
@@ -36,7 +41,7 @@ const INSTRUCTION = [
 ].join(' ');
 
 async function runTaskHostQualification({
-  dataDir, receiptFile, route, adapterContract, log = console.log,
+  dataDir, receiptFile, route, adapterContract, awaitLocked = false, log = console.log,
 }) {
   const report = (name, ok, detail = '') => log(`[TaskHostQualify] ${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
   const repo = path.join(dataDir, 'qualify-repo');
@@ -45,6 +50,17 @@ async function runTaskHostQualification({
 
   const discovery = readDiscovery(dataDir);
   const call = command => sendIngressCommand(discovery, command);
+  if (awaitLocked) {
+    log('[TaskHostQualify] waiting for the workstation to be locked (Win+L); the turn starts once it is');
+    const waitStarted = Date.now();
+    while ((await call({ op: 'capabilities' })).session !== 'locked') {
+      if (Date.now() - waitStarted > LOCK_WAIT_MS) {
+        log('[TaskHostQualify] NOT qualified: the session was not locked in time. No receipt was written.');
+        return { qualified: false, shortfall: ['lockedSession'] };
+      }
+      await new Promise(resolve => setTimeout(resolve, 2_000));
+    }
+  }
   const request = validateTaskRequest({
     schema: 1,
     kind: 'agent-orchestrator.task-launch',
@@ -78,6 +94,8 @@ async function runTaskHostQualification({
     await new Promise(resolve => setTimeout(resolve, 1_000));
   }
   const result = await call({ op: 'result', launchId: request.launchId });
+  const sessionAtEnd = (await call({ op: 'capabilities' })).session;
+  const session = result.admission?.session === 'locked' && sessionAtEnd === 'locked' ? 'locked' : 'unlocked';
   const ownerCheckoutClean = execFileSync('git', ['status', '--porcelain'], {
     cwd: repo, encoding: 'utf8', windowsHide: true,
   }).trim() === '';
@@ -88,12 +106,17 @@ async function runTaskHostQualification({
     `${status.state}${status.reason ? `/${status.reason}` : ''}, ending ${status.ending ?? 'none'}`);
   report('the provider version was observed through the route', !!providerVersion, providerVersion || 'unknown');
   log(`[TaskHostQualify] receipts for other turns in the provider process: ${result.lifecycle?.uncorrelatedReceipts || 0}`);
+  log(`[TaskHostQualify] session at admission ${result.admission?.session ?? 'unknown'}, at collection ${sessionAtEnd}`);
+  const descendants = result.collection?.descendants;
+  log(`[TaskHostQualify] descendants at the boundary ${descendants?.atBoundary ?? 'unknown'}, ended after the root ${descendants?.endedAfterRoot ?? 'unknown'}, surviving ${descendants?.survivors ?? 'unknown'}`);
+  if (awaitLocked) report('the turn ran in a locked session', session === 'locked');
   for (const [axis, value] of Object.entries(evidence)) {
     report(`qualification axis ${axis}`, !qualificationShortfall(evidence).includes(axis), String(value));
   }
   const shortfall = qualificationShortfall(evidence);
   if (status.state !== 'needs-review') shortfall.unshift('needs-review');
   if (!providerVersion) shortfall.push('providerVersion');
+  if (awaitLocked && session !== 'locked') shortfall.push('lockedSession');
   if (shortfall.length) {
     // The throwaway user data is removed at exit; keep the failed turn's
     // terminal transcript privately beside the receipts so it can be read.
@@ -106,11 +129,11 @@ async function runTaskHostQualification({
     log(`[TaskHostQualify] NOT qualified: ${shortfall.join(', ')}. No receipt was written.`);
     return { qualified: false, shortfall, evidence };
   }
-  writeQualification(receiptFile, { provider: 'codex', adapterContract, providerVersion, evidence });
+  writeQualification(receiptFile, { provider: 'codex', adapterContract, providerVersion, evidence, session });
   // A transcript from an earlier failed turn no longer describes this state.
   fs.rmSync(path.join(path.dirname(receiptFile), 'codex.last-failure.log'), { force: true });
-  log(`[TaskHostQualify] QUALIFIED codex-cli ${providerVersion} for adapter contract ${adapterContract}`);
-  return { qualified: true, shortfall: [], evidence, providerVersion };
+  log(`[TaskHostQualify] QUALIFIED codex-cli ${providerVersion} for adapter contract ${adapterContract} (${session} session)`);
+  return { qualified: true, shortfall: [], evidence, providerVersion, session };
 }
 
 module.exports = { INSTRUCTION, runTaskHostQualification };

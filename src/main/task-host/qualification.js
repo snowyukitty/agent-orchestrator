@@ -16,6 +16,7 @@ const QUALIFICATION_SCHEMA = 1;
 const QUALIFICATION_KIND = 'agent-orchestrator.task-host-qualification';
 const MAX_RECEIPT_BYTES = 16 * 1024;
 const VERSION_PATTERN = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
+const SESSION_STATES = ['unlocked', 'locked'];
 
 /** Every axis a qualifying live turn must show, and the value it must show. */
 const REQUIRED_EVIDENCE = Object.freeze({
@@ -58,10 +59,24 @@ function qualificationShortfall(evidence) {
     .map(([key]) => key);
 }
 
-function writeQualification(file, { provider, adapterContract, providerVersion, evidence, qualifiedAt = new Date() }) {
+/**
+ * Write a receipt for a qualifying turn observed in `session` (the state at
+ * admission and at completion, or `unlocked` when they differed). A locked
+ * qualification of the same contract and version is kept when an unlocked
+ * turn is qualified later; any other change starts the record afresh.
+ */
+function writeQualification(file, {
+  provider, adapterContract, providerVersion, evidence, session = 'unlocked', qualifiedAt = new Date(),
+}) {
   if (qualificationShortfall(evidence).length) throw new Error('evidence does not qualify');
   if (typeof providerVersion !== 'string' || !VERSION_PATTERN.test(providerVersion)) {
     throw new Error('provider version was not observed');
+  }
+  if (!SESSION_STATES.includes(session)) throw new Error('session state was not observed');
+  const prior = readQualification(file, { provider, adapterContract });
+  const sessions = new Set([session]);
+  if (prior.status === 'qualified' && prior.providerVersion === providerVersion) {
+    for (const state of prior.sessions) sessions.add(state);
   }
   const receipt = {
     schema: QUALIFICATION_SCHEMA,
@@ -70,6 +85,7 @@ function writeQualification(file, { provider, adapterContract, providerVersion, 
     adapterContract,
     providerVersion,
     qualifiedAt: qualifiedAt.toISOString(),
+    sessions: SESSION_STATES.filter(state => sessions.has(state)),
     evidence: { ...evidence },
   };
   writeJsonAtomic(file, receipt);
@@ -95,7 +111,18 @@ function readQualification(file, { provider, adapterContract }) {
     return { status: 'invalid' };
   }
   if (receipt.adapterContract !== adapterContract) return { status: 'stale-contract' };
-  return { status: 'qualified', providerVersion: receipt.providerVersion, qualifiedAt: receipt.qualifiedAt };
+  // Receipts written before session states were recorded were unlocked turns.
+  const sessions = receipt.sessions === undefined ? ['unlocked'] : receipt.sessions;
+  if (!Array.isArray(sessions) || !sessions.length || sessions.some(state => !SESSION_STATES.includes(state))) {
+    return { status: 'invalid' };
+  }
+  return {
+    status: 'qualified',
+    providerVersion: receipt.providerVersion,
+    qualifiedAt: receipt.qualifiedAt,
+    sessions: [...sessions],
+    lockedSession: sessions.includes('locked'),
+  };
 }
 
 module.exports = {

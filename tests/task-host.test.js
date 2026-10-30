@@ -27,6 +27,8 @@ const { TaskHost } = require('../src/main/task-host/host');
 const {
   REQUIRED_EVIDENCE, qualificationEvidence, qualificationFile, qualificationShortfall, readQualification, writeQualification,
 } = require('../src/main/task-host/qualification');
+const { PROFILES, POLICY_KIND, checkRemoteAuthorization, readPolicy } = require('../src/main/task-host/policy');
+const { createProcessTree, descendantsOf } = require('../src/main/task-host/process-tree');
 
 const FIXTURE_AGENT = path.join(__dirname, 'fixtures', 'task-host', 'fixture-agent.js');
 
@@ -103,7 +105,17 @@ function fakePresentation() {
   };
 }
 
-async function hostFixture(t, { limits = {}, adapters = null } = {}) {
+/**
+ * Process ownership without listing the system's processes: the root is
+ * identified and nothing is left behind. One test drives the real listing.
+ */
+const settledTree = Object.freeze({
+  identify: async pid => ({ pid, ppid: 0, created: 1 }),
+  members: async roots => [...roots],
+  settle: async () => ({ observed: true, survivors: 0, endedByHost: 0 }),
+});
+
+async function hostFixture(t, { limits = {}, adapters = null, hostOptions = {} } = {}) {
   // Removed only after shutdown: a live task PTY holds its worktree open.
   const dataDir = tempDir(t, 'ao-task-host-', { cleanup: false });
   const repoDir = tempDir(t, 'ao-task-repo-', { cleanup: false });
@@ -116,7 +128,9 @@ async function hostFixture(t, { limits = {}, adapters = null } = {}) {
     lifecycleBroker: broker,
     adapters: adapters || { fixture: createFixtureAdapter({ script: FIXTURE_AGENT }) },
     presentation,
+    processTree: settledTree,
     limits: { resultGraceMs: 1_500, ...limits },
+    ...hostOptions,
   });
   t.after(async () => {
     await host.shutdown();
@@ -555,6 +569,7 @@ test('a file-channel report is read from the private outbox, outside the diff', 
   assert.deepEqual([result.collection.providerEndedByHost, result.collection.rootExitObserved], [true, true],
     'the provider tree ends before evidence is frozen');
   assert.equal(result.collection.stable, true);
+  assert.deepEqual(result.collection.descendants, { observed: true, atBoundary: 0, survivors: 0, endedAfterRoot: 0 });
   assert.equal(result.collection.treeTermination, 'unavailable', 'no tree killer is wired in this test host');
   assert.equal(host.windowInput(req.launchId, 'more\r'), false, 'input is closed once collection starts');
   const prompt = fs.readFileSync(path.join(dataDir, 'launches', req.launchId, 'prompt.md'), 'utf8');
@@ -646,7 +661,7 @@ test('input typed into the task window reaches only that task', async (t) => {
   assert.equal(host.windowInput(randomUUID(), 'y\r'), false);
 });
 
-test('admission refuses busy workspaces, unknown routes, unqualified providers, and locked sessions', async (t) => {
+test('admission refuses busy workspaces, unknown routes, unqualified providers, and unobservable sessions', async (t) => {
   const codex = { id: 'codex', qualification: 'unqualified', delivery: 'argv-pointer', lifecycle: 'x', buildSpec: async () => { throw new Error('never'); } };
   const { host, base, presentation } = await hostFixture(t, {
     adapters: { fixture: createFixtureAdapter({ script: FIXTURE_AGENT }), codex },
@@ -667,9 +682,23 @@ test('admission refuses busy workspaces, unknown routes, unqualified providers, 
   host.stop(first.launchId);
   await host.whenIdle();
 
-  host._isSessionLocked = () => true;
-  assert.deepEqual(startTask(host, request({ baseRevision: base })), { ok: false, error: 'session-locked' });
-  host._isSessionLocked = () => false;
+  // The session is read from the system at admission, never assumed.
+  host._observeSession = () => 'locked';
+  assert.deepEqual(startTask(host, request({ baseRevision: base })), { ok: false, error: 'provider-session-unqualified' });
+  host._observeSession = () => 'disconnected';
+  assert.deepEqual(startTask(host, request({ baseRevision: base })), { ok: false, error: 'session-state-unknown' });
+  host._observeSession = () => { throw new Error('query failed'); };
+  assert.deepEqual(startTask(host, request({ baseRevision: base })), { ok: false, error: 'session-state-unknown' });
+  host._observeSession = () => 'unlocked';
+  host._observePower = () => 'battery';
+  assert.deepEqual(startTask(host, request({ baseRevision: base })), { ok: false, error: 'battery-disallowed' });
+  host._observePower = () => undefined;
+  assert.deepEqual(startTask(host, request({ baseRevision: base })), { ok: false, error: 'power-state-unknown' });
+  host._observePower = () => 'ac';
+  host.setSuspending(true);
+  assert.deepEqual(startTask(host, request({ baseRevision: base })), { ok: false, error: 'host-suspending' });
+  host.setSuspending(false);
+  assert.equal(host.capabilities().session, 'unlocked');
 
   const unknownBase = request({ baseRevision: 'b'.repeat(40) });
   startTask(host, unknownBase);
@@ -787,4 +816,288 @@ test('restart recovery reports unfinished launches without respawning them', asy
   assert.equal(host.status(done).state, 'needs-review');
   assert.deepEqual(host.start({ launchId: running }, 'e'.repeat(64)), { ok: false, error: 'launch-id-conflict' });
   assert.deepEqual(host.stop(running), { ok: true, status: 'not-running' });
+});
+// ── W2b: unattended starts (docs/w2b-unattended-policy.md) ─────
+
+function writePolicy(host, overrides = {}) {
+  fs.writeFileSync(host.policyFile, JSON.stringify({
+    schema: 1,
+    kind: POLICY_KIND,
+    revision: 1,
+    hostId: 'target-one',
+    profile: 'primary',
+    owner: os.userInfo().username,
+    remoteStarts: 'enabled',
+    ...overrides,
+  }));
+}
+
+function authorization(req, overrides = {}) {
+  const now = Date.now();
+  return {
+    destination: 'target-one',
+    requestDigest: taskRequestDigest(validateTaskRequest(req)),
+    issuedAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + 30_000).toISOString(),
+    ...overrides,
+  };
+}
+
+function remoteStart(host, req, auth = authorization(req)) {
+  const normalized = validateTaskRequest(req);
+  return host.remoteStart(auth, normalized, taskRequestDigest(normalized));
+}
+
+test('the host policy is exact, and only its profile sets the limits', (t) => {
+  const dir = tempDir(t, 'ao-task-policy-');
+  const file = path.join(dir, 'policy.json');
+  assert.equal(readPolicy(file).status, 'absent');
+  const valid = {
+    schema: 1, kind: POLICY_KIND, revision: 3, hostId: 'snowy-npc', profile: 'light', owner: 'snowy', remoteStarts: 'enabled',
+  };
+  fs.writeFileSync(file, JSON.stringify(valid));
+  const policy = readPolicy(file);
+  assert.equal(policy.status, 'valid');
+  assert.deepEqual(policy.limits, PROFILES.light);
+  for (const bad of [
+    { ...valid, profile: 'unlimited' },
+    { ...valid, remoteStarts: true },
+    { ...valid, hostId: 'Snowy NPC' },
+    { ...valid, maxActiveTasks: 9 },
+    { ...valid, revision: 0 },
+  ]) {
+    fs.writeFileSync(file, JSON.stringify(bad));
+    assert.equal(readPolicy(file).status, 'invalid', JSON.stringify(bad));
+  }
+  assert.deepEqual(PROFILES.primary, { maxActiveTasks: 2, taskTimeoutMs: 2 * 3_600_000, maxStartsPerDay: 24 });
+  assert.deepEqual(PROFILES.secondary, { maxActiveTasks: 1, taskTimeoutMs: 3_600_000, maxStartsPerDay: 12 });
+  assert.deepEqual(PROFILES.light, { maxActiveTasks: 1, taskTimeoutMs: 20 * 60_000, maxStartsPerDay: 4 });
+});
+
+test('a remote authorization names this host and the exact request, and expires within a minute', () => {
+  const policy = {
+    status: 'valid', hostId: 'target-one', owner: 'Owner', remoteStarts: 'enabled', profile: 'primary',
+  };
+  const digest = 'a'.repeat(64);
+  const now = Date.parse('2026-10-30T12:00:00.000Z');
+  const auth = (overrides = {}) => ({
+    destination: 'target-one',
+    requestDigest: digest,
+    issuedAt: '2026-10-30T11:59:50.000Z',
+    expiresAt: '2026-10-30T12:00:20.000Z',
+    ...overrides,
+  });
+  const check = (a, extra = {}) => checkRemoteAuthorization(a, { policy, digest, account: 'owner', now, ...extra });
+  assert.equal(check(auth()), null, 'the account match ignores case');
+  assert.equal(check(auth(), { policy: { ...policy, remoteStarts: 'disabled' } }), 'remote-starts-disabled');
+  assert.equal(check(auth(), { policy: { status: 'absent' } }), 'remote-starts-disabled');
+  assert.equal(check(auth({ destination: 'target-two' })), 'wrong-destination');
+  assert.equal(check(auth({ requestDigest: 'b'.repeat(64) })), 'digest-mismatch');
+  assert.equal(check(auth({ expiresAt: '2026-10-30T11:59:59.000Z' })), 'authorization-expired');
+  assert.equal(check(auth({ issuedAt: '2026-10-30T12:00:10.000Z', expiresAt: '2026-10-30T12:00:30.000Z' })),
+    'authorization-expired', 'issued too far in the future');
+  assert.equal(check(auth({ expiresAt: '2026-10-30T12:00:51.000Z' })), 'invalid-authorization', 'longer than 60 s');
+  assert.equal(check(auth({ extra: 1 })), 'invalid-authorization');
+  assert.equal(check(auth({ issuedAt: '2026-10-30 11:59:50' })), 'invalid-authorization');
+  assert.equal(check(auth(), { account: 'someone-else' }), 'session-owner-mismatch');
+});
+
+test('remote starts are off without a policy, and a retry after expiry never starts another task', async (t) => {
+  const { host, base } = await hostFixture(t);
+  const req = request({ baseRevision: base });
+  assert.deepEqual(remoteStart(host, req), { ok: false, error: 'remote-starts-disabled' });
+  writePolicy(host, { remoteStarts: 'disabled' });
+  assert.deepEqual(remoteStart(host, req), { ok: false, error: 'remote-starts-disabled' });
+  writePolicy(host);
+  assert.deepEqual(remoteStart(host, req, authorization(req, { destination: 'target-two' })), { ok: false, error: 'wrong-destination' });
+  const ack = remoteStart(host, req);
+  assert.equal(ack.ok, true);
+  assert.equal(ack.duplicate, false);
+  await host.whenIdle();
+  const result = host.result(req.launchId);
+  assert.equal(result.origin, 'remote');
+  assert.deepEqual(result.admission, { session: 'unlocked', power: 'ac', policy: { revision: 1, profile: 'primary' } });
+  const expired = authorization(req, {
+    issuedAt: new Date(Date.now() - 120_000).toISOString(),
+    expiresAt: new Date(Date.now() - 90_000).toISOString(),
+  });
+  const retry = remoteStart(host, req, expired);
+  assert.equal(retry.ok, true);
+  assert.equal(retry.duplicate, true);
+  assert.equal(retry.state, 'needs-review');
+  assert.equal(launchCount(host._dataDir), 1);
+  const fresh = request({ baseRevision: base });
+  assert.deepEqual(remoteStart(host, fresh, expired), { ok: false, error: 'digest-mismatch' });
+  assert.deepEqual(remoteStart(host, fresh, { ...expired, requestDigest: authorization(fresh).requestDigest }),
+    { ok: false, error: 'authorization-expired' });
+});
+
+test('the profile limits concurrency and starts per day', async (t) => {
+  const { host, base } = await hostFixture(t);
+  writePolicy(host, { profile: 'light' });
+  const first = request({ baseRevision: base, route: 'no-receipt' });
+  assert.equal(startTask(host, first).ok, true);
+  fs.writeFileSync(host.workspacesFile, JSON.stringify({
+    schema: 1, workspaces: { fixture: host._readWorkspaces().fixture.path, second: host._readWorkspaces().fixture.path },
+  }));
+  assert.deepEqual(startTask(host, request({ baseRevision: base, workspace: 'second' })), { ok: false, error: 'host-busy' });
+  assert.equal(host.capabilities().limits.taskTimeoutMs, PROFILES.light.taskTimeoutMs);
+  host.stop(first.launchId);
+  await host.whenIdle();
+  for (let i = 0; i < 3; i += 1) {
+    const req = request({ baseRevision: 'b'.repeat(40) });
+    assert.equal(startTask(host, req).ok, true);
+    await host.whenIdle();
+  }
+  assert.equal(host.capabilities().limits.startsInLastDay, 4);
+  assert.deepEqual(startTask(host, request({ baseRevision: base })), { ok: false, error: 'daily-limit-reached' });
+});
+
+test('a locked session admits only an adapter qualified while locked', async (t) => {
+  const { host, base } = await hostFixture(t, {
+    adapters: { fixture: createFixtureAdapter({ script: FIXTURE_AGENT, lockedSession: true }) },
+    hostOptions: { observeSession: () => 'locked' },
+  });
+  const req = request({ baseRevision: base });
+  assert.equal(startTask(host, req).ok, true);
+  await host.whenIdle();
+  assert.equal(host.status(req.launchId).state, 'needs-review');
+  assert.equal(host.result(req.launchId).admission.session, 'locked');
+  assert.equal(host.capabilities().providers[0].lockedSession, true);
+});
+
+test('the machine is kept awake only while a task is active, and stops off AC', async (t) => {
+  const holds = [];
+  let power = 'ac';
+  const { host, base } = await hostFixture(t, {
+    hostOptions: {
+      observePower: () => power,
+      holdAwake: () => { const hold = { released: false }; holds.push(hold); return () => { hold.released = true; }; },
+    },
+  });
+  const req = request({ baseRevision: base, route: 'no-receipt' });
+  startTask(host, req);
+  assert.equal(host.awakeHeld, true);
+  await waitFor(() => host.status(req.launchId).state === 'running');
+  power = 'battery';
+  assert.equal(host.powerChanged(), 1);
+  await host.whenIdle();
+  const result = host.result(req.launchId);
+  assert.equal(result.state, 'needs-review');
+  assert.equal(result.stop.reason, 'on-battery');
+  assert.equal(result.evidence.checks.skipped, 'on-battery');
+  assert.deepEqual(result.evidence.checks.hostObserved, [], 'no host checks run off AC');
+  assert.equal(host.awakeHeld, false);
+  assert.deepEqual(holds.map(hold => hold.released), [true], 'one hold, released once idle');
+  assert.deepEqual(startTask(host, request({ baseRevision: base })), { ok: false, error: 'battery-disallowed' });
+  assert.equal(holds.length, 1, 'a refused start holds nothing');
+});
+
+test('list shows launches without instruction, terminal content, or route alias', async (t) => {
+  const { host, base } = await hostFixture(t);
+  const req = request({ baseRevision: base, route: 'complete', instruction: 'SECRET-INSTRUCTION do the work' });
+  startTask(host, req);
+  await host.whenIdle();
+  startTask(host, request({ baseRevision: 'b'.repeat(40) }));
+  await host.whenIdle();
+  const listed = await host.handle({ op: 'list' });
+  assert.equal(listed.ok, true);
+  assert.deepEqual(listed.launches.map(entry => entry.state), ['failed-to-start', 'needs-review'], 'newest first');
+  assert.equal(listed.launches[1].provider, 'fixture');
+  assert.equal(listed.launches[1].origin, 'local');
+  const text = JSON.stringify(listed);
+  assert.ok(listed.launches.every(entry => !('route' in entry)), 'no route alias');
+  for (const secret of ['SECRET-INSTRUCTION', 'fixture agent', 'AO-TASK']) {
+    assert.ok(!text.includes(secret), `list leaks ${secret}`);
+  }
+  assert.equal(validateEnvelope({ token: 'x', op: 'list' }).op, 'list');
+  const normalized = validateTaskRequest(req);
+  const envelope = {
+    token: 'x', op: 'remote-start', authorization: authorization(req), request: normalized, digest: taskRequestDigest(normalized),
+  };
+  assert.equal(validateEnvelope(envelope).op, 'remote-start');
+  assert.throws(() => validateEnvelope({ ...envelope, authorization: 'yes' }), { code: 'invalid-authorization' });
+});
+
+test('task windows open with a neutral title', async (t) => {
+  const { host, base, presentation } = await hostFixture(t);
+  const req = request({ baseRevision: base, route: 'complete' });
+  startTask(host, req);
+  await host.whenIdle();
+  assert.equal(presentation.opened[0].title, 'Task fixture-task · fixture');
+  assert.equal(host.windowAttach(req.launchId).state.route, undefined);
+});
+
+test('descendants are found by creation order, never by a reused pid', () => {
+  const processes = [
+    { pid: 10, ppid: 1, created: 100 },
+    { pid: 11, ppid: 10, created: 110 },
+    { pid: 12, ppid: 11, created: 120 },
+    { pid: 13, ppid: 10, created: 50 }, // older than its "parent": pid reuse
+    { pid: 14, ppid: 99, created: 130 }, // parent 99 exited; anchored by the snapshot
+  ];
+  const keys = list => list.map(entry => entry.pid).sort((a, b) => a - b);
+  assert.deepEqual(keys(descendantsOf(processes, [{ pid: 10, ppid: 1, created: 100 }])), [10, 11, 12]);
+  assert.deepEqual(keys(descendantsOf(processes, [{ pid: 10, ppid: 1, created: 90 }])), [11, 12],
+    'a root with another creation time is not the same process');
+  assert.deepEqual(keys(descendantsOf(processes, [{ pid: 99, ppid: 1, created: 125 }])), [14]);
+});
+
+test('a descendant left behind by the provider is ended before evidence is frozen', async (t) => {
+  const { host, base } = await hostFixture(t, {
+    hostOptions: { processTree: createProcessTree({ killPid: pid => { try { process.kill(pid); } catch (_error) { /* gone */ } } }) },
+  });
+  const req = request({ baseRevision: base, route: 'orphan' });
+  startTask(host, req);
+  await host.whenIdle();
+  const result = host.result(req.launchId);
+  assert.equal(result.state, 'needs-review');
+  const { collection } = result;
+  assert.equal(collection.rootExitObserved, true);
+  assert.equal(collection.descendants.observed, true);
+  assert.equal(collection.descendants.survivors, 0);
+  assert.ok(collection.descendants.endedAfterRoot >= 1, 'the orphan was found and ended');
+  assert.equal(collection.stable, true);
+  const orphan = Number(fs.readFileSync(path.join(host._dataDir, 'worktrees', req.launchId, 'ignored', 'orphan.pid'), 'utf8'));
+  assert.throws(() => process.kill(orphan, 0), { code: 'ESRCH' }, 'the orphan is gone');
+});
+
+test('a collection whose descendants cannot be observed is never stable', async (t) => {
+  const { host, base } = await hostFixture(t, {
+    hostOptions: { processTree: { ...settledTree, settle: async () => ({ observed: false, survivors: null, endedByHost: 0 }) } },
+  });
+  const req = request({ baseRevision: base });
+  startTask(host, req);
+  await host.whenIdle();
+  assert.equal(host.result(req.launchId).collection.stable, false);
+  const survivor = await hostFixture(t, {
+    hostOptions: { processTree: { ...settledTree, settle: async () => ({ observed: true, survivors: 1, endedByHost: 3 }) } },
+  });
+  const other = request({ baseRevision: survivor.base });
+  startTask(survivor.host, other);
+  await survivor.host.whenIdle();
+  assert.equal(survivor.host.result(other.launchId).collection.stable, false);
+});
+
+test('a locked qualification is kept across an unlocked one of the same version only', (t) => {
+  const dir = tempDir(t, 'ao-qual-session-');
+  const file = qualificationFile(dir, 'codex');
+  const evidence = { ...REQUIRED_EVIDENCE };
+  const read = () => readQualification(file, { provider: 'codex', adapterContract: 1 });
+  writeQualification(file, { provider: 'codex', adapterContract: 1, providerVersion: '1.0.0', evidence });
+  assert.deepEqual([read().sessions, read().lockedSession], [['unlocked'], false]);
+  writeQualification(file, { provider: 'codex', adapterContract: 1, providerVersion: '1.0.0', evidence, session: 'locked' });
+  writeQualification(file, { provider: 'codex', adapterContract: 1, providerVersion: '1.0.0', evidence });
+  assert.deepEqual([read().sessions, read().lockedSession], [['unlocked', 'locked'], true]);
+  writeQualification(file, { provider: 'codex', adapterContract: 1, providerVersion: '1.0.1', evidence });
+  assert.deepEqual(read().sessions, ['unlocked'], 'a new version must be qualified locked again');
+  const legacy = JSON.parse(fs.readFileSync(file, 'utf8'));
+  delete legacy.sessions;
+  fs.writeFileSync(file, JSON.stringify(legacy));
+  assert.deepEqual(read().sessions, ['unlocked'], 'a receipt from before sessions were recorded was unlocked');
+  fs.writeFileSync(file, JSON.stringify({ ...legacy, sessions: ['asleep'] }));
+  assert.equal(read().status, 'invalid');
+  assert.throws(() => writeQualification(file, {
+    provider: 'codex', adapterContract: 1, providerVersion: '1.0.1', evidence, session: 'unknown',
+  }));
 });

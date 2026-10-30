@@ -6,6 +6,7 @@
 // task. Nothing is ever respawned, re-adopted, or replayed after a restart.
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { createHash, randomBytes, randomUUID } = require('crypto');
 
@@ -16,6 +17,7 @@ const { compareCheckClaims, runCheck } = require('./checks');
 const {
   collectDiffEvidence, createWorktree, isWorkTreeRoot, repositoryRoot, resolveCommit,
 } = require('./git');
+const { DAY_MS, checkRemoteAuthorization, policyLimits, readPolicy } = require('./policy');
 
 const RECORD_SCHEMA = 1;
 const WORKSPACES_SCHEMA = 1;
@@ -35,6 +37,7 @@ const ADAPTER_REFUSALS = new Set([
   'provider-trust-unexpressible',
 ]);
 const MAX_RECORD_BYTES = 256 * 1024;
+const MAX_LISTED_LAUNCHES = 50;
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -46,7 +49,11 @@ class TaskHost {
    * @param {object} deps.lifecycleBroker    started CodexLifecycleBroker
    * @param {object} deps.adapters           { [providerId]: adapter }
    * @param {object} deps.presentation       task-window opener (see main.js)
-   * @param {function} [deps.isSessionLocked] () => boolean
+   * @param {function} [deps.observeSession] () => 'unlocked' | 'locked' | 'unknown', read at admission
+   * @param {function} [deps.observePower]   () => 'ac' | 'battery' | 'unknown', read at admission
+   * @param {function} [deps.holdAwake]      () => release function; held while any task is active
+   * @param {object}   [deps.processTree]    see process-tree.js; without it no collection is stable
+   * @param {function} [deps.account]        () => the Windows account this host runs as
    * @param {string[]} [deps.allowUnqualified] adapter ids allowed although unqualified
    */
   constructor({
@@ -55,7 +62,11 @@ class TaskHost {
     lifecycleBroker,
     adapters,
     presentation,
-    isSessionLocked = () => false,
+    observeSession = () => 'unlocked',
+    observePower = () => 'ac',
+    holdAwake = null,
+    processTree = null,
+    account = () => os.userInfo().username,
     allowUnqualified = [],
     terminateTree = null,
     killTree = null,
@@ -70,7 +81,13 @@ class TaskHost {
     this._dataDir = dataDir;
     this._adapters = adapters || {};
     this._presentation = presentation;
-    this._isSessionLocked = isSessionLocked;
+    this._observeSession = observeSession;
+    this._observePower = observePower;
+    this._holdAwake = holdAwake;
+    this._releaseAwake = null;
+    this._processTree = processTree;
+    this._account = account;
+    this._suspending = false;
     this._allowUnqualified = new Set(allowUnqualified);
     this._log = log || (() => {});
     this._killTree = killTree;
@@ -102,6 +119,7 @@ class TaskHost {
   _worktreesDir() { return path.join(this._dataDir, 'worktrees'); }
   _launchDir(launchId) { return path.join(this._launchesDir(), launchId); }
   get workspacesFile() { return path.join(this._dataDir, 'workspaces.json'); }
+  get policyFile() { return path.join(this._dataDir, 'policy.json'); }
   get registry() { return this._registry; }
 
   /** Load prior records. Unfinished ones become interrupted or uncertain. */
@@ -129,6 +147,8 @@ class TaskHost {
 
   capabilities() {
     const now = Date.now();
+    const policy = readPolicy(this.policyFile);
+    const limits = policyLimits(policy, this._limits);
     return {
       ok: true,
       schema: 1,
@@ -136,13 +156,18 @@ class TaskHost {
       observedAt: new Date(now).toISOString(),
       expiresAt: new Date(now + this._limits.capabilityTtlMs).toISOString(),
       admission: this._closed ? 'closed' : 'open',
-      session: this._isSessionLocked() ? 'locked' : 'unlocked',
+      session: this._session(),
+      power: this._power(),
+      policy: policy.status === 'valid'
+        ? { status: 'valid', revision: policy.revision, hostId: policy.hostId, profile: policy.profile, remoteStarts: policy.remoteStarts }
+        : { status: policy.status, remoteStarts: 'disabled' },
       presentation: ['task-window'],
       providers: Object.values(this._adapters).map(adapter => ({
         provider: adapter.id,
         qualification: adapter.qualification,
         qualifiedVersion: adapter.qualifiedVersion ?? null,
         admitted: adapter.qualification !== 'unqualified' || this._allowUnqualified.has(adapter.id),
+        lockedSession: this._lockedSessionAdmitted(adapter),
         delivery: adapter.delivery,
         lifecycle: adapter.lifecycle,
         turnStarted: 'unavailable',
@@ -150,7 +175,12 @@ class TaskHost {
       })),
       workspaces: Object.keys(this._readWorkspaces()).sort(),
       gitEffects: ['edits-only'],
-      limits: { maxActiveTasks: this._limits.maxActiveTasks, taskTimeoutMs: this._limits.taskTimeoutMs },
+      limits: {
+        maxActiveTasks: limits.maxActiveTasks,
+        taskTimeoutMs: limits.taskTimeoutMs,
+        maxStartsPerDay: limits.maxStartsPerDay,
+        startsInLastDay: this._startsSince(now - DAY_MS),
+      },
     };
   }
 
@@ -177,6 +207,8 @@ class TaskHost {
     switch (command.op) {
       case 'capabilities': return this.capabilities();
       case 'start': return this.start(command.request, command.digest);
+      case 'remote-start': return this.remoteStart(command.authorization, command.request, command.digest);
+      case 'list': return this.list();
       case 'status': return this.status(command.launchId);
       case 'result': return this.result(command.launchId);
       case 'diff': return this.diff(command.launchId);
@@ -186,32 +218,99 @@ class TaskHost {
     }
   }
 
+  /** The session state, read now; anything unexpected is unknown. */
+  _session() {
+    try {
+      const state = this._observeSession();
+      return ['unlocked', 'locked'].includes(state) ? state : 'unknown';
+    } catch (_error) {
+      return 'unknown';
+    }
+  }
+
+  _power() {
+    try {
+      const state = this._observePower();
+      return ['ac', 'battery'].includes(state) ? state : 'unknown';
+    } catch (_error) {
+      return 'unknown';
+    }
+  }
+
+  /** A locked session admits only an adapter qualified while locked. */
+  _lockedSessionAdmitted(adapter) {
+    return adapter.lockedSession === true || this._allowUnqualified.has(adapter.id);
+  }
+
+  _startsSince(since) {
+    let count = 0;
+    for (const launch of this._launches.values()) {
+      if (Date.parse(launch.record.acceptedAt) >= since) count += 1;
+    }
+    return count;
+  }
+
+  /**
+   * A start requested from another machine. The authorization must name this
+   * host and the exact request, and be fresh; a retry of an accepted launch
+   * returns its observation even after expiry and never starts another task.
+   */
+  remoteStart(authorization, request, digest) {
+    const existing = this._launches.get(request.launchId);
+    if (existing) return this._duplicate(existing, digest);
+    const refusal = checkRemoteAuthorization(authorization, {
+      policy: readPolicy(this.policyFile),
+      digest,
+      account: this._safeAccount(),
+    });
+    if (refusal) return { ok: false, error: refusal };
+    return this.start(request, digest, { origin: 'remote' });
+  }
+
+  _safeAccount() {
+    try { return this._account(); } catch (_error) { return null; }
+  }
+
+  _duplicate(existing, digest) {
+    if (existing.record.requestDigest !== digest) return { ok: false, error: 'launch-id-conflict' };
+    return { ok: true, duplicate: true, ...this._publicStatus(existing) };
+  }
+
   /**
    * Admit or refuse synchronously. Returns an acknowledgement only; the task
    * proceeds in the background and is observed through status.
    */
-  start(request, digest) {
+  start(request, digest, { origin = 'local' } = {}) {
     const existing = this._launches.get(request.launchId);
-    if (existing) {
-      if (existing.record.requestDigest !== digest) return { ok: false, error: 'launch-id-conflict' };
-      return { ok: true, duplicate: true, ...this._publicStatus(existing) };
-    }
+    if (existing) return this._duplicate(existing, digest);
     const refuse = error => ({ ok: false, error });
     if (this._closed) return refuse('host-closing');
-    if (this._isSessionLocked()) return refuse('session-locked');
+    if (this._suspending) return refuse('host-suspending');
+    const power = this._power();
+    if (power === 'battery') return refuse('battery-disallowed');
+    if (power === 'unknown') return refuse('power-state-unknown');
+    // Read from the system now, never assumed unlocked from missed events.
+    const session = this._session();
+    if (session === 'unknown') return refuse('session-state-unknown');
     const adapter = Object.hasOwn(this._adapters, request.provider) ? this._adapters[request.provider] : null;
     if (!adapter) return refuse('provider-unavailable');
     if (adapter.qualification === 'unqualified' && !this._allowUnqualified.has(adapter.id)) {
       return refuse('provider-unqualified');
     }
+    if (session === 'locked' && !this._lockedSessionAdmitted(adapter)) return refuse('provider-session-unqualified');
     const workspaces = this._readWorkspaces();
     if (!Object.hasOwn(workspaces, request.workspace)) return refuse('unknown-workspace');
     if (adapter.requiresProjectTrust && !workspaces[request.workspace].projectTrust) {
       return refuse('workspace-trust-not-granted');
     }
+    const policy = readPolicy(this.policyFile);
+    const limits = policyLimits(policy, this._limits);
     const active = [...this._launches.values()].filter(launch => ACTIVE_STATES.has(launch.record.state));
     if (active.some(launch => launch.record.workspace === request.workspace)) return refuse('workspace-busy');
-    if (active.length >= this._limits.maxActiveTasks) return refuse('host-busy');
+    if (active.length >= limits.maxActiveTasks) return refuse('host-busy');
+    // A runaway brake, counted from durable records: every accepted launch
+    // has its record on disk before it is acknowledged.
+    if (this._startsSince(Date.now() - DAY_MS) >= limits.maxStartsPerDay) return refuse('daily-limit-reached');
 
     const now = new Date().toISOString();
     const launch = {
@@ -224,6 +323,7 @@ class TaskHost {
       replay: '',
       stopRequested: false,
       settle: null,
+      taskTimeoutMs: limits.taskTimeoutMs,
       record: {
         schema: RECORD_SCHEMA,
         launchId: request.launchId,
@@ -236,6 +336,12 @@ class TaskHost {
         baseRevision: request.baseRevision,
         checks: request.checks,
         gitEffects: request.gitEffects,
+        origin,
+        admission: {
+          session,
+          power,
+          policy: policy.status === 'valid' ? { revision: policy.revision, profile: policy.profile } : { status: policy.status },
+        },
         state: 'accepted',
         reason: null,
         ending: null,
@@ -271,6 +377,47 @@ class TaskHost {
     Object.assign(launch.record, patch, { state, reason });
     this._persist(launch);
     this._presentation.sendState?.(launch.launchId, this._windowState(launch));
+    this._reconcileAwake();
+  }
+
+  /**
+   * Keep the machine from suspending on its own while any task prepares,
+   * runs, or is checked; release as soon as none is. The display may sleep,
+   * and a deliberate sleep still happens.
+   */
+  _reconcileAwake() {
+    if (!this._holdAwake) return;
+    const busy = [...this._launches.values()].some(launch => ACTIVE_STATES.has(launch.record.state));
+    if (busy && !this._releaseAwake) {
+      try { this._releaseAwake = this._holdAwake() || (() => {}); } catch (_error) { this._releaseAwake = null; }
+    } else if (!busy && this._releaseAwake) {
+      const release = this._releaseAwake;
+      this._releaseAwake = null;
+      try { release(); } catch (_error) { /* already released */ }
+    }
+  }
+
+  get awakeHeld() { return !!this._releaseAwake; }
+
+  /** The system is about to suspend, or has resumed. */
+  setSuspending(suspending) {
+    this._suspending = !!suspending;
+  }
+
+  /**
+   * The power source changed. Off AC, every active task is stopped and its
+   * evidence collected without host checks.
+   */
+  powerChanged() {
+    const power = this._power();
+    if (power === 'ac') return 0;
+    let stopped = 0;
+    for (const launch of this._launches.values()) {
+      if (launch.historical || !ACTIVE_STATES.has(launch.record.state)) continue;
+      launch.skipChecks = power === 'battery' ? 'on-battery' : 'power-state-unknown';
+      if (this.stop(launch.launchId, launch.skipChecks).status === 'stop-requested') stopped += 1;
+    }
+    return stopped;
   }
 
   async _run(launch) {
@@ -332,7 +479,8 @@ class TaskHost {
     try {
       const opened = await this._presentation.openTaskWindow({
         launchId: launch.launchId,
-        title: `Task ${request.taskId} · ${request.provider}:${request.route}`,
+        // Neutral: no route alias and no instruction text on the desktop.
+        title: `Task ${request.taskId} · ${request.provider}`,
       });
       launch.record.window = {
         created: true,
@@ -365,6 +513,9 @@ class TaskHost {
     const spawnedAt = new Date().toISOString();
     launch.record.delivery.handedAt = spawnedAt;
     launch.record.process = { rootPid: created.pid, spawnedAt, exitCode: null, exitedAt: null };
+    // Identify the root now, while it is surely alive: its children stay
+    // anchored to this identity even after it exits on its own.
+    launch.rootIdentity = this._processTree ? this._processTree.identify(created.pid) : Promise.resolve(null);
     launch.exited = new Promise((resolve) => { launch.resolveExit = resolve; });
     launch.turnComplete = new Promise((resolve) => { launch.resolveTurn = resolve; });
     launch.stopped = new Promise((resolve) => { launch.resolveStop = resolve; });
@@ -377,12 +528,12 @@ class TaskHost {
         endMarker: launch.frame.endMarker,
         maxBytes: this._limits.maxResultBytes,
       },
-      timeoutMs: this._limits.taskTimeoutMs,
+      timeoutMs: launch.taskTimeoutMs,
       waitId: `task-result-${launch.launchId}`,
     });
     let deadlineTimer;
     const deadline = new Promise((resolve) => {
-      deadlineTimer = setTimeout(() => resolve('deadline'), this._limits.taskTimeoutMs);
+      deadlineTimer = setTimeout(() => resolve('deadline'), launch.taskTimeoutMs);
     });
     const ending = await Promise.race([
       launch.turnComplete.then(() => 'turn-complete'),
@@ -412,10 +563,14 @@ class TaskHost {
     // the report, running checks, and taking the diff, so nothing the task
     // started is still writing while the evidence is frozen. Input closes
     // with the `collecting` state.
+    // Snapshot the provider's descendants first: once the root is gone, a
+    // tree kill can no longer find them by walking from it.
+    const root = await launch.rootIdentity;
+    const before = root ? await this._processTree.members([root]) : null;
     const endedByHost = this._requestKill(launch, 'collect');
     const rootExited = await Promise.race([launch.exited.then(() => true), delay(10_000).then(() => false)]);
     // A root that exited on its own can leave descendants; ask for the whole
-    // tree either way. That request is recorded, not proven.
+    // tree either way.
     let treeTermination = 'unavailable';
     if (this._killTree && launch.record.process?.rootPid) {
       try {
@@ -425,13 +580,24 @@ class TaskHost {
         treeTermination = 'failed';
       }
     }
+    // Then require that nothing from the snapshot, or started by it since,
+    // is still alive; end any survivor and look again.
+    const settled = root && before
+      ? await this._processTree.settle([root, ...before])
+      : { observed: false, survivors: null, endedByHost: 0 };
     launch.record.collection = {
       providerEndedByHost: endedByHost,
       rootExitObserved: rootExited,
       treeTermination,
-      // Unstable when the root was still alive at the cut: the snapshot may
-      // have raced a writer. Qualification never accepts that.
-      stable: rootExited,
+      descendants: {
+        observed: settled.observed,
+        atBoundary: before ? before.filter(entry => entry.pid !== root.pid).length : null,
+        survivors: settled.survivors,
+        endedAfterRoot: settled.endedByHost,
+      },
+      // Stable only when the root exited and no descendant survived: anything
+      // else may have raced the snapshot. Qualification never accepts that.
+      stable: rootExited && settled.observed && settled.survivors === 0,
       boundaryAt: new Date().toISOString(),
     };
     if (this._closed) return undefined;
@@ -469,7 +635,7 @@ class TaskHost {
     const checksDir = ensureDir(path.join(dir, 'checks'));
     const observed = [];
     for (const [index, check] of launch.request.checks.entries()) {
-      if (this._closed) break;
+      if (this._closed || launch.skipChecks) break;
       observed.push(await runCheck({
         worktree: launch.worktree,
         base: launch.request.baseRevision,
@@ -491,6 +657,7 @@ class TaskHost {
         aiReported: parsed.aiReported,
       },
       checks: {
+        skipped: launch.skipChecks || null,
         hostObserved: observed,
         aiClaimed: parsed.aiReported?.checks || [],
         comparison: compareCheckClaims(observed, parsed.aiReported?.checks || []),
@@ -548,7 +715,7 @@ class TaskHost {
     return false;
   }
 
-  stop(launchId) {
+  stop(launchId, reason = 'requested') {
     const launch = this._launches.get(launchId);
     if (!launch || launch.historical) return launch ? { ok: true, status: 'not-running' } : { ok: false, error: 'unknown-launch' };
     const running = !!launch.sessionId && this._registry.isRunning(launch.sessionId);
@@ -556,6 +723,7 @@ class TaskHost {
     launch.stopRequested = true;
     launch.record.stop = {
       requestedAt: new Date().toISOString(),
+      reason,
       rootExitObservedAt: null,
       effectReconciliation: 'not-performed',
     };
@@ -619,7 +787,6 @@ class TaskHost {
       launchId: launch.launchId,
       taskId: r.taskId,
       provider: r.provider,
-      route: r.route,
       state: r.state,
       reason: r.reason,
       ending: r.ending,
@@ -655,6 +822,23 @@ class TaskHost {
     };
   }
 
+  /**
+   * The most recent launches, newest first, as public status only: no
+   * instruction, terminal content, path, or route alias.
+   */
+  list() {
+    const launches = [...this._launches.values()]
+      .sort((a, b) => Date.parse(b.record.acceptedAt) - Date.parse(a.record.acceptedAt))
+      .slice(0, MAX_LISTED_LAUNCHES)
+      .map(launch => ({
+        ...this._publicStatus(launch),
+        provider: launch.record.provider,
+        workspace: launch.record.workspace,
+        origin: launch.record.origin || 'local',
+      }));
+    return { ok: true, hostIncarnationId: this.hostIncarnationId, observedAt: new Date().toISOString(), launches };
+  }
+
   status(launchId) {
     const launch = this._launches.get(launchId);
     return launch ? { ok: true, ...this._publicStatus(launch) } : { ok: false, error: 'unknown-launch' };
@@ -667,6 +851,8 @@ class TaskHost {
     return {
       ok: true,
       ...this._publicStatus(launch),
+      origin: r.origin || 'local',
+      admission: r.admission ?? null,
       delivery: r.delivery,
       lifecycle: r.lifecycle,
       process: r.process ? { exitCode: r.process.exitCode, spawnedAt: r.process.spawnedAt, exitedAt: r.process.exitedAt, observation: r.process.observation || 'live' } : null,
@@ -703,6 +889,7 @@ class TaskHost {
     }
     await this._registry.killAllSequential('task host shutdown');
     await this._registry.whenTerminationsComplete();
+    this._reconcileAwake();
   }
 
   /** Test helper: settle every background launch. */

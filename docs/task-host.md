@@ -58,8 +58,11 @@ task window (BrowserWindow)       task SessionRegistry (own PTYs)
   launch request plus its envelope), 8 concurrent connections, 5 s per
   connection. Duplicate JSON keys, unknown keys, and wrong types are rejected
   as a whole.
-- **Fixed operations.** `capabilities`, `start`, `status`, `result`, `diff`,
-  `stop`, `show`. There is no operation that takes a command line, an
+- **Fixed operations.** `capabilities`, `start`, `remote-start`, `list`,
+  `status`, `result`, `diff`, `stop`, `show`. `remote-start` is `start` plus
+  an authorization for a request relayed from another machine (see
+  [Unattended remote starts](#unattended-remote-starts)); `list` returns the
+  most recent 50 launches as public status only. There is no operation that takes a command line, an
   executable, a path, environment overrides, or raw PTY input. Errors are fixed
   codes; no exception text, path, or provider output crosses the ingress.
 
@@ -125,13 +128,30 @@ double-click cannot create two tasks:
 | same `launchId`, same digest | the existing observation (`duplicate: true`) |
 | same `launchId`, different digest | refused `launch-id-conflict` |
 | host shutting down | refused `host-closing` |
-| screen locked (Electron `lock-screen`) | refused `session-locked`; never queued |
+| the system is suspending | refused `host-suspending` |
+| on battery, or the power source cannot be read | refused `battery-disallowed` / `power-state-unknown` |
+| the session state cannot be read | refused `session-state-unknown`; never assumed unlocked |
 | provider unknown, or known but unqualified | refused `provider-unavailable` / `provider-unqualified` |
+| session locked, and the provider was not qualified in a locked session | refused `provider-session-unqualified` |
 | workspace label not registered | refused `unknown-workspace` |
 | provider needs project trust the workspace did not grant | refused `workspace-trust-not-granted` |
 | a task already active in that workspace | refused `workspace-busy` |
-| two tasks already active on this host | refused `host-busy` |
+| the profile's concurrent tasks already active on this host | refused `host-busy` |
+| the profile's starts in the last 24 hours already accepted | refused `daily-limit-reached` |
 | otherwise | `accepted`, after the accepted record is durably written |
+
+The session state is read from the system at the moment of admission
+(Electron's `powerMonitor.getSystemIdleState`, which Chromium answers by
+querying the workstation lock state and the screen saver), never from lock
+events, so a host started while already locked cannot assume it is unlocked.
+A locked workstation, a running screen saver, and an input desktop that
+cannot be read all count as locked. The record keeps the session and power
+state observed at admission and the policy revision that applied.
+
+Limits come from the owner's per-host `policy.json` profile; without one the
+host keeps two concurrent tasks, a two-hour turn limit, and 24 starts a day,
+and an invalid policy applies the smallest profile. The daily count is taken
+from the durable launch records, so a restart does not reset it.
 
 `accepted` is an acknowledgement only. The client polls `status`. There is no
 offline queue: a refused request is not retried by the host.
@@ -164,14 +184,30 @@ interrupted (host restart before any spawn intent)
 - **Collection boundary.** However the turn ends, the host ends the provider's
   process tree and closes window input *before* it reads the report, runs
   checks, and takes the diff, so nothing the task started is still writing
-  while the evidence is frozen. It asks for the whole tree even when the root
-  exited on its own, since descendants can outlive it. `collection` records
-  whether the host ended it, whether the root exit was observed, and whether
-  tree termination was requested; it is `stable` only when the root exit was
-  observed, and an unstable collection never qualifies a provider. Tree
-  termination is requested, not proven. The terminal stays readable in the
-  window (and in the private `terminal.log`); a follow-up conversation is a
-  new task.
+  while the evidence is frozen. The root is identified (pid and creation
+  time) when it spawns. At the boundary the host lists the root's live
+  descendants, ends the provider, asks for the whole tree, and then looks
+  again: anything from that snapshot, or started by it since, that is still
+  alive is ended and looked for again, for up to 10 seconds. Children stay
+  anchored to the recorded identity after their parent exits, and a process
+  older than its supposed parent is a reused pid, not a descendant.
+  `collection` records whether the host ended the provider, whether the root
+  exit was observed, the tree request, and `descendants` (how many were alive
+  at the boundary, how many were ended after the root, how many survived). It
+  is `stable` only when the root exited and no descendant survived; a listing
+  that fails is unstable, and an unstable collection never qualifies a
+  provider. This is a snapshot and re-check, not a Job Object: a process that
+  escapes the tree between two listings by being started from outside it is
+  not seen. The terminal stays readable in the window (and in the private
+  `terminal.log`); a follow-up conversation is a new task.
+- **Power.** While any task prepares, runs, or is checked, the host holds
+  `prevent-app-suspension`, released as soon as none is (the display may still
+  sleep). When the machine goes on battery, every active task is stopped and
+  its evidence is collected without host checks (`checks.skipped:
+  "on-battery"`).
+- **Quiet windows.** A task window opens without taking focus, and its title
+  and state line name the task and the provider, never the route alias or the
+  instruction. Only an explicit `show` may bring a window forward.
 - Quitting the app marks every active task `interrupted` before its PTY is
   drained. Tasks do not survive the host.
 
@@ -285,6 +321,7 @@ says so.
 <userData>/task-host/
   ingress.json            port, token, host incarnation (user-private)
   workspaces.json         owner-registered workspace labels -> checkouts
+  policy.json             the owner's per-host profile and remote-start switch
   launches/<launchId>/
     record.json           state, request digest, observations, evidence
     prompt.md             the instruction, nonce, result markers or outbox path
@@ -315,6 +352,14 @@ repository's own test pass. It prints aggregate facts only: no route alias,
 path, prompt, or provider output. It refuses to run without `--confirm-live`
 and in a packaged build.
 
+With `--await-locked` it waits (up to 10 minutes) for the workstation to be
+locked before starting the turn, and records a **locked-session**
+qualification only when the session was locked both at admission and at
+collection. The receipt lists the session states it covers; a locked
+qualification survives a later unlocked one of the same version, and any
+version change needs both again. Without a locked qualification a provider is
+refused `provider-session-unqualified` while the workstation is locked.
+
 Every axis must hold: window created, nonce echoed, authenticated and
 input-correlated turn-complete receipt, complete report, the host-run check
 passed and agrees with the claim, complete diff, owner checkout untouched, a
@@ -342,7 +387,13 @@ host refused each one correctly, and each changed the adapter:
 | 4, 5 | the account's configured model was not available on its plan; the turn errored and never completed | none: a provider-side failure, shown by the private transcript |
 | 6 | every axis held, with one uncorrelated side-turn receipt ignored | receipt written |
 | (review) | an independent review found a collection could be frozen while the provider might still write, and three smaller defects | collection stability became an axis, which invalidated receipt 6 |
-| 7 | every axis held, including a stable collection | the current receipt |
+| 7 | every axis held, including a stable collection | superseded by 8 |
+| 8 | every axis held under the stricter collection (no surviving descendant) | the current receipt (unlocked session) |
+| 9 (`--await-locked`) | admitted and started with the workstation locked; every axis held, and the boundary found and ended three Codex descendants; the workstation was unlocked before collection | no locked receipt: a locked qualification must stay locked to the end |
+
+The locked-session qualification is still to be run with nobody at the
+console: start it, lock the workstation, and leave it locked until the run
+prints its result.
 
 A qualification run also keeps, privately beside the receipts, a summary of
 each notify payload (type, client, input length and first 80 characters,
@@ -372,7 +423,9 @@ window, or launch record exists and the host keeps answering. Rows marked
 | Transport loss after acceptance | The accepted record is durable before the ack; a retry of the same bytes gets `duplicate: true` and exactly one task, one window | same test |
 | Unsupported or unqualified provider | `provider-unavailable` / `provider-unqualified` at admission | admission test, fixture run |
 | Missing login, full quota | Not observable by the fixture; with a real provider the task ends without a receipt or frame and stays `needs-review` with that evidence | *live* |
-| Locked console, or no window can be created | `session-locked` while the console is locked; no window means no spawn (`window-unavailable`) | admission test |
+| Locked console, or no window can be created | Admitted only for a provider qualified while locked (`provider-session-unqualified` otherwise); an unreadable session is `session-state-unknown`; no window means no spawn (`window-unavailable`) | admission test, locked qualification turn |
+| Provider leaves a process behind | Found from the boundary snapshot, ended, and looked for again; a survivor makes the collection unstable | `a descendant left behind…`, fixture run |
+| Machine goes on battery, or suspends | Active tasks stop and collect without host checks; new starts refused | power test |
 | Host crash around spawn | `spawnIntentAt` precedes the PTY; recovery reports `uncertain` / `interrupted` and never respawns | restart recovery test |
 | Nonzero child exit | `ending: process-exited` with exit code; evidence still collected; no completion claimed | host test |
 | Partial output | A frame that began but never ended is `truncated`; no AI claims are taken from it | `partial output is a truncated frame…` |
@@ -391,6 +444,35 @@ nobody present (W2b) is decided in [w2b-unattended-policy.md](w2b-unattended-pol
 session states, power, per-host profiles, and the gates before the first
 unattended start.
 
+The host side is implemented. `remote-start` carries the request, its digest,
+and an authorization:
+
+```json
+{ "destination": "snowy-npc", "requestDigest": "<sha256>",
+  "issuedAt": "2026-10-30T12:00:00.000Z", "expiresAt": "2026-10-30T12:00:30.000Z" }
+```
+
+It is refused `remote-starts-disabled` unless `policy.json` enables remote
+starts, `wrong-destination` unless it names this host's `hostId`,
+`digest-mismatch` unless it binds the exact request, `invalid-authorization`
+for any other shape or a validity longer than 60 seconds,
+`authorization-expired` once expired (or issued more than 5 seconds in this
+host's future), and `session-owner-mismatch` unless the host runs as the
+enrolled account. A retry of an accepted launch ID returns that launch's
+observation even after expiry and never starts another task. Who may send the
+request is the transport's decision (the owner's approved route to the target
+and the owner-only ingress token); the relay itself is not part of this
+repository.
+
+```json
+{ "schema": 1, "kind": "agent-orchestrator.remote-task-policy", "revision": 1,
+  "hostId": "snowy-npc", "profile": "primary", "owner": "<windows account>",
+  "remoteStarts": "enabled" }
+```
+
+Profiles are `primary` (2 concurrent, 2 h, 24 a day), `secondary` (1, 1 h, 12)
+and `light` (1, 20 min, 4).
+
 ## Verification
 
 - `npm run test:unit` covers strict JSON, request validation and digest, the
@@ -399,10 +481,15 @@ unattended start.
   agent: completion, AI-claimed vs host-observed disagreement, nonzero exit,
   missing receipt and Stop, partial output, transport loss around acceptance,
   stale and absent hosts, duplicate and conflicting starts, busy admission,
-  and restart recovery.
+  restart recovery, session and power admission, the host policy and remote
+  authorization, profile limits, the awake hold, `list`, neutral titles, and
+  process ownership (one test lists the real process table and ends a
+  detached descendant the fixture leaves behind).
 - `npm run verify:task-host` starts Electron with throwaway user data, drives
   the real ingress through the client, and requires a real task window per
-  task. It runs only fixture providers.
+  task, opened without taking focus. It also reads the real session and power
+  state and requires a stable collection, including after a fixture provider
+  that leaves a detached process behind. It runs only fixture providers.
 
 A provider turn against a real account is a separate, owner-authorized manual
 step and is not part of either command.

@@ -1,10 +1,10 @@
 # Unattended remote starts (W2b policy)
 
-Status: **decided, not implemented.** This records when a target's task host
-may start a task requested from another of the owner's machines, with nobody
-at the target. It extends the [task host](task-host.md) contract; nothing here
-is enabled until the gates in [Before the first unattended start](#before-the-first-unattended-start)
-are demonstrated.
+Status: **host side implemented; not enabled.** This records when a target's
+task host may start a task requested from another of the owner's machines,
+with nobody at the target. It extends the [task host](task-host.md) contract;
+nothing here is enabled until the gates in [Before the first unattended start](#before-the-first-unattended-start)
+are demonstrated. [Progress](#progress) says which are.
 
 ## Owner decisions (2026-10-30)
 
@@ -43,11 +43,15 @@ retried by the host.
 | Suspend in progress | `host-suspending` | sleep is respected, never vetoed |
 | Asleep or unreachable | no answer; acceptance unknown if a request was in flight | resume checks the deadline before any further work |
 
-**Observation.** The lock flag is read from Windows at admission
-(`WTSQuerySessionInformation` for the host's own session: connection state
-and lock flag), not from an event-only boolean that starts out "unlocked".
-Electron's lock and power events invalidate the snapshot. A host started while
-already locked must work without ever seeing a lock event.
+**Observation.** The lock state is read from the system at admission, not
+from an event-only boolean that starts out "unlocked"; a host started while
+already locked works without ever seeing a lock event. The implementation uses
+Electron's `powerMonitor.getSystemIdleState`, which Chromium answers by
+querying the workstation lock state and the screen saver at call time, rather
+than a native `WTSQuerySessionInformation` bridge. It cannot tell a
+disconnected RDP session or a switched-away session from a locked one; both
+fall under the locked rule, which this table already applies to them. Any
+other answer is `session-state-unknown`.
 
 ## Power
 
@@ -71,7 +75,7 @@ and the hostname never implies one.
 |---|---|---|---|
 | Remote starts on a fresh install | off | off | off |
 | Concurrent tasks (one per repository) | 2 | 1 | 1 |
-| Task deadline, including checks | 2 h | 1 h | 20 min |
+| Turn deadline (host checks then have their own 10 min bound each) | 2 h | 1 h | 20 min |
 | New tasks per rolling 24 h | 24 | 12 | 4 |
 | Battery starts | no | no | no |
 
@@ -102,6 +106,22 @@ Each is required and must be demonstrated, in this order of importance:
    content, and survive transport loss.
 6. **Quiet windows**: task windows open without taking focus, and their title
    carries no route alias or instruction text.
+
+## Progress
+
+Implemented in the task host (2026-10-31), with the exact codes and formats in
+[task-host.md](task-host.md#unattended-remote-starts):
+
+| Gate | State |
+|---|---|
+| 1. Fresh, target-bound requests | Host side done: `remote-start`, `policy.json` with `hostId`, `owner` and `remoteStarts`, 60 s validity, retry-safe. The relay from the controller (Matrix route and controller UI) is not built yet. |
+| 2. Process ownership | Done: descendant snapshot at the boundary, re-check until none survive; proven with a fixture that leaves a detached process behind, and on a live Codex turn (three descendants found and ended). |
+| 3. Session observation | Done: read at admission; `provider-session-unqualified` without a locked qualification. **The locked-session qualification of Codex is still open**: one attempt was admitted and completed while locked, but the workstation was unlocked before collection, so it does not count. |
+| 4. Power | Done: AC only, `prevent-app-suspension` while any task is active, stop without host checks on battery, `host-suspending`. |
+| 5. Owner-visible activity | Host side done: `list` (public status only, from durable records). The controller view is not built yet. |
+| 6. Quiet windows | Done: task windows never take focus on open; title and state line carry no route alias or instruction. |
+
+Per-host profiles are implemented as `primary`, `secondary` and `light`.
 
 ## Deviations from the advice
 

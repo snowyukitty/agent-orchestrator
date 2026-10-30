@@ -33,7 +33,7 @@
   function renderState(state) {
     if (!state) return;
     $('task-id').textContent = state.taskId;
-    $('task-route').textContent = `${state.provider}:${state.route}`;
+    $('task-route').textContent = state.provider;
     const label = STATE_TEXT[state.state] || state.state;
     $('task-state').textContent = state.reason ? `${label} (${state.reason})` : label;
     $('task-turn').textContent = state.turnComplete ? 'observed' : 'not observed';

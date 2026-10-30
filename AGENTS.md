@@ -78,7 +78,8 @@ src/main/            Main-process modules, CommonJS, unit-tested with node --tes
   user-data.js         canonical/legacy user-data location and one-time migration
   task-host/           W2a desktop task host (docs/task-host.md): strict request
                        and loopback ingress, host lifecycle, adapters, worktree,
-                       diff and check evidence, per-task windows, fixture run
+                       diff and check evidence, per-task windows, host policy
+                       and remote authorization, process ownership, fixture run
 preload-task.js      task-window bridge; main binds each call to its window
 src/task-window.html one task's terminal, state, and Stop
 src/js/              Renderer, ES modules, tested by the Electron self-test
@@ -153,6 +154,14 @@ Keep these properties, each covered by a test:
   `CODEX_ADAPTER_CONTRACT` whenever the launch or delivery changes;
 - a lifecycle receipt completes a task only when its input digest matches the
   task's pointer sentence; side turns in the same process never do;
+- the session and power state are read from the system at admission, never
+  assumed; a locked session admits only a provider qualified while locked;
+- a collection is `stable` only when the root exited and no descendant from
+  the boundary snapshot survived;
+- `remote-start` is refused unless `policy.json` enables it, names this host,
+  binds the exact request digest, and has not expired (60 s at most);
+- task windows never take focus on open, and no window, title, or `list`
+  entry shows a route alias, the instruction, or terminal content;
 - the fault-acceptance matrix in `docs/task-host.md` stays true: a new fault
   class gets a row and the test that proves it, or says why only W2b or a live
   turn can.

@@ -5,6 +5,25 @@ the product story; this file keeps the history.
 
 ## Unreleased (Journal v2 + Evidence-First Field Guide)
 
+- **The task host is ready, on its side, to start tasks with nobody at the
+  target** (W2b gates, [policy](docs/w2b-unattended-policy.md)). The lock
+  state is read from the system at admission instead of from lock events, and
+  a locked workstation admits only a provider qualified while locked
+  (`npm run qualify:task-host -- --confirm-live --await-locked`). Tasks start
+  only on AC power; the machine is kept from suspending while one is active,
+  and going on battery stops them without host checks. Evidence is frozen
+  only once no descendant of the provider survives: the host snapshots the
+  tree at the boundary, ends it, and looks again — on a live Codex turn it
+  found and ended three. A per-host `policy.json` picks a `primary`,
+  `secondary` or `light` profile (concurrency, turn limit, starts per day)
+  and enables `remote-start`, whose authorization must name this host and the
+  exact request and expires within 60 seconds. `list` shows recent launches
+  without content, and task windows open without taking focus under a
+  neutral title. Codex 0.165.0 was re-qualified under the stricter boundary;
+  its locked-session qualification is still to be run with nobody at the
+  console. The relay from another machine and the controller view are not
+  built yet.
+
 - **The task host runs real Codex tasks after a live qualification**:
   `npm run qualify:task-host -- --confirm-live` runs one harmless,
   owner-authorized Codex turn through the real ingress, window, receipt, and

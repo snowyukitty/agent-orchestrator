@@ -154,7 +154,7 @@ The full list, with the reasoning, is in
 | [Session continuation backends](docs/session-continuation-backends.md) | Capability gate, backend authority, migration, and adapter review contract |
 | [Interrupted-run resume design](docs/resume-design.md) | The accepted evidence-without-replay contract |
 | [Desktop task host (W2a)](docs/task-host.md) | Loopback typed ingress, one window and worktree per task, joined evidence; Codex admitted after a live qualification turn |
-| [Unattended remote starts (W2b)](docs/w2b-unattended-policy.md) | Decided policy for starting tasks with nobody at the target: session states, power, per-host limits, gates |
+| [Unattended remote starts (W2b)](docs/w2b-unattended-policy.md) | Starting tasks with nobody at the target: session and power admission, per-host profiles, target-bound `remote-start`, process ownership; host side implemented, relay not yet |
 | [Five-hour window](docs/five-hour-window.md) | The scheduling trick, tuned |
 | [Limits and unfinished work](docs/limitations.md) | Stated boundaries |
 | [Promo standard](docs/promo-creative-brief.md) · [Website plan](docs/website-plan.md) | How the outward face is allowed to be made |

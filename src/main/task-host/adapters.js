@@ -223,12 +223,13 @@ function parseResultFrame(capture, frame) {
 
 /** Fixture provider: a local script that behaves like a scripted agent. */
 function createFixtureAdapter({
-  script, execPath = process.execPath, baseEnv = process.env, resultChannel = 'pty-frame',
+  script, execPath = process.execPath, baseEnv = process.env, resultChannel = 'pty-frame', lockedSession = false,
 } = {}) {
   if (!script || !path.isAbsolute(script)) throw new TypeError('Fixture adapter needs an absolute script path');
   return {
     id: 'fixture',
     qualification: 'fixture-only',
+    lockedSession,
     delivery: 'argv-pointer',
     resultChannel,
     lifecycle: 'authenticated-turn-complete',
@@ -298,6 +299,8 @@ function createCodexAdapter({
     id: 'codex',
     contract: CODEX_ADAPTER_CONTRACT,
     qualification: qualifiedVersion ? 'qualified' : 'unqualified',
+    // Started and completed a qualifying turn while the session was locked.
+    lockedSession: !!qualifiedVersion && qualification.lockedSession === true,
     qualifiedVersion,
     delivery: 'argv-pointer',
     resultChannel: 'file',

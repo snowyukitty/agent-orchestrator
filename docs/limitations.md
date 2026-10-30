@@ -110,7 +110,13 @@ does not have. Everything below is current for v0.4.0.
   host-run checks execute the repository's scripts unsandboxed. Codex needs a
   per-workspace `codexProjectTrust` opt-in, which also lets it load that
   repository's project settings. The host is off by default and has no
-  cross-machine carrier yet (W2b). Turn-started and
+  cross-machine carrier yet (W2b): `remote-start` and its per-host policy
+  exist, but nothing relays a request from another machine, and while the
+  workstation is locked Codex is refused until a locked-session qualification
+  completes. Process ownership is a snapshot and re-check of the provider's
+  descendants, not a Job Object, so a process started from outside the tree
+  is not seen. The session check cannot tell a disconnected or switched-away
+  session from a locked one and treats all three as locked. Turn-started and
   waiting-for-input are not observable; a task that asks a question shows
   `running` until a receipt, an exit, or Stop. Host-observed checks run the
   repository's own scripts, which the agent may have changed — the record

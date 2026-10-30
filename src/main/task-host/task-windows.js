@@ -17,7 +17,8 @@ function createTaskWindowPresentation({
   preload,
   icon = null,
   getHost,
-  // Automated fixture runs show windows without taking focus.
+  // Whether an explicit `show` may take focus. A new task window never does:
+  // it may open while the owner is typing elsewhere, or with nobody there.
   activate = true,
   log = () => {},
 }) {
@@ -107,8 +108,7 @@ function createTaskWindowPresentation({
         if (!win.isDestroyed()) win.destroy();
         throw error;
       }
-      if (activate) win.show();
-      else win.showInactive();
+      win.showInactive();
       return {
         windowId: win.id,
         shown: win.isVisible(),

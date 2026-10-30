@@ -108,6 +108,8 @@ function taskRequestDigest(request) {
 const OP_KEYS = {
   capabilities: ['token', 'op'],
   start: ['token', 'op', 'request', 'digest'],
+  'remote-start': ['token', 'op', 'authorization', 'request', 'digest'],
+  list: ['token', 'op'],
   status: ['token', 'op', 'launchId'],
   result: ['token', 'op', 'launchId'],
   diff: ['token', 'op', 'launchId'],
@@ -124,13 +126,18 @@ function validateEnvelope(value) {
     throw new TaskRequestError('unknown-op');
   }
   exactKeys(value, OP_KEYS[value.op], 'invalid-envelope');
-  if (value.op === 'capabilities') return { op: 'capabilities' };
-  if (value.op === 'start') {
+  if (value.op === 'capabilities' || value.op === 'list') return { op: value.op };
+  if (value.op === 'start' || value.op === 'remote-start') {
     if (typeof value.digest !== 'string' || !DIGEST.test(value.digest)) {
       throw new TaskRequestError('invalid-digest');
     }
     const request = validateTaskRequest(value.request);
     if (taskRequestDigest(request) !== value.digest) throw new TaskRequestError('digest-mismatch');
+    // The authorization's own shape is checked against the host's policy.
+    if (value.op === 'remote-start') {
+      if (!isPlainObject(value.authorization)) throw new TaskRequestError('invalid-authorization');
+      return { op: 'remote-start', authorization: value.authorization, request, digest: value.digest };
+    }
     return { op: 'start', request, digest: value.digest };
   }
   return { op: value.op, launchId: asLaunchId(value.launchId) };

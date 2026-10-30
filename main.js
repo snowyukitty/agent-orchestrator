@@ -64,6 +64,7 @@ const { TaskIngress } = require('./src/main/task-host/ingress');
 const { CODEX_ADAPTER_CONTRACT, createCodexAdapter, createFixtureAdapter } = require('./src/main/task-host/adapters');
 const { qualificationFile, readQualification } = require('./src/main/task-host/qualification');
 const { createTaskWindowPresentation } = require('./src/main/task-host/task-windows');
+const { createProcessTree } = require('./src/main/task-host/process-tree');
 
 // Establish the singular identity before Electron creates storage, sessions,
 // or its single-instance lock. Test modes never touch production AppData.
@@ -145,7 +146,6 @@ let sessionPromptHandlers = null;
 let sessionContinuation = null;
 let taskHost = null;    // TaskHost, only when enabled or in fixture mode
 let taskIngress = null;
-let taskHostLocked = false;
 let testDataCleanupScheduled = false;
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 const isDev = process.argv.includes('--dev');
@@ -927,13 +927,8 @@ async function startTaskHost({ fixture = false, qualify = false } = {}) {
   if (fixture) {
     const execPath = fixtureNodePath();
     if (!execPath) throw new Error('the task-host fixture needs node.exe on PATH');
-    adapters.fixture = createFixtureAdapter({ script: fixtureAgentScript(), execPath });
-  }
-  try {
-    powerMonitor.on('lock-screen', () => { taskHostLocked = true; });
-    powerMonitor.on('unlock-screen', () => { taskHostLocked = false; });
-  } catch (_error) {
-    console.warn('[TaskHost] lock state unavailable');
+    // Scripted, so it may also run while the workstation is locked.
+    adapters.fixture = createFixtureAdapter({ script: fixtureAgentScript(), execPath, lockedSession: true });
   }
   const host = new TaskHost({
     dataDir,
@@ -941,12 +936,28 @@ async function startTaskHost({ fixture = false, qualify = false } = {}) {
     lifecycleBroker: codexLifecycleBroker,
     adapters,
     presentation,
-    isSessionLocked: () => taskHostLocked,
+    observeSession: taskHostSessionState,
+    observePower: () => (powerMonitor.isOnBatteryPower() ? 'battery' : 'ac'),
+    holdAwake: () => {
+      const id = powerSaveBlocker.start('prevent-app-suspension');
+      return () => { if (powerSaveBlocker.isStarted(id)) powerSaveBlocker.stop(id); };
+    },
+    processTree: createProcessTree({ killPid: killProcessTree }),
     allowUnqualified: qualify ? ['codex'] : [],
     terminateTree: process.platform === 'win32' ? killProcessTree : null,
     killTree: killProcessTree,
     log: message => console.log(message),
   });
+  try {
+    powerMonitor.on('suspend', () => host.setSuspending(true));
+    powerMonitor.on('resume', () => host.setSuspending(false));
+    powerMonitor.on('on-battery', () => {
+      const stopped = host.powerChanged();
+      if (stopped) console.warn(`[TaskHost] on battery: stopped ${stopped} task(s)`);
+    });
+  } catch (_error) {
+    console.warn('[TaskHost] power events unavailable');
+  }
   const recovered = host.recover();
   if (recovered) console.log(`[TaskHost] marked ${recovered} unfinished launch(es) interrupted or uncertain`);
   const ingress = new TaskIngress({ host, dir: dataDir, log: message => console.warn(`[TaskHost] ${message}`) });
@@ -955,6 +966,19 @@ async function startTaskHost({ fixture = false, qualify = false } = {}) {
   taskIngress = ingress;
   console.log('[TaskHost] loopback ingress ready');
   return { host, presentation };
+}
+
+/**
+ * The session state, queried from the system at the moment of asking, so a
+ * host started while already locked never assumes it is unlocked. Chromium
+ * reports a locked workstation, a running screen saver, and (conservatively)
+ * an unreadable input desktop as `locked`.
+ */
+function taskHostSessionState() {
+  const state = powerMonitor.getSystemIdleState(60);
+  if (state === 'locked') return 'locked';
+  if (state === 'active' || state === 'idle') return 'unlocked';
+  return 'unknown';
 }
 
 async function runTaskHostFixtureMode() {
@@ -987,6 +1011,8 @@ async function runTaskHostFixtureMode() {
 }
 
 const CONFIRM_LIVE_FLAG = '--confirm-live';
+// Wait for the owner to lock the workstation, then qualify a locked session.
+const AWAIT_LOCKED_FLAG = '--await-locked';
 const ACCOUNT_NUMBER_PREFIX = '--account-number=';
 
 function qualifyError(code) {
@@ -1024,6 +1050,7 @@ async function runTaskHostQualifyMode() {
       receiptFile: qualificationFile(productionTaskHostDir(), 'codex'),
       route,
       adapterContract: CODEX_ADAPTER_CONTRACT,
+      awaitLocked: process.argv.includes(AWAIT_LOCKED_FLAG),
     });
     qualified = outcome.qualified;
   } catch (error) {

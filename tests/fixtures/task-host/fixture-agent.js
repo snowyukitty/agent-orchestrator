@@ -7,6 +7,7 @@
 
 const fs = require('fs');
 const net = require('net');
+const { spawn } = require('child_process');
 const { createHash } = require('crypto');
 
 const scenarioIndex = process.argv.indexOf('--scenario');
@@ -102,6 +103,23 @@ async function main() {
       printFrame(task, { nonce: '0'.repeat(32) });
       await sendReceipt(1);
       return idle();
+    case 'orphan': {
+      // Leaves a detached descendant behind, then exits on its own: root
+      // exit alone must not make the collection stable.
+      await new Promise(resolve => setTimeout(resolve, 2_500));
+      const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+        detached: true, stdio: 'ignore', windowsHide: true,
+      });
+      child.unref();
+      fs.mkdirSync('ignored', { recursive: true });
+      fs.writeFileSync('ignored/orphan.pid', String(child.pid));
+      doWork();
+      printFrame(task);
+      await sendReceipt(1);
+      await new Promise(resolve => setTimeout(resolve, 300));
+      process.exit(0);
+      return undefined;
+    }
     case 'no-receipt':
       doWork();
       printFrame(task);
