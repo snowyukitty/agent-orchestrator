@@ -32,7 +32,7 @@ const {
 const agentProfiles = require('./src/main/agents');
 const { writeJsonAtomic, readJsonStrict, readJsonDir, ensureDir } = require('./src/main/store');
 const { loadSettings, saveSettings } = require('./src/main/settings');
-const { prepareUserData } = require('./src/main/user-data');
+const { CANONICAL_STORAGE_NAME, prepareUserData } = require('./src/main/user-data');
 const { RoutedDiscoveryCache } = require('./src/main/routed-cache');
 const { ShutdownCoordinator } = require('./src/main/shutdown');
 const { RunJournal } = require('./src/main/run-journal');
@@ -61,7 +61,8 @@ const {
 } = require('./src/main/validate');
 const { TaskHost } = require('./src/main/task-host/host');
 const { TaskIngress } = require('./src/main/task-host/ingress');
-const { createCodexAdapter, createFixtureAdapter } = require('./src/main/task-host/adapters');
+const { CODEX_ADAPTER_CONTRACT, createCodexAdapter, createFixtureAdapter } = require('./src/main/task-host/adapters');
+const { qualificationFile, readQualification } = require('./src/main/task-host/qualification');
 const { createTaskWindowPresentation } = require('./src/main/task-host/task-windows');
 
 // Establish the singular identity before Electron creates storage, sessions,
@@ -70,6 +71,8 @@ const isSmokeTest = process.argv.includes('--smoke-test');
 const isSelfTest = process.argv.includes('--self-test');
 const isVisualTest = process.argv.includes('--visual-test');
 const isTaskHostFixture = process.argv.includes('--task-host-fixture');
+// One owner-authorized live Codex turn on throwaway user data; see docs/task-host.md.
+const isTaskHostQualify = process.argv.includes('--task-host-qualify');
 const promoCapture = parsePromoCaptureOptions(process.argv, __dirname);
 if (promoCapture) {
   // Capture receipts are portable only when the output pixel ratio is fixed
@@ -85,7 +88,7 @@ const userDataState = prepareUserData({
   tempRoot: app.getPath('temp'),
   // Visual QA uses the normal renderer while remaining unable to read or
   // mutate production settings, workflows, local profiles, or Run Journal files.
-  testMode: isSmokeTest || isSelfTest || isVisualTest || isTaskHostFixture || Boolean(promoCapture),
+  testMode: isSmokeTest || isSelfTest || isVisualTest || isTaskHostFixture || isTaskHostQualify || Boolean(promoCapture),
 });
 app.setPath('userData', userDataState.path);
 const sessionDataPath = path.join(userDataState.path, 'session');
@@ -710,6 +713,10 @@ if (!gotSingleInstanceLock) {
       await runTaskHostFixtureMode();
       return;
     }
+    if (isTaskHostQualify) {
+      await runTaskHostQualifyMode();
+      return;
+    }
     sessions = createSessionRegistry();
     sessionContinuation = new SessionContinuationCore({
       backends: [createOrchestratorPtyContinuationBackend({ registry: sessions })],
@@ -849,7 +856,36 @@ function fixtureNodePath() {
   return candidates.find(file => file && path.isAbsolute(file) && fs.existsSync(file)) || null;
 }
 
-async function startTaskHost({ fixture = false } = {}) {
+/**
+ * Qualification receipts live with production user data even when a
+ * qualification run itself uses throwaway user data.
+ */
+function productionTaskHostDir() {
+  return path.join(app.getPath('appData'), CANONICAL_STORAGE_NAME, 'task-host');
+}
+
+function runProviderVersion(file, args, { env, cwd }) {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { env, cwd, windowsHide: true, timeout: 30_000, maxBuffer: 64 * 1024 }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(stdout);
+    });
+  });
+}
+
+async function startTaskHost({ fixture = false, qualify = false } = {}) {
+  // A qualification run records each notify payload's shape privately, so a
+  // failed live turn can be diagnosed without another one.
+  let notifyScriptPath = codexNotifyScriptPath();
+  if (qualify) {
+    const { createQualificationNotifyWrapper } = require('./src/main/task-host/qualify-notify');
+    const logFile = path.join(productionTaskHostDir(), 'qualifications', 'codex.last-notify.jsonl');
+    fs.mkdirSync(path.dirname(logFile), { recursive: true });
+    fs.rmSync(logFile, { force: true });
+    notifyScriptPath = createQualificationNotifyWrapper({
+      dir: app.getPath('userData'), productHelper: codexNotifyScriptPath(), logFile,
+    });
+  }
   if (taskHost) return taskHost;
   if (!codexLifecycleBroker) {
     const error = new Error('lifecycle receipts unavailable');
@@ -864,18 +900,27 @@ async function startTaskHost({ fixture = false } = {}) {
     preload: path.join(__dirname, 'preload-task.js'),
     icon: getWindowIcon(),
     getHost: () => taskHost,
-    activate: !fixture,
+    activate: !fixture && !qualify,
     log: message => console.warn(message),
   });
   const adapters = {
-    // Refused at admission until a separately authorized live turn qualifies it.
+    // Admitted only with a receipt from a qualification run for this adapter
+    // contract, and only while the route reports the qualified Codex version.
     codex: createCodexAdapter({
+      runVersion: runProviderVersion,
+      // Fixture and qualification runs never read production qualification.
+      qualification: fixture || qualify
+        ? null
+        : readQualification(qualificationFile(productionTaskHostDir(), 'codex'), {
+          provider: 'codex',
+          adapterContract: CODEX_ADAPTER_CONTRACT,
+        }),
       resolveProfile: async route => (await findProfile(`codex:${route}`))?.profile || null,
       buildLaunchSpec: agentProfiles.buildLaunchSpec,
       launchContext: async () => ({
         baseEnv: process.env,
         entrypointPath: entrypointPath(),
-        notifyScriptPath: codexNotifyScriptPath(),
+        notifyScriptPath,
       }),
     }),
   };
@@ -897,6 +942,7 @@ async function startTaskHost({ fixture = false } = {}) {
     adapters,
     presentation,
     isSessionLocked: () => taskHostLocked,
+    allowUnqualified: qualify ? ['codex'] : [],
     terminateTree: process.platform === 'win32' ? killProcessTree : null,
     killTree: killProcessTree,
     log: message => console.log(message),
@@ -938,6 +984,52 @@ async function runTaskHostFixtureMode() {
   app.isQuitting = true;
   cleanupForQuit();
   app.exit(passed ? 0 : 1);
+}
+
+const CONFIRM_LIVE_FLAG = '--confirm-live';
+const ACCOUNT_NUMBER_PREFIX = '--account-number=';
+
+/** Healthy routed Codex accounts in discovery order; never printed. */
+async function qualificationRoute() {
+  const matches = process.argv.filter(value => value.startsWith(ACCOUNT_NUMBER_PREFIX));
+  const number = matches.length ? Number(matches[0].slice(ACCOUNT_NUMBER_PREFIX.length)) : 1;
+  if (matches.length > 1 || !Number.isSafeInteger(number) || number < 1) throw new Error('invalid account number');
+  const { profiles, error } = await getRoutedProfiles({ force: true });
+  if (error) throw new Error('routed account discovery failed');
+  const eligible = profiles.filter(item => item.agent === 'codex' && item.status === 'ok' && item.authenticated);
+  const profile = eligible[number - 1];
+  if (!profile) throw new Error('no healthy routed Codex account at that number');
+  return profile.alias;
+}
+
+async function runTaskHostQualifyMode() {
+  const { runTaskHostQualification } = require('./src/main/task-host/qualify-run');
+  let qualified = false;
+  let presentation = null;
+  try {
+    if (app.isPackaged) throw new Error('qualification is available only from a source checkout');
+    // A live provider turn runs only on this explicit owner confirmation.
+    if (!process.argv.includes(CONFIRM_LIVE_FLAG)) throw new Error(`a live turn needs ${CONFIRM_LIVE_FLAG}`);
+    const route = await qualificationRoute();
+    const started = await startTaskHost({ qualify: true });
+    presentation = started.presentation;
+    const outcome = await runTaskHostQualification({
+      dataDir: path.join(app.getPath('userData'), 'task-host'),
+      receiptFile: qualificationFile(productionTaskHostDir(), 'codex'),
+      route,
+      adapterContract: CODEX_ADAPTER_CONTRACT,
+    });
+    qualified = outcome.qualified;
+  } catch (error) {
+    console.error(`[TaskHostQualify] aborted: ${error.message}`);
+  }
+  taskIngress?.stop();
+  taskIngress = null;
+  presentation?.closeAll();
+  await taskHost?.shutdown();
+  app.isQuitting = true;
+  cleanupForQuit();
+  app.exit(qualified ? 0 : 1);
 }
 
 // ── Scheduler Heartbeat ──────────────────────────────────────

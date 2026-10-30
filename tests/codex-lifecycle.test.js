@@ -103,3 +103,80 @@ test('bundled PowerShell helper forwards only a synthetic turn-complete receipt'
     broker.stop();
   }
 });
+
+test('an expected input digest separates the started turn from side turns', async () => {
+  const { createHash } = require('node:crypto');
+  const digest = text => createHash('sha256').update(text, 'utf8').digest('hex');
+  const broker = new CodexLifecycleBroker();
+  await broker.start();
+  let receipts = 0;
+  let uncorrelated = 0;
+  const registration = broker.register({
+    sessionId: 'sess-task',
+    incarnationId: INCARNATION,
+    expectedInputDigest: digest('the task pointer'),
+    onEvent: () => { receipts += 1; return true; },
+    onUncorrelated: () => { uncorrelated += 1; },
+  });
+  const token = registration.env[ENV_TOKEN];
+  const receipt = fields => JSON.stringify({
+    token, incarnationId: INCARNATION, type: 'agent-turn-complete', threadDigest: THREAD_A, turnDigest: TURN_A, ...fields,
+  });
+  try {
+    assert.throws(() => broker.register({ sessionId: 'x', incarnationId: INCARNATION, onEvent: () => true, expectedInputDigest: 'nope' }));
+    assert.equal(broker.acceptPayload(receipt({ inputDigests: 'not-an-array' })), false);
+    assert.equal(broker.acceptPayload(receipt({ inputDigests: ['short'] })), false);
+    assert.equal(uncorrelated, 0, 'malformed receipts are not counted as side turns');
+    assert.equal(broker.acceptPayload(receipt({ threadDigest: THREAD_B, inputDigests: [digest('background summary')] })), false);
+    assert.equal(broker.acceptPayload(receipt({ threadDigest: THREAD_B })), false, 'no input digests cannot correlate');
+    assert.equal(uncorrelated, 2);
+    assert.equal(receipts, 0);
+    // The side turns neither completed the task nor captured the thread.
+    assert.equal(broker.acceptPayload(receipt({ inputDigests: [digest('x'), digest('the task pointer')] })), true);
+    assert.equal(receipts, 1);
+  } finally {
+    registration.release();
+    broker.stop();
+  }
+});
+
+test('the PowerShell helper forwards digests of the turn input, never the input', async (t) => {
+  const probe = spawnSync('pwsh.exe', ['-NoLogo', '-NoProfile', '-Command', 'exit 0'], { windowsHide: true });
+  if (probe.error?.code === 'ENOENT') {
+    t.skip('pwsh.exe is unavailable');
+    return;
+  }
+  const { createHash } = require('node:crypto');
+  const broker = new CodexLifecycleBroker();
+  await broker.start();
+  let resolveReceipt;
+  const receipt = new Promise(resolve => { resolveReceipt = resolve; });
+  const registration = broker.register({
+    sessionId: 'sess-input',
+    incarnationId: INCARNATION,
+    expectedInputDigest: createHash('sha256').update('Read the private task file.', 'utf8').digest('hex'),
+    onEvent: event => { resolveReceipt(event); return true; },
+  });
+  const helper = path.join(__dirname, '..', 'src', 'main', 'codex-notify.ps1');
+  const notification = JSON.stringify({
+    type: 'agent-turn-complete',
+    'thread-id': 'thread',
+    'turn-id': 'turn',
+    'input-messages': ['  Read the private task file.  '],
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      execFile('pwsh.exe', ['-NoLogo', '-NoProfile', '-File', helper, notification],
+        { windowsHide: true, timeout: 5_000, env: { ...process.env, ...registration.env } },
+        error => error ? reject(error) : resolve());
+    });
+    const event = await Promise.race([
+      receipt,
+      new Promise((_resolve, reject) => setTimeout(() => reject(new Error('receipt timeout')), 3_000)),
+    ]);
+    assert.deepEqual(event, { type: 'agent-turn-complete' });
+  } finally {
+    registration.release();
+    broker.stop();
+  }
+});

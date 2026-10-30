@@ -23,10 +23,11 @@ function readTask() {
     nonce: /"nonce":"([0-9a-f]{32})"/.exec(prompt)?.[1],
     begin: /^(AO-TASK-RESULT-BEGIN-[0-9a-f]+)$/m.exec(prompt)?.[1],
     end: /^(AO-TASK-RESULT-END-[0-9a-f]+)$/m.exec(prompt)?.[1],
+    resultFile: /but writable\): (.+)$/m.exec(prompt)?.[1]?.trim() || null,
   };
 }
 
-function sendReceipt(turn) {
+function sendReceipt(turn, { thread = 'fixture-thread', input = pointer } = {}) {
   return new Promise((resolve) => {
     const pipe = process.env.AGENT_ORCHESTRATOR_NOTIFY_SECRET_PIPE;
     const token = process.env.AGENT_ORCHESTRATOR_NOTIFY_SECRET_TOKEN;
@@ -37,8 +38,9 @@ function sendReceipt(turn) {
         token,
         incarnationId,
         type: 'agent-turn-complete',
-        threadDigest: sha256('fixture-thread'),
+        threadDigest: sha256(thread),
         turnDigest: sha256(`fixture-turn-${turn}`),
+        inputDigests: [sha256(input.trim())],
       })}\n`);
     });
     socket.on('close', () => resolve(true));
@@ -47,8 +49,15 @@ function sendReceipt(turn) {
 }
 
 function printFrame(task, { nonce = task.nonce, claims = [{ name: 'test', outcome: 'passed' }] } = {}) {
+  const body = JSON.stringify({ nonce, summary: `fixture scenario ${scenario} finished`, checks: claims });
+  if (task.resultFile) {
+    // File channel: report into the outbox the prompt names.
+    fs.writeFileSync(task.resultFile, body);
+    out('fixture agent wrote its report\n');
+    return;
+  }
   out(`${task.begin}\n`);
-  out(`${JSON.stringify({ nonce, summary: `fixture scenario ${scenario} finished`, checks: claims })}\n`);
+  out(`${body}\n`);
   out(`${task.end}\n`);
 }
 
@@ -70,6 +79,15 @@ async function main() {
   const task = readTask();
   switch (scenario) {
     case 'complete':
+      doWork();
+      printFrame(task);
+      await sendReceipt(1);
+      return idle();
+    case 'side-thread':
+      // A background turn in the same process completes first; it must not
+      // complete the task or capture the registration's thread.
+      await sendReceipt(0, { thread: 'background-thread', input: 'summarize this session' });
+      await new Promise(resolve => setTimeout(resolve, 1_000));
       doWork();
       printFrame(task);
       await sendReceipt(1);

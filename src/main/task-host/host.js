@@ -7,13 +7,15 @@
 
 const fs = require('fs');
 const path = require('path');
-const { createHash, randomUUID } = require('crypto');
+const { createHash, randomBytes, randomUUID } = require('crypto');
 
 const { SessionRegistry } = require('../sessions');
 const { readJson, readJsonStrict, writeJsonAtomic, ensureDir } = require('../store');
-const { createResultFrame, parseResultFrame, renderPromptFile } = require('./adapters');
+const { createResultFrame, parseResultFrame, readResultFile, renderPromptFile } = require('./adapters');
 const { compareCheckClaims, runCheck } = require('./checks');
-const { collectDiffEvidence, createWorktree, isWorkTreeRoot, resolveCommit } = require('./git');
+const {
+  collectDiffEvidence, createWorktree, isWorkTreeRoot, repositoryRoot, resolveCommit,
+} = require('./git');
 
 const RECORD_SCHEMA = 1;
 const WORKSPACES_SCHEMA = 1;
@@ -27,6 +29,11 @@ const DEFAULT_LIMITS = Object.freeze({
   capabilityTtlMs: 30_000,
 });
 const ACTIVE_STATES = new Set(['accepted', 'preparing', 'window-open', 'spawning', 'running', 'collecting']);
+// Adapter refusals that name their own reason; anything else is route-unavailable.
+const ADAPTER_REFUSALS = new Set([
+  'route-unavailable', 'route-policy-conflict', 'provider-version-unknown', 'provider-version-changed',
+  'provider-trust-unexpressible',
+]);
 const MAX_RECORD_BYTES = 256 * 1024;
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -133,6 +140,7 @@ class TaskHost {
       providers: Object.values(this._adapters).map(adapter => ({
         provider: adapter.id,
         qualification: adapter.qualification,
+        qualifiedVersion: adapter.qualifiedVersion ?? null,
         admitted: adapter.qualification !== 'unqualified' || this._allowUnqualified.has(adapter.id),
         delivery: adapter.delivery,
         lifecycle: adapter.lifecycle,
@@ -145,14 +153,20 @@ class TaskHost {
     };
   }
 
+  /**
+   * Owner-registered workspaces. An entry is a checkout path, or
+   * `{ path, codexProjectTrust: "allow" }` when the owner also lets a provider
+   * that needs project trust (Codex) run there; that opt-in is default-deny.
+   */
   _readWorkspaces() {
     const raw = readJson(this.workspacesFile, null);
     if (raw?.schema !== WORKSPACES_SCHEMA || !raw.workspaces || typeof raw.workspaces !== 'object') return {};
     const out = {};
-    for (const [label, dir] of Object.entries(raw.workspaces)) {
-      if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(label) && typeof dir === 'string' && path.isAbsolute(dir)) {
-        out[label] = dir;
-      }
+    for (const [label, entry] of Object.entries(raw.workspaces)) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(label)) continue;
+      const dir = typeof entry === 'string' ? entry : entry?.path;
+      if (typeof dir !== 'string' || !path.isAbsolute(dir)) continue;
+      out[label] = { path: dir, projectTrust: entry?.codexProjectTrust === 'allow' };
     }
     return out;
   }
@@ -191,6 +205,9 @@ class TaskHost {
     }
     const workspaces = this._readWorkspaces();
     if (!Object.hasOwn(workspaces, request.workspace)) return refuse('unknown-workspace');
+    if (adapter.requiresProjectTrust && !workspaces[request.workspace].projectTrust) {
+      return refuse('workspace-trust-not-granted');
+    }
     const active = [...this._launches.values()].filter(launch => ACTIVE_STATES.has(launch.record.state));
     if (active.some(launch => launch.record.workspace === request.workspace)) return refuse('workspace-busy');
     if (active.length >= this._limits.maxActiveTasks) return refuse('host-busy');
@@ -200,7 +217,7 @@ class TaskHost {
       launchId: request.launchId,
       request,
       adapter,
-      repo: workspaces[request.workspace],
+      repo: workspaces[request.workspace].path,
       frame: createResultFrame(),
       sessionId: null,
       replay: '',
@@ -274,11 +291,18 @@ class TaskHost {
     launch.worktree = worktree;
     launch.record.worktreeBranch = branch;
 
-    const promptFile = path.join(this._launchDir(launch.launchId), 'prompt.md');
-    const prompt = renderPromptFile(request, launch.frame);
+    // A file-channel adapter reports into a private outbox beside the prompt.
+    // The outbox is the only directory outside the worktree it may write.
+    const launchDir = this._launchDir(launch.launchId);
+    const fileChannel = launch.adapter.resultChannel === 'file';
+    const resultDir = fileChannel ? ensureDir(path.join(launchDir, `outbox-${randomBytes(8).toString('hex')}`)) : null;
+    launch.resultFile = fileChannel ? path.join(resultDir, 'result.json') : null;
+    const promptFile = path.join(launchDir, 'prompt.md');
+    const prompt = renderPromptFile(request, launch.frame, { resultFile: launch.resultFile });
     fs.writeFileSync(promptFile, prompt, 'utf8');
     launch.record.delivery = {
       mechanism: launch.adapter.delivery,
+      resultChannel: fileChannel ? 'file' : 'pty-frame',
       promptSha256: createHash('sha256').update(prompt, 'utf8').digest('hex'),
       promptBytes: Buffer.byteLength(prompt, 'utf8'),
       handedAt: null,
@@ -287,9 +311,17 @@ class TaskHost {
 
     let spec;
     try {
-      spec = await launch.adapter.buildSpec({ route: request.route, worktree, promptFile });
-    } catch (_error) {
-      return fail('route-unavailable');
+      const built = await launch.adapter.buildSpec({
+        route: request.route,
+        worktree,
+        promptFile,
+        resultDir,
+        repositoryRoot: await repositoryRoot(launch.repo),
+      });
+      spec = built.spec;
+      launch.record.delivery.providerVersion = built.providerVersion ?? null;
+    } catch (error) {
+      return fail(ADAPTER_REFUSALS.has(error?.code) ? error.code : 'route-unavailable');
     }
     if (launch.stopRequested) return fail('stopped-before-start');
     if (this._closed) return fail('host-closing');
@@ -337,7 +369,7 @@ class TaskHost {
     launch.stopped = new Promise((resolve) => { launch.resolveStop = resolve; });
     this._setState(launch, 'running');
 
-    const capture = this._registry.waitForOutput(sessionId, {
+    const capture = fileChannel ? null : this._registry.waitForOutput(sessionId, {
       afterSeq: 0,
       capture: {
         startMarker: launch.frame.startMarker,
@@ -361,16 +393,34 @@ class TaskHost {
     if (ending === 'deadline') this._requestKill(launch, 'deadline');
     if (ending === 'stopped' || ending === 'deadline') await Promise.race([launch.exited, delay(10_000)]);
 
-    // A result frame normally precedes the receipt; allow a short grace, then
-    // stop waiting so a missing frame is reported rather than awaited.
-    let captureResult = await Promise.race([capture, delay(this._limits.resultGraceMs).then(() => null)]);
-    if (!captureResult) {
-      this._registry.cancelWait(sessionId, `task-result-${launch.launchId}`);
-      captureResult = await capture;
+    // A printed frame normally precedes the receipt; allow a short grace,
+    // then stop waiting so a missing frame is reported rather than awaited.
+    let report = null;
+    if (!fileChannel) {
+      let captureResult = await Promise.race([capture, delay(this._limits.resultGraceMs).then(() => null)]);
+      if (!captureResult) {
+        this._registry.cancelWait(sessionId, `task-result-${launch.launchId}`);
+        captureResult = await capture;
+      }
+      report = captureResult?.capture || null;
     }
     if (this._closed) return undefined;
     this._setState(launch, 'collecting', null, { ending });
-    const evidence = await this._collect(launch, captureResult?.capture || null);
+
+    // Collection boundary: end the provider's process tree before reading
+    // the report, running checks, and taking the diff, so nothing the task
+    // started is still writing while the evidence is frozen. Input closes
+    // with the `collecting` state.
+    const endedByHost = this._requestKill(launch, 'collect');
+    const rootExited = await Promise.race([launch.exited.then(() => true), delay(10_000).then(() => false)]);
+    launch.record.collection = {
+      providerEndedByHost: endedByHost,
+      rootExitObserved: rootExited,
+      boundaryAt: new Date().toISOString(),
+    };
+    if (this._closed) return undefined;
+    if (fileChannel) report = readResultFile(launch.resultFile, this._limits.maxResultBytes);
+    const evidence = await this._collect(launch, report);
     if (this._closed) return undefined;
     this._setState(launch, 'needs-review', null, { evidence });
     return undefined;
@@ -379,6 +429,9 @@ class TaskHost {
   async _collect(launch, capture) {
     const dir = this._launchDir(launch.launchId);
     const parsed = parseResultFrame(capture, launch.frame);
+    // Snapshot the report once, into host-owned storage; later writes to the
+    // outbox cannot change what was collected.
+    const reportSha256 = capture?.complete ? createHash('sha256').update(capture.text, 'utf8').digest('hex') : null;
     if (capture?.complete) fs.writeFileSync(path.join(dir, 'result.txt'), capture.text, 'utf8');
     launch.record.delivery.providerRead = parsed.nonce;
 
@@ -392,6 +445,10 @@ class TaskHost {
     } catch (error) {
       diff = { complete: false, error: error.code || 'git-failed' };
     }
+
+    // What the window showed, kept privately (bounded, the tail) so a review
+    // after the window closes, or of a turn that went wrong, can still read it.
+    fs.writeFileSync(path.join(dir, 'terminal.log'), launch.replay, 'utf8');
 
     const checksDir = ensureDir(path.join(dir, 'checks'));
     const observed = [];
@@ -413,6 +470,8 @@ class TaskHost {
         frame: parsed.frame,
         nonce: parsed.nonce,
         source: 'ai-reported',
+        channel: launch.resultFile ? 'file' : 'pty-frame',
+        reportSha256,
         aiReported: parsed.aiReported,
       },
       checks: {
@@ -449,7 +508,14 @@ class TaskHost {
   _onLifecycle(sessionId, type) {
     const launchId = this._bySession.get(sessionId);
     const launch = launchId && this._launches.get(launchId);
-    if (!launch || type !== 'agent-turn-complete' || launch.record.lifecycle.turnComplete) return;
+    if (!launch) return;
+    if (type === 'uncorrelated-turn-complete') {
+      // A turn completed in the provider process, but not the task's turn.
+      launch.record.lifecycle.uncorrelatedReceipts = (launch.record.lifecycle.uncorrelatedReceipts || 0) + 1;
+      this._persist(launch);
+      return;
+    }
+    if (type !== 'agent-turn-complete' || launch.record.lifecycle.turnComplete) return;
     launch.record.lifecycle.turnComplete = {
       observedAt: new Date().toISOString(),
       source: 'authenticated-receipt',
@@ -520,7 +586,8 @@ class TaskHost {
   windowInput(launchId, text) {
     const launch = this._launches.get(launchId);
     if (!launch?.sessionId || typeof text !== 'string' || text.length > 4096) return false;
-    if (!this._registry.isRunning(launch.sessionId)) return false;
+    // Input closes when collection starts: the evidence is being frozen.
+    if (launch.record.state !== 'running' || !this._registry.isRunning(launch.sessionId)) return false;
     return this._registry.write(launch.sessionId, text);
   }
 
@@ -589,6 +656,7 @@ class TaskHost {
       process: r.process ? { exitCode: r.process.exitCode, spawnedAt: r.process.spawnedAt, exitedAt: r.process.exitedAt, observation: r.process.observation || 'live' } : null,
       window: r.window,
       stop: r.stop,
+      collection: r.collection ?? null,
       evidence: r.evidence,
     };
   }

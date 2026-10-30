@@ -157,4 +157,4 @@ async function runTaskHostFixture({ host, presentation, dataDir, BrowserWindow, 
   return { passed: results.every(r => r.ok), results };
 }
 
-module.exports = { runTaskHostFixture };
+module.exports = { createFixtureRepo, runTaskHostFixture };

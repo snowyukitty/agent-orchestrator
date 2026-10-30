@@ -619,6 +619,11 @@ class SessionRegistry {
         sessionId,
         incarnationId,
         onEvent: event => this._handleAgentLifecycleEvent(sessionId, incarnationId, event),
+        expectedInputDigest: spec.initialInputDigest || null,
+        onUncorrelated: () => {
+          if (this._sessions.get(sessionId)?.incarnationId !== incarnationId) return;
+          this._onLifecycle({ id: sessionId, incarnationId, type: 'uncorrelated-turn-complete' });
+        },
       });
     }
 

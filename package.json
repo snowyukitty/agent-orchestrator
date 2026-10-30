@@ -17,6 +17,7 @@
     "workflow": "node scripts/workflow-tool.mjs",
     "smoke": "electron . --smoke-test",
     "verify:task-host": "electron . --task-host-fixture",
+    "qualify:task-host": "electron . --task-host-qualify",
     "test": "npm run test:unit && npm run test:app",
     "test:unit": "node --test --test-force-exit \"tests/**/*.test.js\"",
     "test:app": "electron . --self-test",

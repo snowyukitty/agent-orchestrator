@@ -46,6 +46,15 @@ async function isWorkTreeRoot(dir) {
   }
 }
 
+/**
+ * The main working tree a checkout belongs to: the parent of the common Git
+ * directory, so a linked worktree resolves to the repository it came from.
+ */
+async function repositoryRoot(dir) {
+  const common = (await git(dir, ['rev-parse', '--path-format=absolute', '--git-common-dir'])).trim();
+  return path.dirname(path.resolve(common));
+}
+
 async function resolveCommit(repo, revision) {
   try {
     return (await git(repo, ['rev-parse', '--verify', '--end-of-options', `${revision}^{commit}`])).trim();
@@ -176,6 +185,7 @@ module.exports = {
   createWorktree,
   git,
   isWorkTreeRoot,
+  repositoryRoot,
   resolveCommit,
   showFile,
   snapshotTree,

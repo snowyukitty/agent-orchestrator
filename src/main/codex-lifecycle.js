@@ -13,6 +13,7 @@ const MAX_CONNECTIONS = 16;
 const MAX_TURN_RECEIPTS = 4096;
 const SOCKET_TIMEOUT_MS = 2_000;
 const DIGEST_PATTERN = /^[0-9a-f]{64}$/;
+const MAX_INPUT_DIGESTS = 16;
 const ENV_PIPE = 'AGENT_ORCHESTRATOR_NOTIFY_SECRET_PIPE';
 const ENV_TOKEN = 'AGENT_ORCHESTRATOR_NOTIFY_SECRET_TOKEN';
 const ENV_INCARNATION = 'AGENT_ORCHESTRATOR_NOTIFY_SECRET_INCARNATION';
@@ -63,14 +64,25 @@ class CodexLifecycleBroker {
     return true;
   }
 
-  register({ sessionId, incarnationId, onEvent }) {
+  /**
+   * @param {string} [expectedInputDigest] when set, only a receipt whose turn
+   *   input includes a message with this SHA-256 counts, and only that receipt
+   *   binds the thread. Others (a background or side turn in the same
+   *   process) are reported to `onUncorrelated` and change nothing.
+   */
+  register({ sessionId, incarnationId, onEvent, expectedInputDigest = null, onUncorrelated = null }) {
     if (!this._started || !this._server) throw new Error('Codex lifecycle service is not listening');
     if (typeof onEvent !== 'function') throw new TypeError('Lifecycle registration needs an event handler');
+    if (expectedInputDigest !== null && !DIGEST_PATTERN.test(expectedInputDigest)) {
+      throw new TypeError('Expected input digest must be a SHA-256 hex digest');
+    }
     const token = this._uuid();
     const registration = {
       sessionId,
       incarnationId,
       onEvent,
+      expectedInputDigest,
+      onUncorrelated: typeof onUncorrelated === 'function' ? onUncorrelated : null,
       threadDigest: null,
       turnDigests: new Set(),
       exhausted: false,
@@ -133,12 +145,22 @@ class CodexLifecycleBroker {
       'type',
       'threadDigest',
       'turnDigest',
+      'inputDigests',
     ].includes(key))) return false;
     if (payload.type !== 'agent-turn-complete') return false;
     if (!DIGEST_PATTERN.test(payload.threadDigest) || !DIGEST_PATTERN.test(payload.turnDigest)) return false;
+    const inputDigests = payload.inputDigests ?? [];
+    if (
+      !Array.isArray(inputDigests) || inputDigests.length > MAX_INPUT_DIGESTS ||
+      !inputDigests.every(digest => typeof digest === 'string' && DIGEST_PATTERN.test(digest))
+    ) return false;
     const registration = this._registrations.get(payload.token);
     if (!registration || registration.incarnationId !== payload.incarnationId) return false;
     if (registration.exhausted) return false;
+    if (registration.expectedInputDigest && !inputDigests.includes(registration.expectedInputDigest)) {
+      registration.onUncorrelated?.();
+      return false;
+    }
     if (registration.threadDigest && registration.threadDigest !== payload.threadDigest) return false;
     if (registration.turnDigests.has(payload.turnDigest)) return false;
     if (registration.turnDigests.size >= MAX_TURN_RECEIPTS) {
@@ -162,6 +184,7 @@ module.exports = {
   ENV_PIPE,
   ENV_TOKEN,
   MAX_CONNECTIONS,
+  MAX_INPUT_DIGESTS,
   MAX_MESSAGE_CHARS,
   MAX_TURN_RECEIPTS,
   SOCKET_TIMEOUT_MS,

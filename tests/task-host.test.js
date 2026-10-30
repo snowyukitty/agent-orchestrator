@@ -20,9 +20,13 @@ const { TaskIngress, readDiscovery, sendIngressCommand } = require('../src/main/
 const { collectDiffEvidence, isWorkTreeRoot, summarizeStatus } = require('../src/main/task-host/git');
 const { compareCheckClaims } = require('../src/main/task-host/checks');
 const {
-  createCodexAdapter, createFixtureAdapter, createResultFrame, parseResultFrame, renderPromptFile,
+  CODEX_ADAPTER_CONTRACT, createCodexAdapter, createFixtureAdapter, createResultFrame, parseResultFrame, readResultFile,
+  renderPromptFile,
 } = require('../src/main/task-host/adapters');
 const { TaskHost } = require('../src/main/task-host/host');
+const {
+  REQUIRED_EVIDENCE, qualificationEvidence, qualificationFile, qualificationShortfall, readQualification, writeQualification,
+} = require('../src/main/task-host/qualification');
 
 const FIXTURE_AGENT = path.join(__dirname, 'fixtures', 'task-host', 'fixture-agent.js');
 
@@ -217,7 +221,12 @@ test('check comparison keeps AI claims and host observations apart', () => {
 
 // ── adapters ───────────────────────────────────────────────────
 
-test('codex adapter appends only the pointer prompt to the routed direct spec', async () => {
+const CODEX_LAUNCH = {
+  route: 'a', worktree: 'C:\\wt', promptFile: 'C:\\private\\prompt.md', resultDir: 'C:\\private\\outbox',
+  repositoryRoot: 'D:\\Work\\Repo-1',
+};
+
+test('codex adapter adds only the task sandbox, outbox, one-launch trust, and pointer prompt', async () => {
   const adapter = createCodexAdapter({
     resolveProfile: async route => ({ kind: 'routed', id: `codex:${route}`, alias: route }),
     buildLaunchSpec: (_profile, ctx) => ({
@@ -227,11 +236,101 @@ test('codex adapter appends only the pointer prompt to the routed direct spec', 
     launchContext: async () => ({}),
   });
   assert.equal(adapter.qualification, 'unqualified');
-  const spec = await adapter.buildSpec({ route: 'a', worktree: 'C:\\wt', promptFile: 'C:\\private\\prompt.md' });
+  assert.equal(adapter.resultChannel, 'file', 'a full-screen TUI reports through a file, not the screen');
+  const { spec, providerVersion } = await adapter.buildSpec(CODEX_LAUNCH);
+  assert.equal(providerVersion, null, 'no version probe was configured');
   assert.equal(spec.cwd, 'C:\\wt');
   assert.equal(spec.initialTurnSubmitted, true);
-  assert.equal(spec.args.length, 7);
-  assert.match(spec.args[6], /^Your complete task is in the file C:\\private\\prompt\.md \./);
+  assert.deepEqual(spec.args.slice(6, 13), [
+    '--no-daemon',
+    '-c', 'approval_policy="never"',
+    '--add-dir', 'C:\\private\\outbox',
+    '-c', `projects={'d:\\work\\repo-1'={trust_level="trusted"}}`,
+  ]);
+  assert.ok(!spec.args.includes('--sandbox'), 'the sandbox stays the account policy');
+  assert.equal(spec.args.length, 14);
+  assert.match(spec.args[13], /^Your complete task is in the file C:\\private\\prompt\.md \./);
+
+  // The trust root is a TOML literal key, so dots, spaces, and '=' are fine;
+  // only ASCII letters fold, matching Windows.
+  const trustArg = async repositoryRoot => (await adapter.buildSpec({ ...CODEX_LAUNCH, repositoryRoot })).spec.args[12];
+  assert.equal(await trustArg('D:\\Work\\my.repo v2=x'), `projects={'d:\\work\\my.repo v2=x'={trust_level="trusted"}}`);
+  assert.equal(await trustArg('D:\\WÖRK\\Repo'), `projects={'d:\\wÖrk\\repo'={trust_level="trusted"}}`);
+  // What a literal key cannot carry is refused, never guessed.
+  for (const repositoryRoot of ["D:\\Work\\it's", 'D:\\Work\\a\nb', '\\\\server\\share\\repo', 'relative\\repo']) {
+    await assert.rejects(adapter.buildSpec({ ...CODEX_LAUNCH, repositoryRoot }), { code: 'provider-trust-unexpressible' });
+  }
+
+  const conflicting = createCodexAdapter({
+    resolveProfile: async route => ({ kind: 'routed', id: `codex:${route}`, alias: route }),
+    buildLaunchSpec: (_profile, ctx) => ({
+      file: 'pwsh.exe', args: ['-File', 'entry.ps1', 'target', 'run', 'codex:a', '--', '--add-dir=C:\\'], env: {},
+      cwd: 'C:\\elsewhere', agent: 'codex', sessionMode: ctx.sessionMode,
+    }),
+    launchContext: async () => ({}),
+  });
+  await assert.rejects(conflicting.buildSpec(CODEX_LAUNCH), { code: 'route-policy-conflict' });
+});
+
+test('a qualified codex adapter launches only the version it was qualified on', async () => {
+  const probes = [];
+  let reported = 'codex-cli 0.165.0\n';
+  const adapter = createCodexAdapter({
+    resolveProfile: async route => ({ kind: 'routed', id: `codex:${route}`, alias: route }),
+    buildLaunchSpec: (_profile, ctx) => ({
+      file: 'pwsh.exe', args: ['-File', 'entry.ps1', 'target', 'run', 'codex:a', '--', '-c', 'notify=x'], env: { A: '1' },
+      cwd: 'C:\\elsewhere', agent: 'codex', sessionMode: ctx.sessionMode,
+    }),
+    launchContext: async () => ({}),
+    runVersion: async (file, args, options) => { probes.push({ file, args, options }); return reported; },
+    qualification: { status: 'qualified', providerVersion: '0.165.0' },
+  });
+  assert.equal(adapter.qualification, 'qualified');
+  assert.equal(adapter.contract, CODEX_ADAPTER_CONTRACT);
+  const built = await adapter.buildSpec(CODEX_LAUNCH);
+  assert.equal(built.providerVersion, '0.165.0');
+  assert.deepEqual(probes[0].args, ['-File', 'entry.ps1', 'target', 'run', 'codex:a', '--', '--version'],
+    'the probe uses the exact route prefix and makes no model turn');
+  assert.equal(probes[0].options.cwd, 'C:\\wt');
+
+  reported = 'codex-cli 0.166.0';
+  await assert.rejects(adapter.buildSpec(CODEX_LAUNCH), { code: 'provider-version-changed' });
+  reported = 'something else';
+  await assert.rejects(adapter.buildSpec(CODEX_LAUNCH), { code: 'provider-version-unknown' });
+});
+
+test('qualification receipts need every axis, and bind the adapter contract', (t) => {
+  const dir = tempDir(t, 'ao-qualify-');
+  const file = qualificationFile(dir, 'codex');
+  const passing = { ...REQUIRED_EVIDENCE };
+  assert.deepEqual(readQualification(file, { provider: 'codex', adapterContract: 1 }), { status: 'absent' });
+  assert.throws(() => writeQualification(file, {
+    provider: 'codex', adapterContract: 1, providerVersion: '0.165.0', evidence: { ...passing, providerRead: 'mismatch' },
+  }), /does not qualify/);
+  assert.equal(fs.existsSync(file), false, 'a failed turn writes no receipt');
+  assert.deepEqual(qualificationShortfall({ ...passing, frame: 'truncated', hostCheck: 'not-passed' }), ['frame', 'hostCheck']);
+
+  writeQualification(file, { provider: 'codex', adapterContract: 1, providerVersion: '0.165.0', evidence: passing });
+  assert.equal(readQualification(file, { provider: 'codex', adapterContract: 1 }).providerVersion, '0.165.0');
+  assert.deepEqual(readQualification(file, { provider: 'codex', adapterContract: 2 }), { status: 'stale-contract' });
+  const receipt = JSON.parse(fs.readFileSync(file, 'utf8'));
+  fs.writeFileSync(file, JSON.stringify({ ...receipt, evidence: { ...passing, diffComplete: false } }));
+  assert.deepEqual(readQualification(file, { provider: 'codex', adapterContract: 1 }), { status: 'invalid' });
+});
+
+test('qualification evidence comes from host observations, not AI claims', () => {
+  const result = {
+    window: { created: true },
+    delivery: { providerRead: 'echoed' },
+    lifecycle: { turnComplete: { source: 'authenticated-receipt' } },
+    evidence: {
+      result: { frame: 'complete' },
+      checks: { hostObserved: [{ outcome: 'failed' }], comparison: [{ agreement: 'disagree' }] },
+      diff: { complete: true },
+    },
+  };
+  const evidence = qualificationEvidence(result, { ownerCheckoutClean: true });
+  assert.deepEqual(qualificationShortfall(evidence), ['hostCheck', 'checkAgreement']);
 });
 
 // ── git evidence ───────────────────────────────────────────────
@@ -414,12 +513,78 @@ test('a nonzero exit without a receipt still collects evidence and never claims 
   assert.equal(result.delivery.providerRead, 'not-observed');
 });
 
+test('a side turn completing first neither completes the task nor captures its receipt', async (t) => {
+  const { host, base } = await hostFixture(t);
+  const req = request({ baseRevision: base, route: 'side-thread' });
+  startTask(host, req);
+  await host.whenIdle();
+  const result = host.result(req.launchId);
+  assert.equal(result.ending, 'turn-complete');
+  assert.equal(result.lifecycle.uncorrelatedReceipts, 1, 'the side turn is counted, not trusted');
+  assert.equal(result.lifecycle.turnComplete.source, 'authenticated-receipt');
+  assert.equal(result.evidence.result.frame, 'complete', 'the task was not cut off by the side turn');
+  assert.equal(result.evidence.checks.comparison[0].agreement, 'agree');
+});
+
 test('a wrong nonce is reported as a mismatch', async (t) => {
   const { host, base } = await hostFixture(t);
   const req = request({ baseRevision: base, route: 'wrong-nonce' });
   startTask(host, req);
   await host.whenIdle();
   assert.equal(host.result(req.launchId).delivery.providerRead, 'mismatch');
+});
+
+test('a file-channel report is read from the private outbox, outside the diff', async (t) => {
+  const { host, base, dataDir } = await hostFixture(t, {
+    adapters: { fixture: createFixtureAdapter({ script: FIXTURE_AGENT, resultChannel: 'file' }) },
+  });
+  const req = request({ baseRevision: base });
+  startTask(host, req);
+  await host.whenIdle();
+  const result = host.result(req.launchId);
+  assert.equal(result.delivery.resultChannel, 'file');
+  assert.equal(result.delivery.providerRead, 'echoed');
+  assert.equal(result.evidence.result.frame, 'complete');
+  assert.equal(result.evidence.checks.comparison[0].agreement, 'agree');
+  assert.match(result.evidence.result.reportSha256, /^[0-9a-f]{64}$/);
+  const outboxes = fs.readdirSync(path.join(dataDir, 'launches', req.launchId)).filter(name => name.startsWith('outbox-'));
+  assert.equal(outboxes.length, 1, 'one randomly named outbox');
+  assert.match(outboxes[0], /^outbox-[0-9a-f]{16}$/);
+  assert.equal(result.evidence.diff.layers.untracked, 2, 'the report is not part of the task diff');
+  assert.deepEqual([result.collection.providerEndedByHost, result.collection.rootExitObserved], [true, true],
+    'the provider tree ends before evidence is frozen');
+  assert.equal(host.windowInput(req.launchId, 'more\r'), false, 'input is closed once collection starts');
+  const prompt = fs.readFileSync(path.join(dataDir, 'launches', req.launchId, 'prompt.md'), 'utf8');
+  assert.ok(!prompt.includes('AO-TASK-RESULT-BEGIN'), 'no terminal frame is requested');
+  assert.match(prompt, /- `test` \(run it as `npm run test`\)/);
+
+  const silent = request({ baseRevision: base, route: 'exit-nonzero' });
+  startTask(host, silent);
+  await host.whenIdle();
+  assert.equal(host.result(silent.launchId).evidence.result.frame, 'missing');
+});
+
+test('a file report must be one bounded regular file', (t) => {
+  const dir = tempDir(t, 'ao-outbox-');
+  const file = path.join(dir, 'result.json');
+  assert.equal(readResultFile(file, 64), null, 'absent');
+  fs.mkdirSync(file);
+  assert.deepEqual(readResultFile(file, 64), { complete: true, text: '' }, 'a directory parses as invalid');
+  fs.rmdirSync(file);
+  fs.writeFileSync(file, 'x'.repeat(65));
+  assert.equal(parseResultFrame(readResultFile(file, 64), createResultFrame()).frame, 'truncated');
+
+  const frame = createResultFrame();
+  const body = checks => JSON.stringify({ nonce: frame.nonce, summary: 's', checks });
+  fs.writeFileSync(file, `﻿${body([{ name: 'test', outcome: 'passed' }])}`);
+  assert.equal(parseResultFrame(readResultFile(file, 4096), frame).nonce, 'echoed', 'a UTF-8 byte-order mark is accepted');
+  fs.writeFileSync(file, Buffer.from(body([]), 'utf16le'));
+  assert.equal(parseResultFrame(readResultFile(file, 4096), frame).frame, 'invalid', 'UTF-16 is not UTF-8');
+  fs.writeFileSync(file, body([{ name: 'test', outcome: 'passed' }, { name: 'test', outcome: 'failed' }]));
+  assert.equal(parseResultFrame(readResultFile(file, 4096), frame).frame, 'invalid', 'duplicate claims');
+  fs.writeFileSync(file, body([]));
+  fs.linkSync(file, path.join(dir, 'alias.json'));
+  assert.equal(parseResultFrame(readResultFile(file, 4096), frame).frame, 'invalid', 'a hard-linked report');
 });
 
 test('without a receipt the task stays running until Stop, which still collects evidence', async (t) => {
@@ -456,6 +621,12 @@ test('admission refuses busy workspaces, unknown routes, unqualified providers, 
   });
   assert.deepEqual(startTask(host, request({ provider: 'codex', baseRevision: base })), { ok: false, error: 'provider-unqualified' });
   assert.deepEqual(startTask(host, request({ provider: 'grok', baseRevision: base })), { ok: false, error: 'provider-unavailable' });
+  // Project trust is a separate, default-deny opt-in per workspace.
+  codex.qualification = 'qualified';
+  codex.requiresProjectTrust = true;
+  assert.deepEqual(startTask(host, request({ provider: 'codex', baseRevision: base })),
+    { ok: false, error: 'workspace-trust-not-granted' });
+  codex.qualification = 'unqualified';
   assert.deepEqual(startTask(host, request({ workspace: 'other', baseRevision: base })), { ok: false, error: 'unknown-workspace' });
 
   const first = request({ baseRevision: base, route: 'no-receipt' });

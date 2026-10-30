@@ -42,12 +42,21 @@ try {
         $encoding = [System.Text.UTF8Encoding]::new($false)
         $writer = [System.IO.StreamWriter]::new($client, $encoding, 1024, $true)
         try {
+            # Digests of the turn's input messages let a host tell the turn it
+            # started from a background or side turn in the same process.
+            $inputDigests = @(
+                @($notification.'input-messages') |
+                    Where-Object { $_ -is [string] } |
+                    Select-Object -First 16 |
+                    ForEach-Object { Get-Sha256Hex $_.Trim() }
+            )
             $payload = @{
                 token = $token
                 incarnationId = $incarnation
                 type = 'agent-turn-complete'
                 threadDigest = Get-Sha256Hex $threadId
                 turnDigest = Get-Sha256Hex $turnId
+                inputDigests = $inputDigests
             } | ConvertTo-Json -Compress
             $writer.WriteLine($payload)
             $writer.Flush()
