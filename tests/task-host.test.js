@@ -920,6 +920,10 @@ test('remote starts are off without a policy, and a retry after expiry never sta
   writePolicy(host, { remoteStarts: 'disabled' });
   assert.deepEqual(remoteStart(host, req), { ok: false, error: 'remote-starts-disabled' });
   writePolicy(host);
+  const jobs = host._jobs;
+  host._jobs = null;
+  assert.deepEqual(remoteStart(host, req), { ok: false, error: 'process-ownership-unavailable' });
+  host._jobs = jobs;
   assert.deepEqual(remoteStart(host, req, authorization(req, { destination: 'target-two' })), { ok: false, error: 'wrong-destination' });
   const ack = remoteStart(host, req);
   assert.equal(ack.ok, true);

@@ -196,9 +196,11 @@ interrupted (host restart before any spawn intent)
   **Job Object**, adopting any child it already started. Everything started
   afterwards joins the job by itself, detached processes included, and the
   helper keeps the root's handle open so its pid is never reused while the job
-  exists. A process can still be created outside its parent's job (PowerShell
-  7 was observed starting native commands that way, which is how the routed
-  launcher starts Codex), so every 2 seconds while the task runs, and again at
+  exists, and jobs are kill-on-close, so they never outlive the helper. A
+  process can still be created outside its parent's job: PowerShell 7
+  installed from the Microsoft Store is a packaged (MSIX) app, whose children
+  break away from every job, and the router runs Codex under it. So every 2
+  seconds while the task runs, and again at
   the boundary, the helper adopts any live child of a live member that is
   outside the job. At the boundary the host counts what is in the job and what
   could not be adopted, ends the provider, and terminates the whole job,
@@ -207,8 +209,12 @@ interrupted (host restart before any spawn intent)
   the boundary, and how many survived. The collection is `stable` only when
   the root exited, nothing was left outside the job, and the job is empty;
   without a job (the helper failed, or another platform) it is never stable,
-  and an unstable collection never qualifies a provider. Pids and creation
-  times are never used to decide what to end. The terminal stays readable in
+  and an unstable collection never qualifies a provider. This is adoption
+  after spawn, not ownership from creation: a child started outside the job
+  and gone, or started by an intermediate that exited between two sweeps, is
+  not seen, and stray adoption still relies on creation order. Making it
+  sound needs the router off packaged PowerShell (see
+  [the policy](w2b-unattended-policy.md#progress)). The terminal stays readable in
   the window (and in the private `terminal.log`); a follow-up conversation is
   a new task.
 - **Power.** While any task prepares, runs, or is checked, the host holds
@@ -217,9 +223,9 @@ interrupted (host restart before any spawn intent)
   its evidence is collected without host checks (`checks.skipped:
   "on-battery"`); a check already running is ended and recorded as
   `cancelled`, and one not yet started never starts. Each host check also runs
-  in its own job, so ending it reaches processes that outlived its root and
-  still hold its output; a check whose output never closes is given up after
-  5 seconds.
+  in its own job, which is ended on every path, including a normal finish, so
+  a background process the script left is ended too; a check whose output
+  never closes is given up after 5 seconds.
 - **Quiet windows.** A task window opens without taking focus, and its title
   and state line name the task and the provider, never the route alias or the
   instruction. Only an explicit `show` may bring a window forward.

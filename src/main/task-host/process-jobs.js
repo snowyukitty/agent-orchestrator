@@ -16,7 +16,14 @@
 // handle open, so its pid is never reused while the job exists.
 //
 // Without the helper (another platform, or it fails) nothing is adopted, and
-// a collection that depended on it is not stable.
+// a collection that depended on it is not stable. Jobs are kill-on-close: if
+// the helper exits, every process it owned is ended with it.
+//
+// Adoption after spawn is not ownership from creation. A process launched
+// through a packaged (MSIX) executable, such as PowerShell 7 installed from
+// the Microsoft Store, is placed in its package's job and its children break
+// away from every job, ours included; the strays sweep can only adopt such a
+// child after the fact, and only while its parent is alive.
 
 const fs = require('fs');
 const path = require('path');

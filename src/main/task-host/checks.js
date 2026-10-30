@@ -109,7 +109,10 @@ function runProcess(file, args, {
       settled = true;
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
-      const ended = termination ? await termination : null;
+      let ended = termination ? await termination : null;
+      // A check that finished normally can still have left a background
+      // process in its job; end the job on every path before releasing it.
+      if (!ended && (await owned).adopted) ended = { job: true, survivors: await jobs.end(jobKey, 10_000), leftovers: true };
       if ((await owned).adopted) await jobs.release(jobKey);
       resolve({
         termination: ended,
@@ -179,8 +182,11 @@ async function runCheck({
     record.outcome = 'cancelled';
     return record;
   }
-  // What ending a cancelled or timed-out check left behind.
-  if (run.termination) record.termination = run.termination;
+  // What ending the check's job left behind.
+  if (run.termination) {
+    const { job, survivors } = run.termination;
+    record.termination = { job, survivors };
+  }
   record.startedAt = new Date(run.startedAt).toISOString();
   record.durationMs = run.finishedAt - run.startedAt;
   record.exitCode = run.exitCode;

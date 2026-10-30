@@ -24,8 +24,13 @@ the product story; this file keeps the history.
   neutral title. Three rounds of independent Codex review via ATD found
   fail-open session and power views, owner matching by name, a check
   surviving battery, and, repeatedly, unsound pid-and-time reasoning about
-  which processes belonged to a task; that reasoning was replaced by Job
-  Objects. Codex 0.165.0 was re-qualified under the stricter boundary;
+  which processes belonged to a task; that reasoning was replaced by
+  kill-on-close Job Objects. A fourth review showed that adopting a process
+  after spawn is still not ownership, and the cause of Codex starting outside
+  the job turned out to be PowerShell 7 installed from the Microsoft Store,
+  whose children break away from every job: the process-ownership gate stays
+  open until the router runs on a non-packaged PowerShell. Codex 0.165.0 was
+  re-qualified under the stricter boundary;
   its locked-session qualification is still to be run with nobody at the
   console. The relay from another machine and the controller view are not
   built yet.

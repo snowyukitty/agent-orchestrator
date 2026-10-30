@@ -258,6 +258,9 @@ class TaskHost {
   remoteStart(authorization, request, digest) {
     const existing = this._launches.get(request.launchId);
     if (existing) return this._duplicate(existing, digest);
+    // Nobody is there to notice a provider left running: without process
+    // ownership, a remote start is refused outright.
+    if (!this._jobs) return { ok: false, error: 'process-ownership-unavailable' };
     const refusal = checkRemoteAuthorization(authorization, {
       policy: readPolicy(this.policyFile),
       digest,
@@ -910,6 +913,8 @@ class TaskHost {
       if (!launch.historical && ACTIVE_STATES.has(launch.record.state)) {
         this._setState(launch, 'interrupted', 'host-quit');
       }
+      // A running host check is ended too; it does not outlive the host.
+      launch.checkAbort?.abort();
       launch.resolveStop?.();
       launch.sweepDone = true;
       clearInterval(launch.sweep);

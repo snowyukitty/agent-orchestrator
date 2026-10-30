@@ -90,16 +90,19 @@ public static class AoProcessJobs {
     var children = new Dictionary<int, List<int>>();
     names.Clear();
     IntPtr snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snapshot == new IntPtr(-1)) return children;
+    if (snapshot == new IntPtr(-1)) throw new InvalidOperationException("snapshot");
     try {
       var entry = new Entry();
       entry.dwSize = (uint)Marshal.SizeOf(typeof(Entry));
-      for (bool more = Process32FirstW(snapshot, ref entry); more; more = Process32NextW(snapshot, ref entry)) {
+      if (!Process32FirstW(snapshot, ref entry)) throw new InvalidOperationException("enumerate");
+      do {
         int parent = (int)entry.th32ParentProcessID;
         if (!children.ContainsKey(parent)) children[parent] = new List<int>();
         children[parent].Add((int)entry.th32ProcessID);
         names[(int)entry.th32ProcessID] = entry.szExeFile;
-      }
+      } while (Process32NextW(snapshot, ref entry));
+      // The walk ends with ERROR_NO_MORE_FILES; anything else cut it short.
+      if (Marshal.GetLastWin32Error() != 18) throw new InvalidOperationException("enumerate");
     } finally {
       CloseHandle(snapshot);
     }
@@ -114,6 +117,7 @@ public static class AoProcessJobs {
     if (created < notBefore) { CloseHandle(root); return "error identity"; }
     IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
     if (job == IntPtr.Zero) { CloseHandle(root); return "error job-" + Marshal.GetLastWin32Error(); }
+    if (!KillOnClose(job)) { CloseHandle(root); CloseHandle(job); return "error limits"; }
     if (!AssignProcessToJobObject(job, root)) {
       int code = Marshal.GetLastWin32Error();
       CloseHandle(root);
@@ -153,6 +157,23 @@ public static class AoProcessJobs {
     return "ok " + created + " " + adopted;
   }
 
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool SetInformationJobObject(IntPtr job, int infoClass, IntPtr info, int length);
+
+  // JOBOBJECT_EXTENDED_LIMIT_INFORMATION with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE:
+  // when the helper exits, however it exits, every member is ended with it.
+  static bool KillOnClose(IntPtr job) {
+    int size = IntPtr.Size == 8 ? 144 : 112;
+    IntPtr info = Marshal.AllocHGlobal(size);
+    try {
+      for (int i = 0; i < size; i++) Marshal.WriteByte(info, i, 0);
+      Marshal.WriteInt32(info, 16, 0x2000);
+      return SetInformationJobObject(job, 9, info, size);
+    } finally {
+      Marshal.FreeHGlobal(info);
+    }
+  }
+
   static uint Active(IntPtr job) {
     Accounting info;
     if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation, out info, Marshal.SizeOf(typeof(Accounting)), IntPtr.Zero)) {
@@ -174,9 +195,9 @@ public static class AoProcessJobs {
       if (AdoptStrays(owned) == 0) break;
     }
     TerminateJobObject(owned.Job, 1);
-    var started = DateTime.UtcNow;
+    var elapsed = System.Diagnostics.Stopwatch.StartNew();
     uint active = Active(owned.Job);
-    while (active > 0 && (DateTime.UtcNow - started).TotalMilliseconds < waitMs) {
+    while (active > 0 && elapsed.ElapsedMilliseconds < waitMs) {
       System.Threading.Thread.Sleep(50);
       active = Active(owned.Job);
     }
@@ -245,9 +266,12 @@ public static class AoProcessJobs {
       List<int> kids;
       if (!tree.TryGetValue(parent, out kids)) continue;
       IntPtr parentHandle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, parent);
-      if (parentHandle == IntPtr.Zero) continue;
+      // A member that exited since the listing names nobody; one that cannot
+      // be read leaves its children unknown.
+      if (parentHandle == IntPtr.Zero) { if (Marshal.GetLastWin32Error() == 87) continue; throw new InvalidOperationException("identity"); }
       long parentCreated = Created(parentHandle);
       CloseHandle(parentHandle);
+      if (parentCreated < 0) throw new InvalidOperationException("identity");
       foreach (int kid in kids) {
         if (members.Contains(kid)) continue;
         IntPtr handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, kid);
