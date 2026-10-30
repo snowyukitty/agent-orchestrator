@@ -65,6 +65,7 @@ const { CODEX_ADAPTER_CONTRACT, createCodexAdapter, createFixtureAdapter } = req
 const { qualificationFile, readQualification } = require('./src/main/task-host/qualification');
 const { createTaskWindowPresentation } = require('./src/main/task-host/task-windows');
 const { createProcessTree } = require('./src/main/task-host/process-tree');
+const { createSystemObserver } = require('./src/main/task-host/system-state');
 
 // Establish the singular identity before Electron creates storage, sessions,
 // or its single-instance lock. Test modes never touch production AppData.
@@ -146,6 +147,7 @@ let sessionPromptHandlers = null;
 let sessionContinuation = null;
 let taskHost = null;    // TaskHost, only when enabled or in fixture mode
 let taskIngress = null;
+let taskHostSystem = null;  // system-state observer for task-host admission
 let testDataCleanupScheduled = false;
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 const isDev = process.argv.includes('--dev');
@@ -930,19 +932,34 @@ async function startTaskHost({ fixture = false, qualify = false } = {}) {
     // Scripted, so it may also run while the workstation is locked.
     adapters.fixture = createFixtureAdapter({ script: fixtureAgentScript(), execPath, lockedSession: true });
   }
-  const host = new TaskHost({
+  let host = null;
+  taskHostSystem = createSystemObserver({
+    onChange: (now, previous) => {
+      if (!host || now.power === 'ac' || now.power === previous?.power) return;
+      const stopped = host.powerChanged();
+      if (stopped) console.warn(`[TaskHost] power ${now.power}: stopped ${stopped} task(s)`);
+    },
+    log: message => console.warn(message),
+  });
+  // Admission refuses until the first answer; wait for it so a fresh host
+  // does not refuse its first request for no reason.
+  await taskHostSystem.start();
+  const system = taskHostSystem;
+  host = new TaskHost({
     dataDir,
     pty,
     lifecycleBroker: codexLifecycleBroker,
     adapters,
     presentation,
-    observeSession: taskHostSessionState,
-    observePower: () => (powerMonitor.isOnBatteryPower() ? 'battery' : 'ac'),
+    observeSession: () => taskHostSessionState(system),
+    observePower: () => system.power(),
+    account: () => system.account(),
     holdAwake: () => {
       const id = powerSaveBlocker.start('prevent-app-suspension');
       return () => { if (powerSaveBlocker.isStarted(id)) powerSaveBlocker.stop(id); };
     },
-    processTree: createProcessTree({ killPid: killProcessTree }),
+    // One process at a time: the tree walk decides membership by identity.
+    processTree: createProcessTree({ killPid: pid => { try { process.kill(pid); } catch (_error) { /* gone */ } } }),
     allowUnqualified: qualify ? ['codex'] : [],
     terminateTree: process.platform === 'win32' ? killProcessTree : null,
     killTree: killProcessTree,
@@ -950,11 +967,10 @@ async function startTaskHost({ fixture = false, qualify = false } = {}) {
   });
   try {
     powerMonitor.on('suspend', () => host.setSuspending(true));
-    powerMonitor.on('resume', () => host.setSuspending(false));
-    powerMonitor.on('on-battery', () => {
-      const stopped = host.powerChanged();
-      if (stopped) console.warn(`[TaskHost] on battery: stopped ${stopped} task(s)`);
-    });
+    powerMonitor.on('resume', () => { host.setSuspending(false); system.refresh(); });
+    for (const event of ['lock-screen', 'unlock-screen', 'on-battery', 'on-ac']) {
+      powerMonitor.on(event, () => system.refresh());
+    }
   } catch (_error) {
     console.warn('[TaskHost] power events unavailable');
   }
@@ -969,16 +985,18 @@ async function startTaskHost({ fixture = false, qualify = false } = {}) {
 }
 
 /**
- * The session state, queried from the system at the moment of asking, so a
- * host started while already locked never assumes it is unlocked. Chromium
- * reports a locked workstation, a running screen saver, and (conservatively)
- * an unreadable input desktop as `locked`.
+ * The host's own Windows session as last read from Windows (at most a few
+ * seconds old; older is unknown). Chromium's view only ever adds caution: a
+ * running screen saver it reports as locked makes an unlocked session locked.
  */
-function taskHostSessionState() {
-  const state = powerMonitor.getSystemIdleState(60);
-  if (state === 'locked') return 'locked';
-  if (state === 'active' || state === 'idle') return 'unlocked';
-  return 'unknown';
+function taskHostSessionState(system) {
+  const state = system.session();
+  if (state !== 'unlocked') return state;
+  try {
+    return powerMonitor.getSystemIdleState(60) === 'locked' ? 'locked' : 'unlocked';
+  } catch (_error) {
+    return 'unknown';
+  }
 }
 
 async function runTaskHostFixtureMode() {
@@ -1002,6 +1020,7 @@ async function runTaskHostFixtureMode() {
     console.error(`[TaskHostFixture] aborted: ${error.message}`);
   }
   taskIngress?.stop();
+  taskHostSystem?.stop();
   taskIngress = null;
   presentation?.closeAll();
   await taskHost?.shutdown();
@@ -1059,6 +1078,7 @@ async function runTaskHostQualifyMode() {
     console.error(`[TaskHostQualify] aborted: ${error.qualifyCode || 'unexpected-error'}`);
   }
   taskIngress?.stop();
+  taskHostSystem?.stop();
   taskIngress = null;
   presentation?.closeAll();
   await taskHost?.shutdown();
@@ -1143,6 +1163,7 @@ function cleanupNonProcessState() {
   sessionPromptScheduler?.stop();
   // Refuse new task requests first; the drain below interrupts active tasks.
   taskIngress?.stop();
+  taskHostSystem?.stop();
   taskIngress = null;
   codexLifecycleBroker?.stop();
   cancelSleepTimer();

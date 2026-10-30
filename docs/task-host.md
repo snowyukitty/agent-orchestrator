@@ -131,6 +131,7 @@ double-click cannot create two tasks:
 | the system is suspending | refused `host-suspending` |
 | on battery, or the power source cannot be read | refused `battery-disallowed` / `power-state-unknown` |
 | the session state cannot be read | refused `session-state-unknown`; never assumed unlocked |
+| the host is not in an interactive session (Session 0) | refused `session-not-interactive` |
 | provider unknown, or known but unqualified | refused `provider-unavailable` / `provider-unqualified` |
 | session locked, and the provider was not qualified in a locked session | refused `provider-session-unqualified` |
 | workspace label not registered | refused `unknown-workspace` |
@@ -140,13 +141,18 @@ double-click cannot create two tasks:
 | the profile's starts in the last 24 hours already accepted | refused `daily-limit-reached` |
 | otherwise | `accepted`, after the accepted record is durably written |
 
-The session state is read from the system at the moment of admission
-(Electron's `powerMonitor.getSystemIdleState`, which Chromium answers by
-querying the workstation lock state and the screen saver), never from lock
-events, so a host started while already locked cannot assume it is unlocked.
-A locked workstation, a running screen saver, and an input desktop that
-cannot be read all count as locked. The record keeps the session and power
-state observed at admission and the policy revision that applied.
+Session, power, and account come from Windows itself, not from Electron:
+Chromium caches the lock state and answers "unlocked" when its query fails,
+and reports AC when the power status is unknown. A long-lived PowerShell
+helper (`system-state.ps1`, a child of the host) answers every 5 seconds and
+on every lock, unlock, power, and resume event with
+`WTSQuerySessionInformation` for the host's own session (connection state and
+lock flag), `GetSystemPowerStatus`, and the process token's user SID.
+Admission reads the latest answer; one that is missing, failed, or older than
+15 seconds is unknown and refused. A disconnected session counts as locked,
+and so does a running screen saver that Electron reports. When an answer shows
+the machine off AC, active tasks are stopped. The record keeps the session and
+power state observed at admission and the policy revision that applied.
 
 Limits come from the owner's per-host `policy.json` profile; without one the
 host keeps two concurrent tasks, a two-hour turn limit, and 24 starts a day,
@@ -186,11 +192,14 @@ interrupted (host restart before any spawn intent)
   checks, and takes the diff, so nothing the task started is still writing
   while the evidence is frozen. The root is identified (pid and creation
   time) when it spawns. At the boundary the host lists the root's live
-  descendants, ends the provider, asks for the whole tree, and then looks
-  again: anything from that snapshot, or started by it since, that is still
-  alive is ended and looked for again, for up to 10 seconds. Children stay
-  anchored to the recorded identity after their parent exits, and a process
-  older than its supposed parent is a reused pid, not a descendant.
+  descendants, ends the provider, asks for the whole tree only while the root
+  is still alive (an exited root's pid may already name another process), and
+  then looks again: anything from that snapshot, or started by it since, that
+  is still alive is ended one process at a time and looked for again, for up
+  to 10 seconds. Every process found stays an anchor, so a grandchild whose
+  parent exited between two looks is still found. A process older than its
+  supposed parent is a reused pid, not a descendant, and a child of a live
+  process that has reused an anchor's pid belongs to that process.
   `collection` records whether the host ended the provider, whether the root
   exit was observed, the tree request, and `descendants` (how many were alive
   at the boundary, how many were ended after the root, how many survived). It
@@ -204,7 +213,8 @@ interrupted (host restart before any spawn intent)
   `prevent-app-suspension`, released as soon as none is (the display may still
   sleep). When the machine goes on battery, every active task is stopped and
   its evidence is collected without host checks (`checks.skipped:
-  "on-battery"`).
+  "on-battery"`); a check already running is ended with its process tree and
+  recorded as `cancelled`.
 - **Quiet windows.** A task window opens without taking focus, and its title
   and state line name the task and the provider, never the route alias or the
   instruction. Only an explicit `show` may bring a window forward.
@@ -458,7 +468,8 @@ starts, `wrong-destination` unless it names this host's `hostId`,
 for any other shape or a validity longer than 60 seconds,
 `authorization-expired` once expired (or issued more than 5 seconds in this
 host's future), and `session-owner-mismatch` unless the host runs as the
-enrolled account. A retry of an accepted launch ID returns that launch's
+enrolled account, compared by SID (two accounts can share a user name; an
+unreadable SID never matches). A retry of an accepted launch ID returns that launch's
 observation even after expiry and never starts another task. Who may send the
 request is the transport's decision (the owner's approved route to the target
 and the owner-only ingress token); the relay itself is not part of this
@@ -466,7 +477,7 @@ repository.
 
 ```json
 { "schema": 1, "kind": "agent-orchestrator.remote-task-policy", "revision": 1,
-  "hostId": "snowy-npc", "profile": "primary", "owner": "<windows account>",
+  "hostId": "snowy-npc", "profile": "primary", "ownerSid": "<S-1-5-21-…>",
   "remoteStarts": "enabled" }
 ```
 

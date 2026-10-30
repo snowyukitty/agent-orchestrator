@@ -6,7 +6,6 @@
 // task. Nothing is ever respawned, re-adopted, or replayed after a restart.
 
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { createHash, randomBytes, randomUUID } = require('crypto');
 
@@ -49,11 +48,11 @@ class TaskHost {
    * @param {object} deps.lifecycleBroker    started CodexLifecycleBroker
    * @param {object} deps.adapters           { [providerId]: adapter }
    * @param {object} deps.presentation       task-window opener (see main.js)
-   * @param {function} [deps.observeSession] () => 'unlocked' | 'locked' | 'unknown', read at admission
+   * @param {function} [deps.observeSession] () => 'unlocked' | 'locked' | 'not-interactive' | 'unknown', read at admission
    * @param {function} [deps.observePower]   () => 'ac' | 'battery' | 'unknown', read at admission
    * @param {function} [deps.holdAwake]      () => release function; held while any task is active
    * @param {object}   [deps.processTree]    see process-tree.js; without it no collection is stable
-   * @param {function} [deps.account]        () => the Windows account this host runs as
+   * @param {function} [deps.account]        () => the SID of the account this host runs as, or null
    * @param {string[]} [deps.allowUnqualified] adapter ids allowed although unqualified
    */
   constructor({
@@ -66,7 +65,7 @@ class TaskHost {
     observePower = () => 'ac',
     holdAwake = null,
     processTree = null,
-    account = () => os.userInfo().username,
+    account = () => null,
     allowUnqualified = [],
     terminateTree = null,
     killTree = null,
@@ -222,7 +221,7 @@ class TaskHost {
   _session() {
     try {
       const state = this._observeSession();
-      return ['unlocked', 'locked'].includes(state) ? state : 'unknown';
+      return ['unlocked', 'locked', 'not-interactive'].includes(state) ? state : 'unknown';
     } catch (_error) {
       return 'unknown';
     }
@@ -292,6 +291,7 @@ class TaskHost {
     // Read from the system now, never assumed unlocked from missed events.
     const session = this._session();
     if (session === 'unknown') return refuse('session-state-unknown');
+    if (session === 'not-interactive') return refuse('session-not-interactive');
     const adapter = Object.hasOwn(this._adapters, request.provider) ? this._adapters[request.provider] : null;
     if (!adapter) return refuse('provider-unavailable');
     if (adapter.qualification === 'unqualified' && !this._allowUnqualified.has(adapter.id)) {
@@ -415,6 +415,8 @@ class TaskHost {
     for (const launch of this._launches.values()) {
       if (launch.historical || !ACTIVE_STATES.has(launch.record.state)) continue;
       launch.skipChecks = power === 'battery' ? 'on-battery' : 'power-state-unknown';
+      // A host check already running is ended too, not left to finish.
+      launch.checkAbort?.abort();
       if (this.stop(launch.launchId, launch.skipChecks).status === 'stop-requested') stopped += 1;
     }
     return stopped;
@@ -569,10 +571,11 @@ class TaskHost {
     const before = root ? await this._processTree.members([root]) : null;
     const endedByHost = this._requestKill(launch, 'collect');
     const rootExited = await Promise.race([launch.exited.then(() => true), delay(10_000).then(() => false)]);
-    // A root that exited on its own can leave descendants; ask for the whole
-    // tree either way.
-    let treeTermination = 'unavailable';
-    if (this._killTree && launch.record.process?.rootPid) {
+    // While the root is alive, ask for its whole tree. Once it has exited its
+    // pid may already belong to another process, so it is never signalled by
+    // pid again; its descendants are found and ended by identity below.
+    let treeTermination = rootExited ? 'not-needed' : 'unavailable';
+    if (!rootExited && this._killTree && launch.record.process?.rootPid) {
       try {
         this._killTree(launch.record.process.rootPid);
         treeTermination = 'requested';
@@ -634,6 +637,7 @@ class TaskHost {
 
     const checksDir = ensureDir(path.join(dir, 'checks'));
     const observed = [];
+    launch.checkAbort = new AbortController();
     for (const [index, check] of launch.request.checks.entries()) {
       if (this._closed || launch.skipChecks) break;
       observed.push(await runCheck({
@@ -642,6 +646,7 @@ class TaskHost {
         check,
         tree,
         logFile: path.join(checksDir, `${index}.log`),
+        signal: launch.checkAbort.signal,
       }));
     }
 

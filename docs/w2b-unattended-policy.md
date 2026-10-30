@@ -43,15 +43,15 @@ retried by the host.
 | Suspend in progress | `host-suspending` | sleep is respected, never vetoed |
 | Asleep or unreachable | no answer; acceptance unknown if a request was in flight | resume checks the deadline before any further work |
 
-**Observation.** The lock state is read from the system at admission, not
-from an event-only boolean that starts out "unlocked"; a host started while
-already locked works without ever seeing a lock event. The implementation uses
-Electron's `powerMonitor.getSystemIdleState`, which Chromium answers by
-querying the workstation lock state and the screen saver at call time, rather
-than a native `WTSQuerySessionInformation` bridge. It cannot tell a
-disconnected RDP session or a switched-away session from a locked one; both
-fall under the locked rule, which this table already applies to them. Any
-other answer is `session-state-unknown`.
+**Observation.** The lock flag is read from Windows
+(`WTSQuerySessionInformation` for the host's own session: connection state
+and lock flag) by a helper that answers every few seconds and on every lock,
+power, and resume event; admission uses an answer at most 15 seconds old, and
+anything else is `session-state-unknown`. A host started while already locked
+works without ever seeing a lock event. Electron's own view is not used for
+this: Chromium caches the lock state and reports "unlocked" when its query
+fails, which is exactly the fail-open the policy forbids. A disconnected
+session is treated as locked.
 
 ## Power
 
@@ -114,14 +114,22 @@ Implemented in the task host (2026-10-31), with the exact codes and formats in
 
 | Gate | State |
 |---|---|
-| 1. Fresh, target-bound requests | Host side done: `remote-start`, `policy.json` with `hostId`, `owner` and `remoteStarts`, 60 s validity, retry-safe. The relay from the controller (Matrix route and controller UI) is not built yet. |
+| 1. Fresh, target-bound requests | Host side done: `remote-start`, `policy.json` with `hostId`, `ownerSid` and `remoteStarts`, 60 s validity, retry-safe. The relay from the controller (Matrix route and controller UI) is not built yet. |
 | 2. Process ownership | Done: descendant snapshot at the boundary, re-check until none survive; proven with a fixture that leaves a detached process behind, and on a live Codex turn (three descendants found and ended). |
-| 3. Session observation | Done: read at admission; `provider-session-unqualified` without a locked qualification. **The locked-session qualification of Codex is still open**: one attempt was admitted and completed while locked, but the workstation was unlocked before collection, so it does not count. |
-| 4. Power | Done: AC only, `prevent-app-suspension` while any task is active, stop without host checks on battery, `host-suspending`. |
+| 3. Session observation | Done: read from Windows (WTS) through a helper, stale answers refused; `provider-session-unqualified` without a locked qualification. **The locked-session qualification of Codex is still open**: one attempt was admitted and completed while locked, but the workstation was unlocked before collection, so it does not count. |
+| 4. Power | Done: AC only (an unknown AC status is not AC), `prevent-app-suspension` while any task is active, stop on battery or unknown power and cancel a running host check, `host-suspending`. |
 | 5. Owner-visible activity | Host side done: `list` (public status only, from durable records). The controller view is not built yet. |
 | 6. Quiet windows | Done: task windows never take focus on open; title and state line carry no route alias or instruction. |
 
 Per-host profiles are implemented as `primary`, `secondary` and `light`.
+
+An independent review by `codex:default` through ATD (advisory,
+2026-10-31, `REQUEST_CHANGES`) found six defects in the first implementation,
+all fixed with a regression test each: an exited root's pid could be
+signalled after reuse, and children of a process that reused an anchor pid
+were counted; the re-check forgot processes it had found; Electron's session
+view fails open; an unknown AC status read as AC; a running host check
+survived going on battery; and the owner was matched by name, not SID.
 
 ## Deviations from the advice
 

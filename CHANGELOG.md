@@ -6,8 +6,9 @@ the product story; this file keeps the history.
 ## Unreleased (Journal v2 + Evidence-First Field Guide)
 
 - **The task host is ready, on its side, to start tasks with nobody at the
-  target** (W2b gates, [policy](docs/w2b-unattended-policy.md)). The lock
-  state is read from the system at admission instead of from lock events, and
+  target** (W2b gates, [policy](docs/w2b-unattended-policy.md)). Session
+  lock state, AC power, and the account SID are read from Windows by a small
+  helper instead of from Electron (whose views fail open), and
   a locked workstation admits only a provider qualified while locked
   (`npm run qualify:task-host -- --confirm-live --await-locked`). Tasks start
   only on AC power; the machine is kept from suspending while one is active,
@@ -19,7 +20,10 @@ the product story; this file keeps the history.
   and enables `remote-start`, whose authorization must name this host and the
   exact request and expires within 60 seconds. `list` shows recent launches
   without content, and task windows open without taking focus under a
-  neutral title. Codex 0.165.0 was re-qualified under the stricter boundary;
+  neutral title. An independent Codex review via ATD found six defects in the
+  first cut (pid reuse, a forgetful re-check, fail-open session and power
+  views, a check surviving battery, owner by name); each is fixed with a
+  regression test. Codex 0.165.0 was re-qualified under the stricter boundary;
   its locked-session qualification is still to be run with nobody at the
   console. The relay from another machine and the controller view are not
   built yet.

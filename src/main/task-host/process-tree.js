@@ -19,7 +19,9 @@ const SETTLE_POLL_MS = 500;
 const WINDOWS_LIST_COMMAND = [
   "$ErrorActionPreference = 'Stop'",
   'Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | ForEach-Object {',
-  "  '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() } else { 0 })",
+  // FILETIME in 10 microsecond units: CIM reports creation to the microsecond,
+  // and the value stays a safe integer for JavaScript.
+  "  '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, $(if ($_.CreationDate) { [math]::Floor($_.CreationDate.ToFileTimeUtc() / 100) } else { 0 })",
   '}',
 ].join('\n');
 
@@ -50,7 +52,7 @@ function parseList(stdout) {
     const parts = line.trim().split(/\s+/);
     if (parts.length !== 3) continue;
     const [pid, ppid, created] = parts.map(Number);
-    if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid) || !Number.isFinite(created)) continue;
+    if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid) || !Number.isSafeInteger(created)) continue;
     out.push({ pid, ppid, created });
   }
   if (!out.length) throw new Error('process list was empty');
@@ -62,8 +64,13 @@ const key = entry => `${entry.pid}:${entry.created}`;
 /**
  * The live processes descending from any member of `roots` (entries from an
  * earlier list), in one listing. Roots themselves are included when alive.
+ *
+ * A child belongs to an anchor only if it was created no earlier than the
+ * anchor, and no later than a live process that has since reused the
+ * anchor's pid: a child of the replacement is the replacement's, not ours.
  */
 function descendantsOf(processes, roots) {
+  const live = new Map(processes.map(entry => [entry.pid, entry]));
   const members = new Map(roots.map(root => [root.pid, root]));
   const found = new Map();
   for (const entry of processes) {
@@ -76,6 +83,8 @@ function descendantsOf(processes, roots) {
       if (found.has(key(entry))) continue;
       const parent = members.get(entry.ppid);
       if (!parent || entry.created < parent.created) continue;
+      const holder = live.get(entry.ppid);
+      if (holder && holder.created !== parent.created && entry.created >= holder.created) continue;
       found.set(key(entry), entry);
       members.set(entry.pid, entry);
       grew = true;
@@ -87,7 +96,8 @@ function descendantsOf(processes, roots) {
 /**
  * @param {object} deps
  * @param {function} [deps.list]     () => Promise<process entries>
- * @param {function} [deps.killPid]  (pid) => void, ends one process tree
+ * @param {function} [deps.killPid]  (pid) => void, ends that one process (never a tree:
+ *                                     the walk here decides what belongs to the task)
  */
 function createProcessTree({ list = listProcesses, killPid, delay } = {}) {
   const wait = delay || (ms => new Promise(resolve => setTimeout(resolve, ms)));
@@ -113,15 +123,19 @@ function createProcessTree({ list = listProcesses, killPid, delay } = {}) {
     /**
      * After the tree was asked to end: find anything under `roots` that is
      * still alive, end it, and look again until nothing survives or the time
-     * runs out. A root that already exited still anchors its children.
+     * runs out. A process that already exited still anchors its children,
+     * and every process found on the way is kept as an anchor too, so a
+     * grandchild whose parent exits between two looks is still found.
      */
     async settle(roots, { timeoutMs = 10_000 } = {}) {
       const started = Date.now();
       const ended = new Set();
+      const anchors = new Map(roots.map(root => [key(root), root]));
       for (;;) {
         let alive;
         try {
-          alive = descendantsOf(await list(), roots);
+          alive = descendantsOf(await list(), [...anchors.values()]);
+          for (const entry of alive) anchors.set(key(entry), entry);
         } catch (_error) {
           return { observed: false, survivors: null, endedByHost: ended.size };
         }

@@ -29,6 +29,9 @@ const {
 } = require('../src/main/task-host/qualification');
 const { PROFILES, POLICY_KIND, checkRemoteAuthorization, readPolicy } = require('../src/main/task-host/policy');
 const { createProcessTree, descendantsOf } = require('../src/main/task-host/process-tree');
+const { createSystemObserver, parseObservation } = require('../src/main/task-host/system-state');
+
+const TEST_SID = 'S-1-5-21-1000-2000-3000-1001';
 
 const FIXTURE_AGENT = path.join(__dirname, 'fixtures', 'task-host', 'fixture-agent.js');
 
@@ -55,7 +58,7 @@ function fixtureRepo(t, dir = null) {
   git(repo, 'config', 'commit.gpgsign', 'false');
   git(repo, 'config', 'core.autocrlf', 'false');
   fs.writeFileSync(path.join(repo, 'package.json'), JSON.stringify({
-    name: 'fixture-repo', private: true, scripts: { test: 'node test.js' },
+    name: 'fixture-repo', private: true, scripts: { test: 'node test.js', slow: 'node -e "setTimeout(() => {}, 60000)"' },
   }, null, 2));
   fs.writeFileSync(path.join(repo, 'test.js'),
     "process.exit(require('fs').existsSync('fixture-output.txt') ? 0 : 1);\n");
@@ -129,6 +132,7 @@ async function hostFixture(t, { limits = {}, adapters = null, hostOptions = {} }
     adapters: adapters || { fixture: createFixtureAdapter({ script: FIXTURE_AGENT }) },
     presentation,
     processTree: settledTree,
+    account: () => TEST_SID,
     limits: { resultGraceMs: 1_500, ...limits },
     ...hostOptions,
   });
@@ -570,7 +574,7 @@ test('a file-channel report is read from the private outbox, outside the diff', 
     'the provider tree ends before evidence is frozen');
   assert.equal(result.collection.stable, true);
   assert.deepEqual(result.collection.descendants, { observed: true, atBoundary: 0, survivors: 0, endedAfterRoot: 0 });
-  assert.equal(result.collection.treeTermination, 'unavailable', 'no tree killer is wired in this test host');
+  assert.equal(result.collection.treeTermination, 'not-needed', 'an exited root is never signalled by pid');
   assert.equal(host.windowInput(req.launchId, 'more\r'), false, 'input is closed once collection starts');
   const prompt = fs.readFileSync(path.join(dataDir, 'launches', req.launchId, 'prompt.md'), 'utf8');
   assert.ok(!prompt.includes('AO-TASK-RESULT-BEGIN'), 'no terminal frame is requested');
@@ -689,6 +693,8 @@ test('admission refuses busy workspaces, unknown routes, unqualified providers, 
   assert.deepEqual(startTask(host, request({ baseRevision: base })), { ok: false, error: 'session-state-unknown' });
   host._observeSession = () => { throw new Error('query failed'); };
   assert.deepEqual(startTask(host, request({ baseRevision: base })), { ok: false, error: 'session-state-unknown' });
+  host._observeSession = () => 'not-interactive';
+  assert.deepEqual(startTask(host, request({ baseRevision: base })), { ok: false, error: 'session-not-interactive' });
   host._observeSession = () => 'unlocked';
   host._observePower = () => 'battery';
   assert.deepEqual(startTask(host, request({ baseRevision: base })), { ok: false, error: 'battery-disallowed' });
@@ -826,7 +832,7 @@ function writePolicy(host, overrides = {}) {
     revision: 1,
     hostId: 'target-one',
     profile: 'primary',
-    owner: os.userInfo().username,
+    ownerSid: TEST_SID,
     remoteStarts: 'enabled',
     ...overrides,
   }));
@@ -853,7 +859,7 @@ test('the host policy is exact, and only its profile sets the limits', (t) => {
   const file = path.join(dir, 'policy.json');
   assert.equal(readPolicy(file).status, 'absent');
   const valid = {
-    schema: 1, kind: POLICY_KIND, revision: 3, hostId: 'snowy-npc', profile: 'light', owner: 'snowy', remoteStarts: 'enabled',
+    schema: 1, kind: POLICY_KIND, revision: 3, hostId: 'snowy-npc', profile: 'light', ownerSid: TEST_SID, remoteStarts: 'enabled',
   };
   fs.writeFileSync(file, JSON.stringify(valid));
   const policy = readPolicy(file);
@@ -865,6 +871,7 @@ test('the host policy is exact, and only its profile sets the limits', (t) => {
     { ...valid, hostId: 'Snowy NPC' },
     { ...valid, maxActiveTasks: 9 },
     { ...valid, revision: 0 },
+    { ...valid, ownerSid: 'snowy' },
   ]) {
     fs.writeFileSync(file, JSON.stringify(bad));
     assert.equal(readPolicy(file).status, 'invalid', JSON.stringify(bad));
@@ -876,7 +883,7 @@ test('the host policy is exact, and only its profile sets the limits', (t) => {
 
 test('a remote authorization names this host and the exact request, and expires within a minute', () => {
   const policy = {
-    status: 'valid', hostId: 'target-one', owner: 'Owner', remoteStarts: 'enabled', profile: 'primary',
+    status: 'valid', hostId: 'target-one', ownerSid: TEST_SID, remoteStarts: 'enabled', profile: 'primary',
   };
   const digest = 'a'.repeat(64);
   const now = Date.parse('2026-10-30T12:00:00.000Z');
@@ -887,8 +894,8 @@ test('a remote authorization names this host and the exact request, and expires 
     expiresAt: '2026-10-30T12:00:20.000Z',
     ...overrides,
   });
-  const check = (a, extra = {}) => checkRemoteAuthorization(a, { policy, digest, account: 'owner', now, ...extra });
-  assert.equal(check(auth()), null, 'the account match ignores case');
+  const check = (a, extra = {}) => checkRemoteAuthorization(a, { policy, digest, account: TEST_SID, now, ...extra });
+  assert.equal(check(auth()), null);
   assert.equal(check(auth(), { policy: { ...policy, remoteStarts: 'disabled' } }), 'remote-starts-disabled');
   assert.equal(check(auth(), { policy: { status: 'absent' } }), 'remote-starts-disabled');
   assert.equal(check(auth({ destination: 'target-two' })), 'wrong-destination');
@@ -899,7 +906,9 @@ test('a remote authorization names this host and the exact request, and expires 
   assert.equal(check(auth({ expiresAt: '2026-10-30T12:00:51.000Z' })), 'invalid-authorization', 'longer than 60 s');
   assert.equal(check(auth({ extra: 1 })), 'invalid-authorization');
   assert.equal(check(auth({ issuedAt: '2026-10-30 11:59:50' })), 'invalid-authorization');
-  assert.equal(check(auth(), { account: 'someone-else' }), 'session-owner-mismatch');
+  assert.equal(check(auth(), { account: 'S-1-5-21-1000-2000-3000-1002' }), 'session-owner-mismatch',
+    'another account, whatever its name');
+  assert.equal(check(auth(), { account: null }), 'session-owner-mismatch', 'an unreadable account never matches');
 });
 
 test('remote starts are off without a policy, and a retry after expiry never starts another task', async (t) => {
@@ -1038,8 +1047,8 @@ test('descendants are found by creation order, never by a reused pid', () => {
   ];
   const keys = list => list.map(entry => entry.pid).sort((a, b) => a - b);
   assert.deepEqual(keys(descendantsOf(processes, [{ pid: 10, ppid: 1, created: 100 }])), [10, 11, 12]);
-  assert.deepEqual(keys(descendantsOf(processes, [{ pid: 10, ppid: 1, created: 90 }])), [11, 12],
-    'a root with another creation time is not the same process');
+  assert.deepEqual(keys(descendantsOf(processes, [{ pid: 10, ppid: 1, created: 90 }])), [],
+    'a live process with another creation time replaced the root; its children belong to it, not the task');
   assert.deepEqual(keys(descendantsOf(processes, [{ pid: 99, ppid: 1, created: 125 }])), [14]);
 });
 
@@ -1100,4 +1109,90 @@ test('a locked qualification is kept across an unlocked one of the same version 
   assert.throws(() => writeQualification(file, {
     provider: 'codex', adapterContract: 1, providerVersion: '1.0.1', evidence, session: 'unknown',
   }));
+});
+// ── independent review (2026-10-31) regressions ────────────────
+
+test('a child of a process that reused an anchor pid is not the task\'s', () => {
+  const root = { pid: 10, ppid: 1, created: 100 };
+  const processes = [
+    { pid: 10, ppid: 5, created: 200 }, // pid 10 now belongs to another process
+    { pid: 11, ppid: 10, created: 210 }, // ...whose child this is
+    { pid: 12, ppid: 10, created: 150 }, // created before the reuse: the task's orphan
+  ];
+  assert.deepEqual(descendantsOf(processes, [root]).map(entry => entry.pid), [12]);
+});
+
+test('settling keeps every process it found, so a grandchild of an exited child is still ended', async () => {
+  const root = { pid: 10, ppid: 1, created: 100 };
+  const listings = [
+    [{ pid: 20, ppid: 10, created: 120 }], // child started after the boundary
+    [{ pid: 30, ppid: 20, created: 130 }], // the child exited, leaving a grandchild
+    [],
+  ];
+  const killed = [];
+  const tree = createProcessTree({
+    list: async () => listings.shift() || [],
+    killPid: pid => killed.push(pid),
+    delay: async () => {},
+  });
+  const settled = await tree.settle([root]);
+  assert.deepEqual(killed, [20, 30]);
+  assert.deepEqual(settled, { observed: true, survivors: 0, endedByHost: 2 });
+});
+
+test('the system observer reads the session, power, and account from Windows, and ages into unknown', async () => {
+  assert.deepEqual(parseObservation('1 0 1|1|S-1-5-21-1-2-3-1001'), { session: 'unlocked', power: 'ac', sid: 'S-1-5-21-1-2-3-1001' });
+  assert.deepEqual(parseObservation('1 0 0|0|x'), { session: 'locked', power: 'battery', sid: null });
+  assert.equal(parseObservation('2 4 1|1|x').session, 'locked', 'a disconnected session is locked');
+  assert.equal(parseObservation('0 0 1|1|x').session, 'not-interactive');
+  assert.equal(parseObservation('1 0 -1|255|x').session, 'unknown', 'unknown lock flag');
+  assert.equal(parseObservation('1 0 -1|255|x').power, 'unknown', 'unknown AC status is not AC');
+  assert.equal(parseObservation('error|error|error').session, 'unknown');
+
+  const { EventEmitter, PassThrough } = require('node:stream');
+  let clock = 0;
+  const answers = ['1 0 1|1|S-1-5-21-1-2-3-1001', '1 0 0|0|S-1-5-21-1-2-3-1001'];
+  const changes = [];
+  const observer = createSystemObserver({
+    now: () => clock,
+    pollMs: 60_000,
+    onChange: (current, previous) => changes.push([previous?.power ?? null, current.power]),
+    spawnHelper: () => {
+      const child = new (require('node:events'))();
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.stdin = new PassThrough();
+      child.stdin.on('data', () => child.stdout.write(`${answers.shift() ?? 'error|error|error'}\n`));
+      child.kill = () => {};
+      return child;
+    },
+  });
+  assert.equal(observer.session(), 'unknown', 'nothing is assumed before the first answer');
+  assert.equal(await observer.start(), true);
+  assert.deepEqual([observer.session(), observer.power(), observer.account()], ['unlocked', 'ac', 'S-1-5-21-1-2-3-1001']);
+  observer.refresh();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual([observer.session(), observer.power()], ['locked', 'battery']);
+  assert.deepEqual(changes, [[null, 'ac'], ['ac', 'battery']]);
+  clock += 16_000;
+  assert.deepEqual([observer.session(), observer.power(), observer.account()], ['unknown', 'unknown', null], 'a stale answer is unknown');
+  observer.stop();
+  void EventEmitter;
+});
+
+test('going off AC ends a host check that is already running', async (t) => {
+  let power = 'ac';
+  const { host, base } = await hostFixture(t, { hostOptions: { observePower: () => power } });
+  const req = request({ baseRevision: base, checks: [{ kind: 'npm-script', name: 'slow' }, { kind: 'npm-script', name: 'test' }] });
+  startTask(host, req);
+  await waitFor(() => host.status(req.launchId).state === 'collecting', 60_000);
+  await new Promise(resolve => setTimeout(resolve, 2_000)); // the slow check is running
+  power = 'battery';
+  const started = Date.now();
+  host.powerChanged();
+  await host.whenIdle();
+  const { checks } = host.result(req.launchId).evidence;
+  assert.ok(Date.now() - started < 30_000, 'the check did not run to its end');
+  assert.equal(checks.skipped, 'on-battery');
+  assert.deepEqual(checks.hostObserved.map(check => [check.name, check.outcome]), [['slow', 'cancelled']]);
 });

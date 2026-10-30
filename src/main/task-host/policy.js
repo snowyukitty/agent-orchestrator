@@ -2,7 +2,8 @@
 // (docs/w2b-unattended-policy.md).
 //
 // `policy.json` in the task-host directory is written by the owner on each
-// machine. It names the machine, its profile, the enrolled Windows account,
+// machine. It names the machine, its profile, the enrolled Windows account
+// (by SID: two accounts can share a user name),
 // and whether starts requested from another machine are accepted at all. A
 // request can never select or weaken a profile, and the hostname never
 // implies one. Without the file the host keeps its local defaults and refuses
@@ -35,10 +36,10 @@ const MAX_AUTHORIZATION_MS = 60_000;
 // The controller's clock may run slightly ahead of this host's.
 const MAX_CLOCK_SKEW_MS = 5_000;
 const HOST_ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
-const ACCOUNT = /^[^\u0000-\u001f\\/"[\]:;|=,+*?<>@]{1,104}$/;
+const SID = /^S-1-\d+(?:-\d+){1,14}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
-const POLICY_KEYS = ['schema', 'kind', 'revision', 'hostId', 'profile', 'owner', 'remoteStarts'];
+const POLICY_KEYS = ['schema', 'kind', 'revision', 'hostId', 'profile', 'ownerSid', 'remoteStarts'];
 const AUTHORIZATION_KEYS = ['destination', 'requestDigest', 'issuedAt', 'expiresAt'];
 
 const exactKeys = (value, keys) => !!value && typeof value === 'object' && !Array.isArray(value) &&
@@ -61,7 +62,7 @@ function readPolicy(file) {
     !Number.isSafeInteger(raw.revision) || raw.revision < 1 ||
     typeof raw.hostId !== 'string' || !HOST_ID.test(raw.hostId) ||
     !Object.hasOwn(PROFILES, raw.profile) ||
-    typeof raw.owner !== 'string' || !ACCOUNT.test(raw.owner) ||
+    typeof raw.ownerSid !== 'string' || !SID.test(raw.ownerSid) ||
     !['enabled', 'disabled'].includes(raw.remoteStarts)
   ) {
     return { status: 'invalid' };
@@ -71,7 +72,7 @@ function readPolicy(file) {
     revision: raw.revision,
     hostId: raw.hostId,
     profile: raw.profile,
-    owner: raw.owner,
+    ownerSid: raw.ownerSid,
     remoteStarts: raw.remoteStarts,
     limits: PROFILES[raw.profile],
   };
@@ -108,7 +109,8 @@ function checkRemoteAuthorization(authorization, { policy, digest, account, now 
     return 'invalid-authorization';
   }
   if (issued > now + MAX_CLOCK_SKEW_MS || now > expires) return 'authorization-expired';
-  if (typeof account !== 'string' || account.toLowerCase() !== policy.owner.toLowerCase()) {
+  // `account` is the SID of the token the host runs under, read from Windows.
+  if (typeof account !== 'string' || account !== policy.ownerSid) {
     return 'session-owner-mismatch';
   }
   return null;

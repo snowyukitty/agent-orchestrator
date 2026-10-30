@@ -27,14 +27,14 @@ function scriptDefinition(packageJsonText, name) {
   }
 }
 
-function runProcess(file, args, { cwd, timeoutMs, maxOutputBytes, spawnImpl = spawn }) {
+function runProcess(file, args, { cwd, timeoutMs, maxOutputBytes, spawnImpl = spawn, signal = null }) {
   return new Promise((resolve) => {
     const startedAt = Date.now();
     let child;
     try {
       child = spawnImpl(file, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (_error) {
-      resolve({ startedAt, finishedAt: Date.now(), exitCode: null, timedOut: false, spawnFailed: true, output: Buffer.alloc(0), truncated: false });
+      resolve({ startedAt, finishedAt: Date.now(), exitCode: null, timedOut: false, cancelled: false, spawnFailed: true, output: Buffer.alloc(0), truncated: false });
       return;
     }
     const chunks = [];
@@ -51,8 +51,12 @@ function runProcess(file, args, { cwd, timeoutMs, maxOutputBytes, spawnImpl = sp
     child.stdout.on('data', take);
     child.stderr.on('data', take);
     let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
+    let cancelled = false;
+    let settled = false;
+    // The check's tree is ended while its root is still running (not yet
+    // closed), so its pid still names it.
+    const endTree = () => {
+      if (settled) return;
       try {
         if (process.platform === 'win32') {
           spawnImpl('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
@@ -60,17 +64,22 @@ function runProcess(file, args, { cwd, timeoutMs, maxOutputBytes, spawnImpl = sp
           child.kill('SIGKILL');
         }
       } catch (_error) { /* already gone */ }
-    }, timeoutMs);
-    let settled = false;
+    };
+    const timer = setTimeout(() => { timedOut = true; endTree(); }, timeoutMs);
+    const onAbort = () => { cancelled = true; endTree(); };
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener('abort', onAbort, { once: true });
     const finish = (code, spawnFailed) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       resolve({
         startedAt,
         finishedAt: Date.now(),
         exitCode: typeof code === 'number' ? code : null,
         timedOut,
+        cancelled,
         spawnFailed,
         output: Buffer.concat(chunks, size),
         truncated,
@@ -85,7 +94,9 @@ function runProcess(file, args, { cwd, timeoutMs, maxOutputBytes, spawnImpl = sp
  * Run one npm-script check. `tree` is the tree id the worktree held when the
  * check started; `logFile` receives the bounded output privately.
  */
-async function runCheck({ worktree, base, check, tree, logFile, timeoutMs = CHECK_TIMEOUT_MS, spawnImpl }) {
+async function runCheck({
+  worktree, base, check, tree, logFile, timeoutMs = CHECK_TIMEOUT_MS, spawnImpl, signal = null,
+}) {
   const record = {
     kind: check.kind,
     name: check.name,
@@ -119,7 +130,7 @@ async function runCheck({ worktree, base, check, tree, logFile, timeoutMs = CHEC
     ? ['cmd.exe', ['/d', '/s', '/c', `npm run ${check.name}`]]
     : ['npm', ['run', check.name]];
   const run = await runProcess(file, args, {
-    cwd: worktree, timeoutMs, maxOutputBytes: MAX_CHECK_OUTPUT_BYTES, spawnImpl,
+    cwd: worktree, timeoutMs, maxOutputBytes: MAX_CHECK_OUTPUT_BYTES, spawnImpl, signal,
   });
   record.startedAt = new Date(run.startedAt).toISOString();
   record.durationMs = run.finishedAt - run.startedAt;
@@ -129,6 +140,7 @@ async function runCheck({ worktree, base, check, tree, logFile, timeoutMs = CHEC
   record.outputSha256 = createHash('sha256').update(run.output).digest('hex');
   if (logFile) fs.writeFileSync(logFile, run.output);
   if (run.spawnFailed) record.outcome = 'unavailable';
+  else if (run.cancelled) record.outcome = 'cancelled';
   else if (run.timedOut) record.outcome = 'timed-out';
   else record.outcome = run.exitCode === 0 ? 'passed' : 'failed';
   return record;

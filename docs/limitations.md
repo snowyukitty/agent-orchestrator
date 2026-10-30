@@ -115,8 +115,9 @@ does not have. Everything below is current for v0.4.0.
   workstation is locked Codex is refused until a locked-session qualification
   completes. Process ownership is a snapshot and re-check of the provider's
   descendants, not a Job Object, so a process started from outside the tree
-  is not seen. The session check cannot tell a disconnected or switched-away
-  session from a locked one and treats all three as locked. Turn-started and
+  is not seen, and a pid reused in the instant between a listing and its
+  termination is not excluded. A disconnected session is treated as locked.
+  Turn-started and
   waiting-for-input are not observable; a task that asks a question shows
   `running` until a receipt, an exit, or Stop. Host-observed checks run the
   repository's own scripts, which the agent may have changed — the record
