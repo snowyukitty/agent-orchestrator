@@ -4,6 +4,10 @@ const assert = require('node:assert/strict');
 
 const { SessionRegistry, nextSessionId } = require('../src/main/sessions');
 
+// How the registry closes a root PTY: node-pty's Windows terminal takes no
+// signal (the fake records a bare close), elsewhere the root gets SIGTERM.
+const ROOT_CLOSE = process.platform === 'win32' ? 'close' : 'SIGTERM';
+
 /** Minimal node-pty stand-in: records writes, lets a test drive exit. */
 function fakePty() {
   const spawned = [];
@@ -21,7 +25,7 @@ function fakePty() {
         onExit(cb) { this._onExit = cb; },
         write(text) { this.written.push(text); },
         resize(cols, rows) { this.resized = { cols, rows }; },
-        kill(sig) { this.killed = sig; },
+        kill(sig) { this.killed = sig === undefined ? ROOT_CLOSE : sig; },
         /** test helper */
         emitData(d) { this._onData && this._onData(d); },
         exit(code) { this._onExit && this._onExit({ exitCode: code }); },
@@ -821,7 +825,7 @@ test('a session that ignores SIGTERM gets its process tree force-killed', async 
   const { reg, pty, events } = makeRegistry();
   const { id, pid } = reg.create(SPEC);
   reg.kill(id);
-  assert.equal(pty.spawned[0].killed, 'SIGTERM');
+  assert.equal(pty.spawned[0].killed, ROOT_CLOSE);
   assert.deepEqual(events.killedTrees, [], 'no force-kill before the grace window');
 
   await new Promise(r => setTimeout(r, 1700));
@@ -864,7 +868,7 @@ test('a rejected tree-first request falls back to the parent signal', () => {
   });
   const { id } = reg.create(SPEC);
   reg.kill(id);
-  assert.equal(pty.spawned[0].killed, 'SIGTERM');
+  assert.equal(pty.spawned[0].killed, ROOT_CLOSE);
 });
 
 test('killAll counts only live sessions', () => {
@@ -884,12 +888,12 @@ test('killAllSequential waits for each exit before killing the next PTY', async 
 
   const stopping = reg.killAllSequential('test shutdown');
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(pty.spawned[0].killed, 'SIGTERM');
+  assert.equal(pty.spawned[0].killed, ROOT_CLOSE);
   assert.equal(pty.spawned[1].killed, null);
 
   pty.spawned[0].exit(0);
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(pty.spawned[1].killed, 'SIGTERM');
+  assert.equal(pty.spawned[1].killed, ROOT_CLOSE);
   pty.spawned[1].exit(0);
   assert.equal(await stopping, 2);
 });
@@ -930,7 +934,7 @@ test('strict sequential shutdown sweeps later PTYs after an early timeout', asyn
   assert.deepEqual(drainAttempts, [first, second, third]);
   assert.deepEqual(
     pty.spawned.map(proc => proc.killed),
-    ['SIGTERM', 'SIGTERM', 'SIGTERM']
+    [ROOT_CLOSE, ROOT_CLOSE, ROOT_CLOSE]
   );
   assert.deepEqual(events.killedTrees, [pty.spawned[0].pid]);
 });
@@ -947,14 +951,14 @@ test('removeAndWait serializes rapid tab closes', async () => {
   assert.equal(reg.hasPendingTermination, true);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(queueDrained, false);
-  assert.equal(pty.spawned[0].killed, 'SIGTERM');
+  assert.equal(pty.spawned[0].killed, ROOT_CLOSE);
   assert.equal(pty.spawned[1].killed, null);
   assert.equal(reg.has(first), false);
   assert.equal(reg.has(second), true);
 
   pty.spawned[0].exit(0);
   await new Promise(resolve => setImmediate(resolve));
-  assert.equal(pty.spawned[1].killed, 'SIGTERM');
+  assert.equal(pty.spawned[1].killed, ROOT_CLOSE);
   assert.equal(reg.has(second), false);
   pty.spawned[1].exit(0);
   assert.deepEqual(await Promise.all([firstRemoval, secondRemoval]), [true, true]);
@@ -978,7 +982,7 @@ test('remove kills a live session and forgets it', () => {
   const { reg, pty } = makeRegistry();
   const { id } = reg.create(SPEC);
   assert.equal(reg.remove(id), true);
-  assert.equal(pty.spawned[0].killed, 'SIGTERM');
+  assert.equal(pty.spawned[0].killed, ROOT_CLOSE);
   assert.equal(reg.has(id), false);
   assert.equal(reg.remove('nope'), false);
 });

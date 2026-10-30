@@ -17,6 +17,10 @@ const { asCols, asRows } = require('./validate');
 
 /** How long to wait for a graceful exit before force-killing the tree. */
 const KILL_GRACE_MS = 1500;
+// node-pty's Windows terminal rejects any signal argument, and before the
+// first output it defers the call, so the rejection escapes as an uncaught
+// exception instead of reaching the caller's catch. Close without a signal.
+const ROOT_KILL_SIGNAL = process.platform === 'win32' ? undefined : 'SIGTERM';
 
 /** Enough rolling output to match text that straddles PTY chunks. Main-only. */
 const OUTPUT_HISTORY_CHARS = 64 * 1024;
@@ -1393,7 +1397,7 @@ class SessionRegistry {
       }
       if (!treeRequested) {
         try {
-          s.proc.kill('SIGTERM');
+          s.proc.kill(ROOT_KILL_SIGNAL);
         } catch (_e) {
           try { process.kill(pid, 'SIGTERM'); } catch (_e2) { /* already gone */ }
         }
@@ -1407,7 +1411,7 @@ class SessionRegistry {
         this._killTree(pid);
         // A failed asynchronous tree request must not leave the root itself.
         if (treeRequested && s.proc) {
-          try { s.proc.kill('SIGTERM'); } catch (_e) { /* already gone */ }
+          try { s.proc.kill(ROOT_KILL_SIGNAL); } catch (_e) { /* already gone */ }
         }
       }, KILL_GRACE_MS);
       // Do not let a pending kill timer hold the event loop open at quit.
