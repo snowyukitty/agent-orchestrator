@@ -146,7 +146,10 @@ Keep these properties, each covered by a test:
 - delivery, lifecycle receipt, AI-reported result, host-observed checks, and
   diff stay separate axes, and nothing reports success — only `needs-review`;
 - a provider is admitted only when its adapter is qualified. Codex is not yet:
-  qualifying it needs a separately authorized live turn, never a test.
+  qualifying it needs a separately authorized live turn, never a test;
+- the fault-acceptance matrix in `docs/task-host.md` stays true: a new fault
+  class gets a row and the test that proves it, or says why only W2b or a live
+  turn can.
 
 ## Conventions
 

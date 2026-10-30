@@ -21,6 +21,29 @@ the product story; this file keeps the history.
   until a separately authorized live turn qualifies it. `npm run
   verify:task-host` drives the real ingress, windows, and PTYs end to end.
 
+- **The task host has a fault-acceptance matrix** ([task-host.md](docs/task-host.md#fault-acceptance)):
+  every W2 fault from the remote-work design is mapped to the behaviour and
+  the test that proves it, or marked as needing W2b or a live turn. New tests
+  cover a client that drops the connection before or after acceptance (one
+  task, one window, and a retry finds it), stale and absent hosts (the old
+  token no longer authenticates; the client says the host is not running),
+  and partial output — a result frame that began but never ended is now
+  `truncated` rather than `missing`.
+
+- **Stopping a terminal right after it starts no longer crashes on Windows**:
+  when tree termination was unavailable, the registry closed the root PTY with
+  `SIGTERM`, which node-pty's Windows terminal rejects. Before the first output
+  node-pty defers that call, so the rejection escaped as an uncaught exception
+  instead of reaching the fallback. The root is now closed without a signal on
+  Windows. Found by the new transport-loss test, which stops a task
+  immediately after spawn.
+
+- **Electron 43.8.4**: the lockfile moves from Electron 43.4.1, `undici`
+  7.29.0, and `brace-expansion` 5.0.11, which had high-severity advisories, to
+  their fixed releases in the same major versions, and `package.json` no
+  longer admits the vulnerable Electron range. `npm audit` is clean again, so
+  the full `npm run verify` gate passes.
+
 - **An Agent Session block now proves its provider came up**: the fixed
   `settleMs` sleep after launching an agent was a guess, and it hid two
   different failures behind a completed block. A provider that booted more

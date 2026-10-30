@@ -203,6 +203,8 @@ test('result frames are typed, bounded, and nonce-checked', () => {
   assert.equal(parseResultFrame(complete('not json'), frame).frame, 'invalid');
   assert.equal(parseResultFrame({ complete: false, missingStart: true }, frame).frame, 'missing');
   assert.equal(parseResultFrame({ complete: false, truncatedAfter: true }, frame).frame, 'truncated');
+  assert.equal(parseResultFrame({ complete: false, missingStart: false, missingEnd: true }, frame).frame, 'truncated',
+    'a frame that began but never ended is partial output');
   assert.equal(parseResultFrame(null, frame).frame, 'missing');
 });
 
@@ -458,6 +460,84 @@ test('admission refuses busy workspaces, unknown routes, unqualified providers, 
   await host.whenIdle();
   assert.equal(host.status(noWindow.launchId).reason, 'window-unavailable');
   assert.equal(host.result(noWindow.launchId).process, null, 'nothing spawns without a window');
+});
+
+// ── W2 fault acceptance (docs/task-host.md#fault-acceptance) ─────
+
+function launchCount(dataDir) {
+  const dir = path.join(dataDir, 'launches');
+  return fs.existsSync(dir) ? fs.readdirSync(dir).length : 0;
+}
+
+test('partial output is a truncated frame, never a result', async (t) => {
+  const { host, base } = await hostFixture(t);
+  const req = request({ baseRevision: base, route: 'partial' });
+  startTask(host, req);
+  await host.whenIdle();
+  const result = host.result(req.launchId);
+  assert.equal(result.state, 'needs-review');
+  assert.equal(result.ending, 'process-exited');
+  assert.equal(result.evidence.result.frame, 'truncated');
+  assert.equal(result.evidence.result.aiReported, null, 'a cut-off report yields no AI claims');
+  assert.equal(result.delivery.providerRead, 'not-observed');
+  assert.equal(result.lifecycle.turnComplete, null);
+  assert.equal(result.evidence.diff.complete, true, 'effects before the cut are still collected');
+});
+
+test('transport loss before or after acceptance never creates an extra task', async (t) => {
+  const { host, dataDir, presentation, base } = await hostFixture(t);
+  const ingress = new TaskIngress({ host, dir: dataDir });
+  await ingress.start();
+  t.after(() => ingress.stop());
+  const discovery = readDiscovery(dataDir);
+  const req = validateTaskRequest(request({ baseRevision: base, route: 'no-receipt' }));
+  const line = `${JSON.stringify({ token: discovery.token, op: 'start', request: req, digest: taskRequestDigest(req) })}\n`;
+  const sendThenDrop = text => new Promise((resolve) => {
+    const socket = net.connect({ host: '127.0.0.1', port: discovery.port }, () => {
+      socket.write(text, () => socket.destroy());
+    });
+    socket.on('close', resolve);
+    socket.on('error', resolve);
+  });
+
+  // Lost before acceptance: the line never completed, so nothing exists.
+  await sendThenDrop(line.slice(0, 200));
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.deepEqual(await sendIngressCommand(discovery, { op: 'status', launchId: req.launchId }),
+    { ok: false, error: 'unknown-launch' });
+  assert.equal(launchCount(dataDir), 0);
+
+  // Lost after acceptance: the client never read the ack. A retry of the same
+  // bytes finds the one launch the host already accepted.
+  await sendThenDrop(line);
+  await waitFor(() => host.status(req.launchId).ok);
+  const retry = await sendIngressCommand(discovery, { op: 'start', request: req, digest: taskRequestDigest(req) });
+  assert.equal(retry.duplicate, true);
+  await waitFor(() => host.status(req.launchId).state === 'running');
+  assert.equal(launchCount(dataDir), 1, 'exactly one launch record');
+  assert.equal(presentation.opened.length, 1, 'exactly one task window');
+  host.stop(req.launchId);
+  await host.whenIdle();
+  assert.equal((await sendIngressCommand(discovery, { op: 'capabilities' })).ok, true, 'the host still answers');
+});
+
+test('an absent or replaced host fails closed for a client with stale discovery', async (t) => {
+  const dir = tempDir(t, 'ao-ingress-stale-');
+  assert.throws(() => readDiscovery(dir), { code: 'ENOENT' }, 'no host, no discovery file');
+  const host = { hostIncarnationId: randomUUID(), handle: async command => ({ ok: true, op: command.op }) };
+  const first = new TaskIngress({ host, dir });
+  await first.start();
+  const stale = readDiscovery(dir);
+  first.stop();
+  await assert.rejects(sendIngressCommand(stale, { op: 'capabilities' }), { code: 'ECONNREFUSED' });
+
+  const replacement = new TaskIngress({ host: { ...host, hostIncarnationId: randomUUID() }, dir });
+  await replacement.start();
+  t.after(() => replacement.stop());
+  // Even if the port were reused, the old capability no longer authenticates.
+  const answer = await sendIngressCommand({ ...stale, port: replacement.port }, { op: 'capabilities' });
+  assert.deepEqual(answer, { ok: false, error: 'unauthorized' });
+  assert.notEqual(readDiscovery(dir).hostIncarnationId, stale.hostIncarnationId);
 });
 
 test('restart recovery reports unfinished launches without respawning them', async (t) => {

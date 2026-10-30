@@ -76,8 +76,9 @@ function renderPromptFile(request, frame) {
 function parseResultFrame(capture, frame) {
   if (!capture) return { frame: 'missing', nonce: 'not-observed', aiReported: null };
   if (!capture.complete) {
+    // A frame that began but never ended is partial output, not an absent one.
     return {
-      frame: capture.missingStart || capture.missingEnd ? 'missing' : 'truncated',
+      frame: capture.missingStart ? 'missing' : 'truncated',
       nonce: 'not-observed',
       aiReported: null,
     };

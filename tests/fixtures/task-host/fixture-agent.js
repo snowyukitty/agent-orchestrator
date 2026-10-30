@@ -88,6 +88,11 @@ async function main() {
       doWork();
       printFrame(task);
       return idle();
+    case 'partial':
+      // Starts the frame, then dies mid-report without a receipt.
+      doWork();
+      process.stdout.write(`${task.begin}\r\n{"nonce":"${task.nonce}","summary":"cut o`, () => process.exit(0));
+      return undefined;
     case 'exit-nonzero':
       out('fixture agent gives up\n');
       process.exit(3);

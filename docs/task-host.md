@@ -62,7 +62,7 @@ task window (BrowserWindow)       task SessionRegistry (own PTYs)
   codes; no exception text, path, or provider output crosses the ingress.
 
 The ingress is **disabled by default**. It starts only when
-`settings.json` has `taskHost.enabled: true`, or in the fixture verification
+`settings.json` has `"taskHostEnabled": true` (read at startup), or in the fixture verification
 mode, which uses throwaway user data.
 
 ## Launch request
@@ -184,7 +184,7 @@ implies another:
 | `lifecycle` | lifecycle broker | authenticated turn-complete observed or not; turn-started unavailable |
 | `process` | PTY | root PID, host spawn time, exit code and time, still running |
 | `window` | Electron | created, shown, detached, reopened counts; never "seen by a person" |
-| `result` | PTY framed capture | `complete` / `missing` / `truncated` / `invalid`; the AI's summary and **claimed** checks, bounded and untrusted |
+| `result` | PTY framed capture | `complete` / `missing` (no frame began) / `truncated` (a frame began and never ended) / `invalid`; the AI's summary and **claimed** checks, bounded and untrusted, only for a complete frame |
 | `checks` | host | each check run by the host after the turn: command, exit, outcome, duration, the tree it ran against, output digest; plus whether the script definition differs from the base; plus agreement with AI claims |
 | `diff` | Git | see below |
 
@@ -218,13 +218,41 @@ says so.
 Nothing here is pruned automatically. Prompt text, results, and diffs never go
 to the main window, the Log pane, the run journal, or the ingress `status`.
 
+## Fault acceptance
+
+The remote-work design lists the faults a W2 host must survive. Each row says
+what the host does and which check proves it; after each case no extra task,
+window, or launch record exists and the host keeps answering. Rows marked
+*W2b* or *live* cannot be proven by a local fixture.
+
+| Fault | Behaviour | Proof |
+|---|---|---|
+| Wrong user, or a request from another machine | No listener off loopback; non-loopback peers dropped; the token file is user-private | ingress unit test; [Ingress](#ingress) |
+| Spoofed or oversize request | Unauthenticated requests learn only `unauthorized`; >160 KiB, duplicate keys, bad UTF-8, unknown ops refused as a whole | ingress unit test |
+| Stale binding (host restarted or gone) | The old port refuses connections; a reused port rejects the old token; the client says the host is not running and does not retry | `an absent or replaced host fails closed…` |
+| Absent host | No discovery file; the client fails closed | same test |
+| Double-click / repeated start | Same bytes return the existing launch; different bytes are `launch-id-conflict` | host and fixture run |
+| Transport loss before acceptance | An incomplete line is never dispatched; no record exists | `transport loss before or after acceptance…` |
+| Transport loss after acceptance | The accepted record is durable before the ack; a retry of the same bytes gets `duplicate: true` and exactly one task, one window | same test |
+| Unsupported or unqualified provider | `provider-unavailable` / `provider-unqualified` at admission | admission test, fixture run |
+| Missing login, full quota | Not observable by the fixture; with a real provider the task ends without a receipt or frame and stays `needs-review` with that evidence | *live* |
+| Locked console, or no window can be created | `session-locked` while the console is locked; no window means no spawn (`window-unavailable`) | admission test |
+| Host crash around spawn | `spawnIntentAt` precedes the PTY; recovery reports `uncertain` / `interrupted` and never respawns | restart recovery test |
+| Nonzero child exit | `ending: process-exited` with exit code; evidence still collected; no completion claimed | host test |
+| Partial output | A frame that began but never ended is `truncated`; no AI claims are taken from it | `partial output is a truncated frame…` |
+| User input mid-task | Typing in the task window reaches only that task | host test (`ask` scenario) |
+| Terminal (window) close | Detaches the view; the task continues; `show` reopens it | fixture run |
+| Stop, including right after spawn | Stop request and observed root exit recorded separately; effects reconciled as `not-performed`; evidence collected | host test, transport-loss test, fixture run |
+| Session or route change mid-task, approved Matrix direction | — | *W2b* |
+
 ## Verification
 
 - `npm run test:unit` covers strict JSON, request validation and digest, the
   ingress (real loopback sockets), Git evidence (real repositories in a temp
   directory), checks, and the host end to end with real PTYs and the fixture
   agent: completion, AI-claimed vs host-observed disagreement, nonzero exit,
-  missing receipt and Stop, duplicate and conflicting starts, busy admission,
+  missing receipt and Stop, partial output, transport loss around acceptance,
+  stale and absent hosts, duplicate and conflicting starts, busy admission,
   and restart recovery.
 - `npm run verify:task-host` starts Electron with throwaway user data, drives
   the real ingress through the client, and requires a real task window per

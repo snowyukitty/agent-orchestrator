@@ -79,7 +79,14 @@ async function main() {
   return answer.ok ? 0 : 1;
 }
 
+// An absent or replaced host fails closed; say which, without retrying.
+function describeFailure(error) {
+  if (error.code === 'ENOENT') return 'The task host is not running here (no ingress discovery file).';
+  if (error.code === 'ECONNREFUSED') return 'The task host is not running here (the discovery file is stale).';
+  return error.message;
+}
+
 main().then(code => { process.exitCode = code; }, (error) => {
-  process.stderr.write(`${error.message}\n`);
+  process.stderr.write(`${describeFailure(error)}\n`);
   process.exitCode = 2;
 });
