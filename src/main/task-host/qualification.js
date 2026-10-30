@@ -27,6 +27,7 @@ const REQUIRED_EVIDENCE = Object.freeze({
   checkAgreement: 'agree',
   diffComplete: true,
   ownerCheckoutClean: true,
+  collectionStable: true,
 });
 
 function qualificationFile(dataDir, provider) {
@@ -46,6 +47,7 @@ function qualificationEvidence(result, { ownerCheckoutClean }) {
     checkAgreement: comparison.length > 0 && comparison.every(entry => entry.agreement === 'agree') ? 'agree' : 'not-agreed',
     diffComplete: result?.evidence?.diff?.complete === true,
     ownerCheckoutClean: ownerCheckoutClean === true,
+    collectionStable: result?.collection?.stable === true,
   };
 }
 

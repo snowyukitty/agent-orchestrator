@@ -73,6 +73,7 @@ class TaskHost {
     this._isSessionLocked = isSessionLocked;
     this._allowUnqualified = new Set(allowUnqualified);
     this._log = log || (() => {});
+    this._killTree = killTree;
     this._limits = { ...DEFAULT_LIMITS, ...limits };
     this._uuid = uuid;
     this._closed = false;
@@ -413,9 +414,24 @@ class TaskHost {
     // with the `collecting` state.
     const endedByHost = this._requestKill(launch, 'collect');
     const rootExited = await Promise.race([launch.exited.then(() => true), delay(10_000).then(() => false)]);
+    // A root that exited on its own can leave descendants; ask for the whole
+    // tree either way. That request is recorded, not proven.
+    let treeTermination = 'unavailable';
+    if (this._killTree && launch.record.process?.rootPid) {
+      try {
+        this._killTree(launch.record.process.rootPid);
+        treeTermination = 'requested';
+      } catch (_error) {
+        treeTermination = 'failed';
+      }
+    }
     launch.record.collection = {
       providerEndedByHost: endedByHost,
       rootExitObserved: rootExited,
+      treeTermination,
+      // Unstable when the root was still alive at the cut: the snapshot may
+      // have raced a writer. Qualification never accepts that.
+      stable: rootExited,
       boundaryAt: new Date().toISOString(),
     };
     if (this._closed) return undefined;

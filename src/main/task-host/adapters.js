@@ -131,21 +131,31 @@ function renderPromptFile(request, frame, { resultFile = null } = {}) {
  * truncated, an absent one is missing. The content stays AI-reported.
  */
 function readResultFile(file, maxBytes) {
+  const unreadable = { complete: true, text: '' };
   let stat;
   try {
     stat = fs.lstatSync(file);
   } catch (_error) {
     return null;
   }
-  if (!stat.isFile() || stat.nlink !== 1) return { complete: true, text: '' };
-  // Bound the read itself, not only the size seen a moment earlier.
+  if (!stat.isFile() || stat.nlink !== 1) return unreadable;
+  // Bound the read itself, not only the size seen a moment earlier, and
+  // check the opened handle is still the file that was inspected. Any
+  // failure is an unreadable report, never a reason to skip collection.
   const buffer = Buffer.alloc(maxBytes + 1);
   let length;
-  const fd = fs.openSync(file, 'r');
+  let fd = null;
   try {
+    fd = fs.openSync(file, 'r');
+    const opened = fs.fstatSync(fd);
+    if (!opened.isFile() || opened.nlink !== 1 || opened.ino !== stat.ino || opened.dev !== stat.dev) return unreadable;
     length = fs.readSync(fd, buffer, 0, buffer.length, 0);
+  } catch (_error) {
+    return unreadable;
   } finally {
-    fs.closeSync(fd);
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch (_error) { /* already closed */ }
+    }
   }
   if (length > maxBytes) return { complete: false, missingStart: false };
   let text;
@@ -155,7 +165,7 @@ function readResultFile(file, maxBytes) {
     return { complete: true, text: '' };
   }
   // PowerShell's UTF-8 writers often prepend a byte-order mark.
-  return { complete: true, text: text.replace(/^\uFEFF/, '') };
+  return { complete: true, text: text.replace(/^\uFEFF/, ''), channel: 'file' };
 }
 
 /**
@@ -172,9 +182,13 @@ function parseResultFrame(capture, frame) {
       aiReported: null,
     };
   }
+  // A file report is parsed exactly as written. A printed frame is one line,
+  // so a line break inside it can only be the terminal wrapping that line;
+  // nothing else is rewritten, and literal control characters stay invalid.
+  const text = capture.channel === 'file' ? capture.text : capture.text.replace(/\r?\n/g, '');
   let body;
   try {
-    body = parseStrictJson(capture.text.replace(/\s+/g, ' ').trim(), { maxDepth: 4 });
+    body = parseStrictJson(text.trim(), { maxDepth: 4 });
   } catch (_error) {
     return { frame: 'invalid', nonce: 'not-observed', aiReported: null };
   }

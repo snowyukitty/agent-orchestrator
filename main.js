@@ -989,16 +989,22 @@ async function runTaskHostFixtureMode() {
 const CONFIRM_LIVE_FLAG = '--confirm-live';
 const ACCOUNT_NUMBER_PREFIX = '--account-number=';
 
+function qualifyError(code) {
+  const error = new Error(code);
+  error.qualifyCode = code;
+  return error;
+}
+
 /** Healthy routed Codex accounts in discovery order; never printed. */
 async function qualificationRoute() {
   const matches = process.argv.filter(value => value.startsWith(ACCOUNT_NUMBER_PREFIX));
   const number = matches.length ? Number(matches[0].slice(ACCOUNT_NUMBER_PREFIX.length)) : 1;
-  if (matches.length > 1 || !Number.isSafeInteger(number) || number < 1) throw new Error('invalid account number');
+  if (matches.length > 1 || !Number.isSafeInteger(number) || number < 1) throw qualifyError('invalid-account-number');
   const { profiles, error } = await getRoutedProfiles({ force: true });
-  if (error) throw new Error('routed account discovery failed');
+  if (error) throw qualifyError('routed-discovery-failed');
   const eligible = profiles.filter(item => item.agent === 'codex' && item.status === 'ok' && item.authenticated);
   const profile = eligible[number - 1];
-  if (!profile) throw new Error('no healthy routed Codex account at that number');
+  if (!profile) throw qualifyError('no-healthy-account-at-number');
   return profile.alias;
 }
 
@@ -1007,9 +1013,9 @@ async function runTaskHostQualifyMode() {
   let qualified = false;
   let presentation = null;
   try {
-    if (app.isPackaged) throw new Error('qualification is available only from a source checkout');
+    if (app.isPackaged) throw qualifyError('source-checkout-only');
     // A live provider turn runs only on this explicit owner confirmation.
-    if (!process.argv.includes(CONFIRM_LIVE_FLAG)) throw new Error(`a live turn needs ${CONFIRM_LIVE_FLAG}`);
+    if (!process.argv.includes(CONFIRM_LIVE_FLAG)) throw qualifyError('confirm-live-required');
     const route = await qualificationRoute();
     const started = await startTaskHost({ qualify: true });
     presentation = started.presentation;
@@ -1021,7 +1027,9 @@ async function runTaskHostQualifyMode() {
     });
     qualified = outcome.qualified;
   } catch (error) {
-    console.error(`[TaskHostQualify] aborted: ${error.message}`);
+    // Only a fixed code reaches the console: a native error message can carry
+    // private paths or provider output.
+    console.error(`[TaskHostQualify] aborted: ${error.qualifyCode || 'unexpected-error'}`);
   }
   taskIngress?.stop();
   taskIngress = null;

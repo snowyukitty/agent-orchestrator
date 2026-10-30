@@ -330,7 +330,8 @@ test('qualification evidence comes from host observations, not AI claims', () =>
     },
   };
   const evidence = qualificationEvidence(result, { ownerCheckoutClean: true });
-  assert.deepEqual(qualificationShortfall(evidence), ['hostCheck', 'checkAgreement']);
+  assert.deepEqual(qualificationShortfall(evidence), ['hostCheck', 'checkAgreement', 'collectionStable'],
+    'a snapshot taken while the provider may still be writing never qualifies');
 });
 
 // ── git evidence ───────────────────────────────────────────────
@@ -553,6 +554,8 @@ test('a file-channel report is read from the private outbox, outside the diff', 
   assert.equal(result.evidence.diff.layers.untracked, 2, 'the report is not part of the task diff');
   assert.deepEqual([result.collection.providerEndedByHost, result.collection.rootExitObserved], [true, true],
     'the provider tree ends before evidence is frozen');
+  assert.equal(result.collection.stable, true);
+  assert.equal(result.collection.treeTermination, 'unavailable', 'no tree killer is wired in this test host');
   assert.equal(host.windowInput(req.launchId, 'more\r'), false, 'input is closed once collection starts');
   const prompt = fs.readFileSync(path.join(dataDir, 'launches', req.launchId, 'prompt.md'), 'utf8');
   assert.ok(!prompt.includes('AO-TASK-RESULT-BEGIN'), 'no terminal frame is requested');
@@ -585,6 +588,26 @@ test('a file report must be one bounded regular file', (t) => {
   fs.writeFileSync(file, body([]));
   fs.linkSync(file, path.join(dir, 'alias.json'));
   assert.equal(parseResultFrame(readResultFile(file, 4096), frame).frame, 'invalid', 'a hard-linked report');
+  fs.rmSync(path.join(dir, 'alias.json'));
+
+  // A file report is parsed exactly as written.
+  fs.writeFileSync(file, `{"nonce":"${frame.nonce}","summary":"two\nlines","checks":[]}`);
+  assert.equal(parseResultFrame(readResultFile(file, 4096), frame).frame, 'invalid', 'a literal newline in a string');
+  fs.writeFileSync(file, JSON.stringify({ nonce: frame.nonce, summary: 'kept  as\twritten', checks: [] }));
+  assert.equal(parseResultFrame(readResultFile(file, 4096), frame).aiReported.summary, 'kept  as\twritten');
+
+  // A read that fails after inspection is an unreadable report, not a crash.
+  t.mock.method(fs, 'openSync', () => { throw Object.assign(new Error('denied'), { code: 'EACCES' }); });
+  assert.equal(parseResultFrame(readResultFile(file, 4096), frame).frame, 'invalid');
+});
+
+test('a printed frame tolerates only the terminal wrapping its line', () => {
+  const frame = createResultFrame();
+  const line = JSON.stringify({ nonce: frame.nonce, summary: 'wrapped by the terminal', checks: [] });
+  const wrapped = `${line.slice(0, 40)}\r\n${line.slice(40)}`;
+  assert.equal(parseResultFrame({ complete: true, text: `\r\n${wrapped}\r\n` }, frame).frame, 'complete');
+  const tabbed = line.replace('wrapped by', 'wrapped\tby');
+  assert.equal(parseResultFrame({ complete: true, text: tabbed }, frame).frame, 'invalid');
 });
 
 test('without a receipt the task stays running until Stop, which still collects evidence', async (t) => {
