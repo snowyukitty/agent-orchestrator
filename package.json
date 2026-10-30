@@ -32,7 +32,7 @@
   "devDependencies": {
     "@electron/asar": "^4.3.0",
     "@electron/packager": "^20.3.0",
-    "electron": "^43.4.1"
+    "electron": "^43.8.4"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
