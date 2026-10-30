@@ -103,6 +103,7 @@ npm run check       # syntax-check every JS file under the source roots
 npm test            # test:unit (node --test) + test:app (Electron self-test)
 npm run smoke       # Electron startup/shutdown cleanup path
 npm run verify:task-host   # task host end to end with the fixture provider only
+npm run qualify:task-host -- --confirm-live   # live Codex qualification; owner-authorized only, never in tests
 npm run verify      # complete checkpoint gate: check, tests, audit, build/package verification
 npm run workflow -- check <file>   # headless: validate a workflow, resolve its accounts, show its next trigger
 npm run verify:direct-live -- --confirm-live  # opt-in real-provider acceptance; never automated
@@ -145,8 +146,13 @@ Keep these properties, each covered by a test:
 - the task window exists before the provider starts; closing it detaches;
 - delivery, lifecycle receipt, AI-reported result, host-observed checks, and
   diff stay separate axes, and nothing reports success — only `needs-review`;
-- a provider is admitted only when its adapter is qualified. Codex is not yet:
-  qualifying it needs a separately authorized live turn, never a test;
+- a provider is admitted only when its adapter is qualified. Codex is
+  qualified per machine by `npm run qualify:task-host -- --confirm-live`, an
+  owner-authorized live turn that writes a receipt bound to the adapter
+  contract and Codex version; never run it from a test, and bump
+  `CODEX_ADAPTER_CONTRACT` whenever the launch or delivery changes;
+- a lifecycle receipt completes a task only when its input digest matches the
+  task's pointer sentence; side turns in the same process never do;
 - the fault-acceptance matrix in `docs/task-host.md` stays true: a new fault
   class gets a row and the test that proves it, or says why only W2b or a live
   turn can.

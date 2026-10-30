@@ -5,6 +5,23 @@ the product story; this file keeps the history.
 
 ## Unreleased (Journal v2 + Evidence-First Field Guide)
 
+- **The task host runs real Codex tasks after a live qualification**:
+  `npm run qualify:task-host -- --confirm-live` runs one harmless,
+  owner-authorized Codex turn through the real ingress, window, receipt, and
+  evidence pipeline, and only when every axis holds writes a receipt bound to
+  the adapter contract and the exact Codex version; each launch re-probes the
+  version and refuses a changed one. Codex 0.165.0 qualified on 2026-10-30
+  after five refused turns, each of which fixed something real: Codex project
+  trust is now a default-deny per-workspace opt-in granted for one
+  invocation; Codex reports through a private outbox file because its TUI
+  damages printed frames; the host ends the provider before freezing
+  evidence; and lifecycle receipts are correlated with the task's own input,
+  because Codex's title-generation side turn completes first. An independent
+  Codex review via ATD then found that evidence could be frozen while the
+  provider might still be writing; collection stability is now a
+  qualification axis, and the receipt was re-earned on a seventh turn. No
+  containment is claimed: the sandbox stays the account's own policy.
+
 - **Desktop task host, W2a (fixture-verified, off by default)**: one typed,
   digest-bound launch request now becomes one fresh agent in its own new
   window and its own Git worktree, through a loopback-only ingress with a

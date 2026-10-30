@@ -166,6 +166,7 @@ npm run check       # syntax-check every JS file, then validate the static guide
 npm test            # main-process unit tests + headless renderer self-test
 npm run smoke       # Electron startup/shutdown cleanup path
 npm run verify:task-host  # task host end to end: real ingress, windows, PTYs; fixture provider only
+npm run qualify:task-host -- --confirm-live  # owner-authorized live Codex turn; writes the qualification receipt
 npm run visual      # normal UI with disposable resume-evidence scenarios
 npm run promo:capture   # reproduce twice, verify, then atomically refresh the frames
 npm run icons       # regenerate icon.png + icon.ico from src/assets/icon-source.png

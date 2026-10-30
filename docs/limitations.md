@@ -99,11 +99,18 @@ does not have. Everything below is current for v0.4.0.
   paste mode, but the provider-side parser contract remains Codex-specific.
   Re-run the documented direct-session manual check when Codex changes its TUI
   input or `notify` behavior; unsupported providers remain fail-closed.
-- <a id="desktop-task-host"></a>**The desktop task host is fixture-verified
-  only** (W2a, [design](task-host.md)): no real provider is admitted. The Codex
-  adapter is built but refused as unqualified until a separately authorized
-  live turn proves argv-pointer delivery and its receipt. The host is off by
-  default and has no cross-machine carrier yet (W2b). Turn-started and
+- <a id="desktop-task-host"></a>**The desktop task host admits Codex only
+  where a live qualification receipt exists** (W2a, [design](task-host.md)),
+  for the one Codex version and adapter contract that turn exercised; an
+  upgrade needs a new owner-run qualification turn. The qualification covers
+  one harmless edit in a throwaway repository, not other toolchains, network
+  access, hooks, or account configuration changes. **No containment is
+  claimed**: Codex runs under the account's own sandbox policy (none, by the
+  owner's default), so `edits-only` is an instruction plus observation, and
+  host-run checks execute the repository's scripts unsandboxed. Codex needs a
+  per-workspace `codexProjectTrust` opt-in, which also lets it load that
+  repository's project settings. The host is off by default and has no
+  cross-machine carrier yet (W2b). Turn-started and
   waiting-for-input are not observable; a task that asks a question shows
   `running` until a receipt, an exit, or Stop. Host-observed checks run the
   repository's own scripts, which the agent may have changed — the record
@@ -115,6 +122,15 @@ does not have. Everything below is current for v0.4.0.
   leaves records `interrupted` or `uncertain` and processes possibly running,
   which the host reports but never re-adopts. Launch records, prompts,
   worktrees, and diffs are never pruned automatically.
+- <a id="codex-side-turn-receipts"></a>**Direct Codex sessions can bind their
+  lifecycle receipts to a side turn**: Codex 0.165 runs a title-generation
+  turn on the first user message, and its notify receipt can arrive before
+  the real turn's. A direct session registers no expected input, so the broker
+  binds that session's receipts to the side turn's thread and then rejects the
+  real one; the session can stay `running` and guarded scheduled delivery
+  stays blocked (fail-closed, never unsafe). Task launches are immune because
+  they register the digest of their pointer sentence. Extending that to
+  direct sessions means registering the digest of each app-submitted prompt.
 - **Terminal Layout Shifts**: Xterm dimensions may occasionally desync with the internal PTY dimensions if the window is resized very rapidly while a process is initializing.
 
 Planned work lives in the [roadmap](roadmap.md); the accepted resume safety

@@ -1,9 +1,11 @@
 # Desktop task host (W2a)
 
-Status: **W2a local qualification, fixture-verified only.** No provider is
-qualified for this path, the ingress is off unless the owner enables it, and no
-cross-machine carrier exists. This document is the host contract the remote-work
-design asked for before launch code; the
+Status: **W2a, fixture-verified, with a live Codex qualification path.**
+Codex is admitted only on a machine that holds a qualification receipt from an
+owner-authorized live turn ([Qualification](#qualification)), and only for the
+exact Codex version that turn observed. The ingress is off unless the owner
+enables it, and no cross-machine carrier exists. This document is the host
+contract the remote-work design asked for before launch code; the
 [limitations](limitations.md#desktop-task-host) say what it does not prove.
 
 ## What it is
@@ -90,7 +92,20 @@ a mismatch is refused. The digest is an integrity binding, not authority.
 
 - **No paths cross the ingress.** `workspace` is a label the owner registered
   in `task-host/workspaces.json` on this host. The host resolves it, checks it
-  is a Git work tree, and verifies `baseRevision` names a commit there.
+  is a Git work tree, and verifies `baseRevision` names a commit there:
+
+  ```json
+  { "schema": 1, "workspaces": {
+      "notes": "D:\\Work\\notes",
+      "site": { "path": "D:\\Work\\site", "codexProjectTrust": "allow" } } }
+  ```
+
+  `codexProjectTrust: "allow"` is a separate, default-deny opt-in. Codex
+  refuses to start in a folder that is not a trusted project, and trusting one
+  lets Codex load that repository's own project settings, which can run code
+  without a model request. Only a workspace the owner opted in admits Codex;
+  the host then grants that trust for the one invocation and never writes
+  Codex's configuration.
 - `route` selects an account route (for Codex) or a fixture scenario. The
   host never constructs an account environment; a routed provider is launched
   through ai-agent-entrypoint exactly as direct sessions are today.
@@ -113,6 +128,7 @@ double-click cannot create two tasks:
 | screen locked (Electron `lock-screen`) | refused `session-locked`; never queued |
 | provider unknown, or known but unqualified | refused `provider-unavailable` / `provider-unqualified` |
 | workspace label not registered | refused `unknown-workspace` |
+| provider needs project trust the workspace did not grant | refused `workspace-trust-not-granted` |
 | a task already active in that workspace | refused `workspace-busy` |
 | two tasks already active on this host | refused `host-busy` |
 | otherwise | `accepted`, after the accepted record is durably written |
@@ -145,6 +161,17 @@ interrupted (host restart before any spawn intent)
   reopens a window onto it. **Stop** (window button or `stop` op) kills the
   task's process tree, records the request and the observed root exit
   separately, and then still collects evidence. Stop is not rollback.
+- **Collection boundary.** However the turn ends, the host ends the provider's
+  process tree and closes window input *before* it reads the report, runs
+  checks, and takes the diff, so nothing the task started is still writing
+  while the evidence is frozen. It asks for the whole tree even when the root
+  exited on its own, since descendants can outlive it. `collection` records
+  whether the host ended it, whether the root exit was observed, and whether
+  tree termination was requested; it is `stable` only when the root exit was
+  observed, and an unstable collection never qualifies a provider. Tree
+  termination is requested, not proven. The terminal stays readable in the
+  window (and in the private `terminal.log`); a follow-up conversation is a
+  new task.
 - Quitting the app marks every active task `interrupted` before its PTY is
   drained. Tasks do not survive the host.
 
@@ -157,17 +184,69 @@ lifecycle evidence it can produce. W2a defines one delivery mechanism:
 private launch directory, outside the worktree. The provider is started with a
 fixed short sentence naming that file as its initial prompt; the task text
 never appears in argv, the clipboard, or an existing PTY. The start counts as
-one submitted turn, so the first authenticated turn-complete receipt from the
-existing lifecycle broker completes it.
+one submitted turn, completed by the authenticated turn-complete receipt **for
+that turn**.
 
-The prompt file also contains a per-launch random nonce and the result frame
-markers, which appear nowhere else. A result frame echoing the nonce is
-evidence the provider read the file; it is still AI-reported content.
+**Receipt correlation.** A provider process can complete turns the host did
+not start: Codex 0.165 runs a title-generation side turn that finishes first.
+The notify helper therefore forwards a SHA-256 of each input message of the
+completed turn, and a task registers the digest of its own pointer sentence
+(which names its private prompt, so it is unique per launch). The broker
+accepts, and binds the thread to, only a receipt whose input includes that
+digest; any other is counted as `lifecycle.uncorrelatedReceipts` and changes
+nothing. Message text never crosses the pipe.
+
+The prompt file also contains a per-launch random nonce, which appears nowhere
+else. A report echoing the nonce is evidence that something in the task's
+execution context read the file; the report is still AI-reported content.
+
+**Result channels.** An adapter declares how its report comes back:
+
+- `pty-frame`: the agent prints one JSON line between per-launch markers and
+  the host captures it from the terminal stream. Fine for a line-oriented
+  agent such as the fixture.
+- `file`: the agent writes one JSON object to `result.json` in a fresh,
+  randomly named outbox beside the prompt, the only directory outside the
+  worktree it is told to write. The host reads it once, after the collection
+  boundary: a regular, single-link file whose opened handle is still the file
+  inspected, read with a hard size bound, strict UTF-8 (a leading byte-order
+  mark is accepted), and parsed exactly as written as strict JSON, with
+  duplicate keys and duplicate check claims refused. A file that cannot be
+  opened or read is an `invalid` report; the rest of the evidence is still
+  collected. The bytes are copied into
+  `result.txt` and their SHA-256 recorded, so later writes cannot change what
+  was collected. Required for Codex: its full-screen TUI redraws with cursor
+  movement, and the first live run showed a printed frame losing spaces and
+  even a nonce character on the way through the terminal.
+
+Either way the prompt names each check exactly (`test`, run as `npm run
+test`), and the claim must use that name.
 
 | Adapter | Status | Notes |
 |---|---|---|
-| `fixture` | qualified **for fixtures only** | `tests/fixtures/task-host/fixture-agent.js`; never packaged |
-| `codex` | implemented, **unqualified**, refused at admission | builds the existing routed direct-agent spec and appends the pointer prompt; needs a separately authorized live turn |
+| `fixture` | qualified **for fixtures only** | `tests/fixtures/task-host/fixture-agent.js`; never packaged; either channel |
+| `codex` | admitted **only with a qualification receipt** for its adapter contract, and only while the route reports the qualified version | routed direct-agent spec plus the task arguments below; `file` channel; needs workspace project trust |
+
+**Codex task arguments.** The adapter takes the routed direct-agent spec from
+ai-agent-entrypoint unchanged and appends only:
+
+| Argument | Why |
+|---|---|
+| `--no-daemon` | the task gets its own backend, not a shared app-server daemon that Stop could not own |
+| `-c approval_policy="never"` | nobody is there to approve; a request that needs approval is denied rather than awaited |
+| `--add-dir <outbox>` | the report path stays writable even under a sandboxed account policy |
+| `-c projects={'<repo root>'={trust_level="trusted"}}` | one-invocation project trust for the opted-in workspace. Codex's `-c` key splitter breaks on `.`, so the root travels as a TOML literal key inside the value; a root a literal key cannot hold (an apostrophe, a control character, no drive letter) is refused as `provider-trust-unexpressible`. The root is the parent of `git rev-parse --git-common-dir`, ASCII case-folded like Windows |
+| the pointer sentence | the instruction itself never enters argv |
+
+A routed spec that already carries one of these options is refused
+(`route-policy-conflict`) rather than letting argument order decide.
+
+**No containment is claimed.** The sandbox is the account's own policy. The
+owner's default runs Codex without one, and on this machine Codex's
+`workspace-write` sandbox could not start at all (`no writable root capability
+SIDs`), so forcing it would break every task. `edits-only` is therefore an
+instruction plus an observation (commits since base appear in the diff
+evidence), not an enforcement.
 
 Turn-started is not observable for either adapter and is recorded as
 `unavailable`. Waiting-for-input is never inferred from silence; the task shows
@@ -181,10 +260,10 @@ implies another:
 | Axis | Source | What it can say |
 |---|---|---|
 | `delivery` | host | prompt digest and size, mechanism, handed-at time; `providerRead` = nonce echoed / not observed / mismatch |
-| `lifecycle` | lifecycle broker | authenticated turn-complete observed or not; turn-started unavailable |
+| `lifecycle` | lifecycle broker | authenticated, input-correlated turn-complete observed or not; how many receipts were for other turns; turn-started unavailable |
 | `process` | PTY | root PID, host spawn time, exit code and time, still running |
 | `window` | Electron | created, shown, detached, reopened counts; never "seen by a person" |
-| `result` | PTY framed capture | `complete` / `missing` (no frame began) / `truncated` (a frame began and never ended) / `invalid`; the AI's summary and **claimed** checks, bounded and untrusted, only for a complete frame |
+| `result` | the adapter's result channel | `complete` / `missing` (no report) / `truncated` (a frame began and never ended, or the file exceeded its bound) / `invalid`; the channel, the report digest, and the AI's summary and **claimed** checks, bounded and untrusted, only for a complete report |
 | `checks` | host | each check run by the host after the turn: command, exit, outcome, duration, the tree it ran against, output digest; plus whether the script definition differs from the base; plus agreement with AI claims |
 | `diff` | Git | see below |
 
@@ -208,15 +287,72 @@ says so.
   workspaces.json         owner-registered workspace labels -> checkouts
   launches/<launchId>/
     record.json           state, request digest, observations, evidence
-    prompt.md             the instruction, nonce, result markers
-    result.txt            the captured frame body
+    prompt.md             the instruction, nonce, result markers or outbox path
+    outbox-<random>/      the only extra path a file-channel agent writes
+    result.txt            the collected report snapshot
     checks/<n>.log        bounded host-observed check output
     diff.patch            the complete patch
   worktrees/<launchId>/   the task worktree, retained until review
+  qualifications/<provider>.json   receipts from live qualification turns
 ```
 
 Nothing here is pruned automatically. Prompt text, results, and diffs never go
 to the main window, the Log pane, the run journal, or the ingress `status`.
+
+## Qualification
+
+A provider adapter is admitted for real tasks only after one owner-authorized
+live turn has shown, end to end, what the fixture shows with a scripted agent:
+
+```powershell
+npm run qualify:task-host -- --confirm-live [--account-number=<n>]
+```
+
+The run uses throwaway user data and a throwaway repository, drives the real
+ingress, a real task window, routed Codex, the real lifecycle receipt, and the
+full evidence pipeline, and asks for one harmless edit that makes the
+repository's own test pass. It prints aggregate facts only: no route alias,
+path, prompt, or provider output. It refuses to run without `--confirm-live`
+and in a packaged build.
+
+Every axis must hold: window created, nonce echoed, authenticated and
+input-correlated turn-complete receipt, complete report, the host-run check
+passed and agrees with the claim, complete diff, owner checkout untouched, a
+stable collection, and the provider version observed through the route. Only then does it write
+`qualifications/codex.json` into the **production** task-host directory. A
+turn that falls short writes nothing.
+
+The receipt binds the adapter contract version (`CODEX_ADAPTER_CONTRACT`,
+bumped whenever launch or delivery changes) and the exact `codex --version`
+reported through the router's `target run <route> --` prefix. Each launch
+probes that version again before spawning and refuses `provider-version-changed`
+or `provider-version-unknown`. A Codex upgrade therefore needs a new
+qualification turn; the host never starts one by itself.
+
+**Recorded qualification (2026-10-30).** `codex-cli 0.165.0`, adapter
+contract 1, qualified on the owner's machine. Five turns failed first; the
+host refused each one correctly, and each changed the adapter:
+
+| Turn | What happened | What changed |
+|---|---|---|
+| 1 | Codex waited at its folder-trust screen until the turn limit | opt-in project trust, passed per invocation |
+| (diagnostic) | the printed result frame came back with lost spaces and a damaged nonce | the `file` result channel |
+| (diagnostic) | forced `workspace-write` could not start any tool | the sandbox stays the account's |
+| 2, 3 | a title-generation side turn's receipt ended the task after a few seconds | input-correlated receipts |
+| 4, 5 | the account's configured model was not available on its plan; the turn errored and never completed | none: a provider-side failure, shown by the private transcript |
+| 6 | every axis held, with one uncorrelated side-turn receipt ignored | receipt written |
+| (review) | an independent review found a collection could be frozen while the provider might still write, and three smaller defects | collection stability became an axis, which invalidated receipt 6 |
+| 7 | every axis held, including a stable collection | the current receipt |
+
+A qualification run also keeps, privately beside the receipts, a summary of
+each notify payload (type, client, input length and first 80 characters,
+digest) and, when it fails, the terminal transcript.
+
+What a receipt does **not** cover: other repositories' toolchains, network or
+dependency installation, hooks and project settings beyond the fixture's, an
+executable that reports the same version string, account configuration changes
+(writable roots, rules that bypass a sandbox), or a sandboxed account profile.
+It is one exercised profile, not a reliability claim.
 
 ## Fault acceptance
 
@@ -242,7 +378,10 @@ window, or launch record exists and the host keeps answering. Rows marked
 | Partial output | A frame that began but never ended is `truncated`; no AI claims are taken from it | `partial output is a truncated frame…` |
 | User input mid-task | Typing in the task window reaches only that task | host test (`ask` scenario) |
 | Terminal (window) close | Detaches the view; the task continues; `show` reopens it | fixture run |
-| Stop, including right after spawn | Stop request and observed root exit recorded separately; effects reconciled as `not-performed`; evidence collected | host test, transport-loss test, fixture run |
+| Stop, including right after spawn | Stop request and observed root exit recorded separately; observed changes collected; whether anything outside the worktree happened is not assessed (`effectReconciliation: not-performed`) | host test, transport-loss test, fixture run |
+| A side turn completes in the provider process first | Counted as uncorrelated; neither completes the task nor binds the receipt thread | `a side turn completing first…`, broker test, qualification turns 2 and 6 |
+| The provider's turn errors (for example, a model the account cannot use) | No receipt, so the task shows `running` until the turn limit or Stop; never inferred complete | qualification turns 4 and 5 |
+| Provider waits at an onboarding or approval screen | Untrusted folders are made trusted only per opted-in workspace; approval prompts are denied by policy; anything else shows in the window and ends at the turn timeout or Stop, never answered by injected keys | first live run (trust screen), qualification run |
 | Session or route change mid-task, approved Matrix direction | — | *W2b* |
 
 ## Verification
