@@ -471,6 +471,24 @@ test('a routed profile launches through agent-entrypoint codex shell', () => {
   assert.deepEqual(spec.env, { PATH: '/bin' });
 });
 
+test('routed sessions prefer the MSI PowerShell 7 over the Store build on PATH', () => {
+  const msi = path.join('C:/Program Files', 'PowerShell', '7', 'pwsh.exe');
+  assert.equal(agents.resolvePwsh({ env: { ProgramFiles: 'C:/Program Files' }, exists: p => p === msi }), msi);
+  assert.equal(agents.resolvePwsh({ env: { ProgramFiles: 'C:/Program Files' }, exists: () => false }), 'pwsh.exe');
+  assert.equal(agents.resolvePwsh({ env: {}, exists: () => true }), 'pwsh.exe');
+
+  const notifyScriptPath = path.resolve('C:/app/codex-notify.ps1');
+  const direct = agents.buildLaunchSpec(ROUTED, {
+    baseEnv: {}, entrypointPath: 'C:/ep', notifyScriptPath, exists: () => true,
+    sessionMode: 'direct-agent', pwsh: msi,
+  });
+  assert.equal(direct.file, msi);
+  assert.ok(direct.args.some(arg => arg.startsWith('notify=') && arg.includes('PowerShell')),
+    'the notify hook runs under the same PowerShell');
+  const shell = agents.buildLaunchSpec(ROUTED, { baseEnv: {}, entrypointPath: 'C:/ep', exists: () => true, pwsh: msi });
+  assert.equal(shell.file, msi);
+});
+
 test('a routed Codex workflow session is result-input capable', () => {
   const spec = agents.buildLaunchSpec(ROUTED, {
     baseEnv: {},

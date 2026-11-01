@@ -116,9 +116,11 @@ does not have. Everything below is current for v0.4.0.
   completes. Process ownership uses a Windows Job Object joined just after
   spawn (node-pty cannot create a process inside one), so a child created and
   gone in those milliseconds, or a process started outside the job by an
-  intermediate that exited between two 2-second sweeps, is not seen. Where the
-  router runs under Microsoft Store PowerShell 7, the provider itself starts
-  outside the job and is adopted only afterwards. A
+  intermediate that exited between two 2-second sweeps, is not seen. Routed
+  sessions start through the MSI PowerShell 7 when it is installed; with only
+  the Microsoft Store build (an MSIX package, whose children leave every job)
+  the provider starts outside the job and is adopted only afterwards, and
+  `remote-start` is refused. A
   disconnected session is treated as locked.
   Turn-started and
   waiting-for-input are not observable; a task that asks a question shows

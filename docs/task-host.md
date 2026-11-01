@@ -199,7 +199,10 @@ interrupted (host restart before any spawn intent)
   exists, and jobs are kill-on-close, so they never outlive the helper. A
   process can still be created outside its parent's job: PowerShell 7
   installed from the Microsoft Store is a packaged (MSIX) app, whose children
-  break away from every job, and the router runs Codex under it. So every 2
+  break away from every job. Routed sessions therefore start through the MSI
+  install (`%ProgramFiles%\PowerShell\7\pwsh.exe`) whenever it exists,
+  whatever PATH finds first, and `remote-start` is refused on a host without
+  it. As a backstop, every 2
   seconds while the task runs, and again at
   the boundary, the helper adopts any live child of a live member that is
   outside the job. At the boundary the host counts what is in the job and what
@@ -412,7 +415,8 @@ host refused each one correctly, and each changed the adapter:
 | 8 | every axis held under the stricter collection (no surviving descendant) | the current receipt (unlocked session) |
 | 9 (`--await-locked`) | admitted and started with the workstation locked; every axis held, and the boundary found and ended three Codex descendants; the workstation was unlocked before collection | no locked receipt: a locked qualification must stay locked to the end |
 | 10–14 | provider ownership moved to Job Objects after three review rounds; the first job turns showed Codex itself outside the job (started by the PowerShell launcher), so the collection was unstable and no receipt was written | strays adopted every 2 s and at the boundary |
-| 15 | every axis held; four processes in the job at the boundary, none outside, none surviving | the current receipt (unlocked session) |
+| 15 | every axis held; four processes in the job at the boundary, none outside, none surviving | receipt (unlocked session) |
+| 16 | the router on the MSI PowerShell 7, Codex 0.166.0: every axis held; no process adopted late, six in the job at the boundary, none outside, none surviving | the current receipt (unlocked session) |
 
 The locked-session qualification is still to be run with nobody at the
 console: start it, lock the workstation, and leave it locked until the run

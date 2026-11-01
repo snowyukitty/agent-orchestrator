@@ -924,6 +924,7 @@ async function startTaskHost({ fixture = false, qualify = false } = {}) {
         baseEnv: process.env,
         entrypointPath: entrypointPath(),
         notifyScriptPath,
+        pwsh: agentProfiles.resolvePwsh(),
       }),
     }),
   };
@@ -962,6 +963,9 @@ async function startTaskHost({ fixture = false, qualify = false } = {}) {
       return () => { if (powerSaveBlocker.isStarted(id)) powerSaveBlocker.stop(id); };
     },
     jobs: taskHostJobs,
+    // Routed providers start through PowerShell 7; only its MSI install keeps
+    // their children in the task's job. The fixture provider starts directly.
+    launcherContained: () => fixture || agentProfiles.resolvePwsh() !== 'pwsh.exe',
     allowUnqualified: qualify ? ['codex'] : [],
     terminateTree: process.platform === 'win32' ? killProcessTree : null,
     killTree: killProcessTree,
@@ -1476,6 +1480,7 @@ handleTrusted('session:create', async (_event, payload, rendererEpoch) => {
       workflowSession: p.workflowSession === true,
       sessionMode: p.sessionMode || 'account-shell',
       notifyScriptPath: codexNotifyScriptPath(),
+      pwsh: agentProfiles.resolvePwsh(),
     });
     spec.cwd = resolveWorkingDir(spec.cwd);
 

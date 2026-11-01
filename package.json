@@ -41,6 +41,10 @@
     "node-pty": "^1.1.0",
     "sortablejs": "^1.15.6"
   },
+  "overrides": {
+    "glob": "^14.0.3",
+    "minimatch": "^11.0.3"
+  },
   "allowScripts": {
     "electron@43.4.1": true,
     "node-pty@1.1.0": true

@@ -54,6 +54,8 @@ class TaskHost {
    * @param {function} [deps.holdAwake]      () => release function; held while any task is active
    * @param {object}   [deps.jobs]           see process-jobs.js; without it no collection is stable
    * @param {function} [deps.account]        () => the SID of the account this host runs as, or null
+   * @param {function} [deps.launcherContained] () => true when a provider's launcher keeps its
+   *                                           children in the task's job (not an MSIX package)
    * @param {string[]} [deps.allowUnqualified] adapter ids allowed although unqualified
    */
   constructor({
@@ -67,6 +69,7 @@ class TaskHost {
     holdAwake = null,
     jobs = null,
     account = () => null,
+    launcherContained = () => false,
     allowUnqualified = [],
     terminateTree = null,
     killTree = null,
@@ -87,6 +90,7 @@ class TaskHost {
     this._releaseAwake = null;
     this._jobs = jobs;
     this._account = account;
+    this._launcherContained = launcherContained;
     this._suspending = false;
     this._allowUnqualified = new Set(allowUnqualified);
     this._log = log || (() => {});
@@ -260,7 +264,13 @@ class TaskHost {
     if (existing) return this._duplicate(existing, digest);
     // Nobody is there to notice a provider left running: without process
     // ownership, a remote start is refused outright.
-    if (!this._jobs) return { ok: false, error: 'process-ownership-unavailable' };
+    // A launcher whose children break away from every job (Store PowerShell
+    // is an MSIX package) would start the provider outside the task's job.
+    let contained = false;
+    try { contained = this._launcherContained() === true; } catch { contained = false; }
+    if (!this._jobs || !contained) {
+      return { ok: false, error: 'process-ownership-unavailable' };
+    }
     const refusal = checkRemoteAuthorization(authorization, {
       policy: readPolicy(this.policyFile),
       digest,

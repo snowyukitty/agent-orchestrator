@@ -309,6 +309,22 @@ function entrypointScript(repoRoot) {
 }
 
 /**
+ * The PowerShell 7 that routed sessions start through. The MSI install is
+ * preferred over whatever `pwsh` PATH finds first: the Microsoft Store build
+ * is an MSIX package, whose processes run in the package's job and start
+ * their children outside every job, so a task's provider would escape the
+ * task host's Job Object. Falls back to `pwsh.exe` when no MSI install exists.
+ */
+function resolvePwsh({ env = process.env, exists = fs.existsSync } = {}) {
+  const roots = [env.ProgramFiles, env.ProgramW6432].filter(Boolean);
+  for (const root of roots) {
+    const candidate = path.join(root, 'PowerShell', '7', 'pwsh.exe');
+    if (exists(candidate)) return candidate;
+  }
+  return 'pwsh.exe';
+}
+
+/**
  * Strip a doctor report down to what the UI may see.
  *
  * `Home` and `ManifestPath` are canonical account-home paths. The entrypoint
@@ -416,6 +432,7 @@ function buildLaunchSpec(profile, ctx = {}) {
     entrypointPath = null,
     defaultCwd = undefined,
     exists = fs.existsSync,
+    pwsh = 'pwsh.exe',
   } = ctx;
   const workflowSession = ctx.workflowSession === true;
   const sessionMode = ctx.sessionMode === 'direct-agent' ? 'direct-agent' : 'account-shell';
@@ -445,14 +462,14 @@ function buildLaunchSpec(profile, ctx = {}) {
         throw new Error('Direct-agent lifecycle helper is unavailable');
       }
       const notifyCommand = [
-        'pwsh.exe', '-NoLogo', '-NoProfile', '-File', notifyScriptPath,
+        pwsh, '-NoLogo', '-NoProfile', '-File', notifyScriptPath,
       ];
       const routedTarget = `${ROUTED_PROFILE_PREFIX}${profile.alias}`;
       if (profile.id !== routedTarget) {
         throw new Error('Routed profile identity does not match its account alias');
       }
       return {
-        file: 'pwsh.exe',
+        file: pwsh,
         args: [
           '-NoLogo', '-NoProfile', '-File', script,
           'target', 'run', routedTarget, '--',
@@ -476,7 +493,7 @@ function buildLaunchSpec(profile, ctx = {}) {
     return {
       // The entrypoint constructs the child environment itself; we pass ours
       // through untouched rather than second-guessing its routing.
-      file: 'pwsh.exe',
+      file: pwsh,
       args: ['-NoLogo', '-NoProfile', '-File', script, 'codex', 'shell', profile.alias],
       env: { ...baseEnv },
       cwd: profile.cwd || defaultCwd,
@@ -569,6 +586,7 @@ module.exports = {
   deleteLocalProfile,
   resolveEntrypointPath,
   entrypointScript,
+  resolvePwsh,
   sanitizeDoctorReport,
   parseDoctorOutput,
   discoverRoutedProfiles,

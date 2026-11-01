@@ -135,6 +135,7 @@ async function hostFixture(t, { limits = {}, adapters = null, hostOptions = {} }
     presentation,
     jobs: settledJobs,
     account: () => TEST_SID,
+    launcherContained: () => true,
     limits: { resultGraceMs: 1_500, ...limits },
     ...hostOptions,
   });
@@ -924,6 +925,13 @@ test('remote starts are off without a policy, and a retry after expiry never sta
   host._jobs = null;
   assert.deepEqual(remoteStart(host, req), { ok: false, error: 'process-ownership-unavailable' });
   host._jobs = jobs;
+  // A launcher whose children leave every job (MSIX PowerShell) is not ownership either.
+  const contained = host._launcherContained;
+  host._launcherContained = () => false;
+  assert.deepEqual(remoteStart(host, req), { ok: false, error: 'process-ownership-unavailable' });
+  host._launcherContained = () => { throw new Error('unreadable'); };
+  assert.deepEqual(remoteStart(host, req), { ok: false, error: 'process-ownership-unavailable' });
+  host._launcherContained = contained;
   assert.deepEqual(remoteStart(host, req, authorization(req, { destination: 'target-two' })), { ok: false, error: 'wrong-destination' });
   const ack = remoteStart(host, req);
   assert.equal(ack.ok, true);

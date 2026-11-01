@@ -28,8 +28,12 @@ the product story; this file keeps the history.
   kill-on-close Job Objects. A fourth review showed that adopting a process
   after spawn is still not ownership, and the cause of Codex starting outside
   the job turned out to be PowerShell 7 installed from the Microsoft Store,
-  whose children break away from every job: the process-ownership gate stays
-  open until the router runs on a non-packaged PowerShell. Codex 0.165.0 was
+  whose children break away from every job. Routed sessions now start
+  through the MSI PowerShell 7 whenever it is installed, regardless of PATH
+  order, and `remote-start` is refused on a host without it; with it, a live
+  Codex turn ran entirely inside its job. The build overrides `glob` and
+  `minimatch` to their patched majors (GHSA-3g3m-2fjr-6pw4,
+  GHSA-g3hv-75wg-m249) until `@electron/asar` moves to them. Codex 0.166.0 was
   re-qualified under the stricter boundary;
   its locked-session qualification is still to be run with nobody at the
   console. The relay from another machine and the controller view are not
