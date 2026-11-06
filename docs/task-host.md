@@ -500,6 +500,21 @@ and the owner-only ingress token); the relay below carries it over Matrix.
 Profiles are `primary` (2 concurrent, 2 h, 24 a day), `secondary` (1, 1 h, 12)
 and `light` (1, 20 min, 4).
 
+### Starting a target host
+
+The task host runs only inside the owner's logged-on desktop session, and
+only when the app's settings have `"taskHostEnabled": true`. A target that
+nobody is sitting at starts the app with `electron . --background` (or the
+packaged app with `--background`): it goes to the tray without showing or
+focusing the main window, and the tray icon opens it as usual. Starting it
+again with `--quit` asks the running instance to quit through the same
+cleanup as the tray's Quit (a host reads qualification receipts when it
+starts, so it is restarted after a new one is written). From another
+machine, the start is placed in that session by an on-demand scheduled task
+registered for the logged-on owner with an interactive logon and a limited
+token, run in that session; nothing logs in, unlocks or switches sessions,
+and a target with nobody logged on cannot be started this way.
+
 ### The relay over Matrix
 
 A controller reaches the target through Matrix's existing SSH route; the

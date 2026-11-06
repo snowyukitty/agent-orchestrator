@@ -13,8 +13,11 @@
 // exact Codex version observed. When any axis fails, no receipt is written.
 //
 // With `awaitLocked`, it first waits for the owner to lock the workstation
-// and records a locked-session qualification only when the session was
-// locked both when the task was admitted and when it was collected.
+// and records a locked-session qualification only when the session stayed
+// locked from admission through collection: locked at both ends, locked at
+// every poll in between, every poll answered, and the host's count of
+// departures from the locked state (event-driven, so a quick unlock and
+// relock is seen too) unchanged. The whole run has its own deadline.
 
 const fs = require('fs');
 const path = require('path');
@@ -32,6 +35,8 @@ const TERMINAL = new Set(['needs-review', 'failed-to-start', 'interrupted', 'unc
 // The harmless task takes well under a minute; a stalled turn should not burn quota.
 const TURN_TIMEOUT_MS = 3 * 60_000;
 const LOCK_WAIT_MS = 10 * 60_000;
+// From admission to a written result: the turn, Stop, host checks, collection.
+const RUN_DEADLINE_MS = 15 * 60_000;
 
 const INSTRUCTION = [
   'Create a file named fixture-output.txt in the current working directory',
@@ -76,6 +81,7 @@ async function runTaskHostQualification({
     gitEffects: 'edits-only',
   });
 
+  const unlocksAtAdmission = awaitLocked ? (await call({ op: 'capabilities' })).sessionUnlocks : null;
   const ack = await call({ op: 'start', request, digest: taskRequestDigest(request) });
   report('the live launch was accepted', ack.ok && ack.state === 'accepted', ack.ok ? '' : ack.error);
   if (!ack.ok) return { qualified: false, shortfall: ['accepted'] };
@@ -83,9 +89,26 @@ async function runTaskHostQualification({
   const started = Date.now();
   let status;
   let stopSent = false;
+  // Locked-session evidence across the whole run, not only at its ends.
+  let stayedLocked = awaitLocked;
+  const watchLock = async () => {
+    if (!awaitLocked) return;
+    try {
+      const caps = await call({ op: 'capabilities' });
+      if (caps.session !== 'locked' || caps.sessionUnlocks !== unlocksAtAdmission) stayedLocked = false;
+    } catch (_error) {
+      stayedLocked = false; // an unanswered poll is a gap, never assumed locked
+    }
+  };
   for (;;) {
     status = await call({ op: 'status', launchId: request.launchId });
+    await watchLock();
     if (TERMINAL.has(status.state)) break;
+    if (Date.now() - started > RUN_DEADLINE_MS) {
+      log('[TaskHostQualify] NOT qualified: the run did not finish within its deadline. No receipt was written.');
+      if (!stopSent) await call({ op: 'stop', launchId: request.launchId }).catch(() => {});
+      return { qualified: false, shortfall: ['deadline'] };
+    }
     if (!stopSent && Date.now() - started > TURN_TIMEOUT_MS) {
       stopSent = true;
       log('[TaskHostQualify] no completion within the turn timeout; stopping the task');
@@ -94,8 +117,11 @@ async function runTaskHostQualification({
     await new Promise(resolve => setTimeout(resolve, 1_000));
   }
   const result = await call({ op: 'result', launchId: request.launchId });
-  const sessionAtEnd = (await call({ op: 'capabilities' })).session;
-  const session = result.admission?.session === 'locked' && sessionAtEnd === 'locked' ? 'locked' : 'unlocked';
+  const end = await call({ op: 'capabilities' });
+  const sessionAtEnd = end.session;
+  await watchLock();
+  const session = result.admission?.session === 'locked' && sessionAtEnd === 'locked' &&
+    (!awaitLocked || stayedLocked) ? 'locked' : 'unlocked';
   const ownerCheckoutClean = execFileSync('git', ['status', '--porcelain'], {
     cwd: repo, encoding: 'utf8', windowsHide: true,
   }).trim() === '';
@@ -106,7 +132,8 @@ async function runTaskHostQualification({
     `${status.state}${status.reason ? `/${status.reason}` : ''}, ending ${status.ending ?? 'none'}`);
   report('the provider version was observed through the route', !!providerVersion, providerVersion || 'unknown');
   log(`[TaskHostQualify] receipts for other turns in the provider process: ${result.lifecycle?.uncorrelatedReceipts || 0}`);
-  log(`[TaskHostQualify] session at admission ${result.admission?.session ?? 'unknown'}, at collection ${sessionAtEnd}`);
+  log(`[TaskHostQualify] session at admission ${result.admission?.session ?? 'unknown'}, at collection ${sessionAtEnd}` +
+    (awaitLocked ? `, locked throughout ${stayedLocked ? 'yes' : 'no'}` : ''));
   const ownership = result.collection?.ownership;
   log(`[TaskHostQualify] provider job ${ownership?.job ? `held (${ownership.childrenAdopted} children adopted late)` : `unavailable (${ownership?.reason ?? 'unknown'})`}, processes at the boundary ${ownership?.aliveAtBoundary ?? 'unknown'}, outside the job ${ownership?.escapedAtBoundary ?? 'unknown'}${ownership?.escapedNames ? ` (${ownership.escapedNames.join(', ')})` : ''}, surviving ${ownership?.survivors ?? 'unknown'}`);
   if (awaitLocked) report('the turn ran in a locked session', session === 'locked');

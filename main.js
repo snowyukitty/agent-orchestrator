@@ -152,6 +152,10 @@ let taskHostJobs = null;    // Job Objects that own task providers and checks
 let testDataCleanupScheduled = false;
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 const isDev = process.argv.includes('--dev');
+// Start to the tray without showing or focusing the main window: for a host
+// started for unattended remote tasks while the owner may be using the
+// desktop. The tray icon opens the window as usual.
+const startInBackground = process.argv.includes('--background');
 let selfTestTimer = null;
 
 function isDirectory(dir) {
@@ -551,6 +555,10 @@ function createWindow() {
   // Show window only after content is fully rendered
   mainWindow.once('ready-to-show', () => {
     if (promoCapture) return;
+    if (startInBackground) {
+      console.log('[Main] Started in the background; the tray opens the window');
+      return;
+    }
     mainWindow.show();
     mainWindow.focus();
     console.log('[Main] Window shown and focused');
@@ -688,7 +696,17 @@ function createTray() {
 if (!gotSingleInstanceLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    // `--quit` asks the running instance to quit through the same sequenced
+    // cleanup as the tray's Quit (used to restart an unattended host).
+    if (Array.isArray(argv) && argv.includes('--quit')) {
+      console.log('[Main] Second instance asked this one to quit');
+      app.isQuitting = true;
+      app.quit();
+      return;
+    }
+    // Another background start must not surface the window either.
+    if (Array.isArray(argv) && argv.includes('--background')) return;
     console.log('[Main] Second instance requested; focusing existing window');
     showMainWindow();
   });
@@ -937,6 +955,7 @@ async function startTaskHost({ fixture = false, qualify = false } = {}) {
   let host = null;
   taskHostSystem = createSystemObserver({
     onChange: (now, previous) => {
+      if (host && now.session !== 'locked') host.sessionLeftLocked();
       if (!host || now.power === 'ac' || now.power === previous?.power) return;
       const stopped = host.powerChanged();
       if (stopped) console.warn(`[TaskHost] power ${now.power}: stopped ${stopped} task(s)`);
@@ -977,6 +996,9 @@ async function startTaskHost({ fixture = false, qualify = false } = {}) {
     for (const event of ['lock-screen', 'unlock-screen', 'on-battery', 'on-ac']) {
       powerMonitor.on(event, () => system.refresh());
     }
+    // Counted at once, so an unlock followed quickly by a relock is still seen
+    // even if no poll of the session lands between the two.
+    powerMonitor.on('unlock-screen', () => host.sessionLeftLocked());
   } catch (_error) {
     console.warn('[TaskHost] power events unavailable');
   }

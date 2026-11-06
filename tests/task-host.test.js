@@ -966,6 +966,15 @@ test('remote starts are off without a policy, and a retry after expiry never sta
     { ok: false, error: 'authorization-expired' });
 });
 
+test('every departure from the locked session is counted for the locked qualification', async (t) => {
+  const { host } = await hostFixture(t);
+  const before = host.capabilities().sessionUnlocks;
+  assert.equal(typeof before, 'number');
+  host.sessionLeftLocked();
+  host.sessionLeftLocked();
+  assert.equal(host.capabilities().sessionUnlocks, before + 2, 'an unlock and relock between two reads still shows');
+});
+
 test('the profile limits concurrency and starts per day', async (t) => {
   const { host, base } = await hostFixture(t);
   writePolicy(host, { profile: 'light' });
@@ -1173,11 +1182,20 @@ test('a cancelled check is never started, and an exited check root is never kill
   };
   const jobChild = fakeCheckChild();
   const jobAbort = new AbortController();
+  let jobSpawned = false;
   const withJob = runCheck({
     worktree: repo, base, check, tree: 'x', signal: jobAbort.signal, jobs, jobKey: 'launch.check0',
-    spawnImpl: (file) => (file === 'taskkill' ? assert.fail('no taskkill with a job') : jobChild),
+    spawnImpl: (file) => {
+      if (file === 'taskkill') assert.fail('no taskkill with a job');
+      jobSpawned = true;
+      return jobChild;
+    },
   });
-  await new Promise(resolve => setTimeout(resolve, 100));
+  // Abort only once the check has spawned. runCheck prepares asynchronously
+  // first, and under a loaded parallel run a fixed delay could abort before
+  // the spawn: the check is then correctly never started, and no job exists
+  // to end (this was the intermittent failure).
+  await waitFor(() => jobSpawned);
   jobAbort.abort();
   const jobRecord = await withJob;
   assert.deepEqual(ended, ['launch.check0']);

@@ -91,6 +91,10 @@ class TaskHost {
     this._jobs = jobs;
     this._account = account;
     this._launcherContained = launcherContained;
+    // How many times the session has been seen leaving the locked state.
+    // A locked-session qualification requires it unchanged from admission to
+    // collection, so an unlock and relock in between cannot pass for locked.
+    this._unlockCount = 0;
     this._suspending = false;
     this._allowUnqualified = new Set(allowUnqualified);
     this._log = log || (() => {});
@@ -161,6 +165,7 @@ class TaskHost {
       expiresAt: new Date(now + this._limits.capabilityTtlMs).toISOString(),
       admission: this._closed ? 'closed' : 'open',
       session: this._session(),
+      sessionUnlocks: this._unlockCount,
       power: this._power(),
       policy: policy.status === 'valid'
         ? { status: 'valid', revision: policy.revision, hostId: policy.hostId, profile: policy.profile, remoteStarts: policy.remoteStarts }
@@ -220,6 +225,11 @@ class TaskHost {
       case 'show': return this.show(command.launchId);
       default: return { ok: false, error: 'unknown-op' };
     }
+  }
+
+  /** Record that the session was observed unlocked (or not locked) again. */
+  sessionLeftLocked() {
+    this._unlockCount += 1;
   }
 
   /** The session state, read now; anything unexpected is unknown. */
