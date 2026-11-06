@@ -904,8 +904,12 @@ test('a remote authorization names this host and the exact request, and expires 
   assert.equal(check(auth({ destination: 'target-two' })), 'wrong-destination');
   assert.equal(check(auth({ requestDigest: 'b'.repeat(64) })), 'digest-mismatch');
   assert.equal(check(auth({ expiresAt: '2026-10-30T11:59:59.000Z' })), 'authorization-expired');
-  assert.equal(check(auth({ issuedAt: '2026-10-30T12:00:10.000Z', expiresAt: '2026-10-30T12:00:30.000Z' })),
-    'authorization-expired', 'issued too far in the future');
+  assert.equal(check(auth({ issuedAt: '2026-10-30T12:00:00.001Z', expiresAt: '2026-10-30T12:00:30.000Z' })),
+    'authorization-expired', 'issued in this host\u2019s future, by any amount');
+  assert.equal(check(auth({ issuedAt: '2026-10-30T12:00:00.000Z', expiresAt: '2026-10-30T12:00:30.000Z' })), null,
+    'issued at this instant');
+  assert.equal(check(auth({ expiresAt: '2026-10-30T12:00:00.000Z' })), 'authorization-expired',
+    'expiresAt itself is outside the window');
   assert.equal(check(auth({ expiresAt: '2026-10-30T12:00:51.000Z' })), 'invalid-authorization', 'longer than 60 s');
   assert.equal(check(auth({ extra: 1 })), 'invalid-authorization');
   assert.equal(check(auth({ issuedAt: '2026-10-30 11:59:50' })), 'invalid-authorization');
@@ -940,6 +944,13 @@ test('remote starts are off without a policy, and a retry after expiry never sta
   const result = host.result(req.launchId);
   assert.equal(result.origin, 'remote');
   assert.deepEqual(result.admission, { session: 'unlocked', power: 'ac', policy: { revision: 1, profile: 'primary' } });
+  // What a controller reconciles an uncertain start against.
+  const status = host.status(req.launchId);
+  assert.equal(status.requestDigest, authorization(req).requestDigest);
+  assert.equal(status.hostId, 'target-one');
+  assert.equal(status.origin, 'remote');
+  assert.equal(host.list().hostId, 'target-one');
+  assert.ok(!('requestDigest' in host.list().launches[0]), 'list carries no digest');
   const expired = authorization(req, {
     issuedAt: new Date(Date.now() - 120_000).toISOString(),
     expiresAt: new Date(Date.now() - 90_000).toISOString(),
@@ -1257,7 +1268,11 @@ test('going off AC ends a host check that is already running', async (t) => {
   const req = request({ baseRevision: base, checks: [{ kind: 'npm-script', name: 'slow' }, { kind: 'npm-script', name: 'test' }] });
   startTask(host, req);
   await waitFor(() => host.status(req.launchId).state === 'collecting', 60_000);
-  await new Promise(resolve => setTimeout(resolve, 2_000)); // the slow check is running
+  // Wait for the slow check itself, not a fixed delay: on a loaded machine
+  // evidence collection can outlast one, and power would then go before the
+  // check loop starts (checks skipped, none cancelled).
+  await waitFor(() => !!host._launches.get(req.launchId).checkAbort, 60_000); // the check loop has begun
+  await new Promise(resolve => setTimeout(resolve, 1_500)); // npm has started the slow script
   power = 'battery';
   const started = Date.now();
   host.powerChanged();

@@ -34,7 +34,6 @@ const PROFILES = Object.freeze({
 
 const MAX_AUTHORIZATION_MS = 60_000;
 // The controller's clock may run slightly ahead of this host's.
-const MAX_CLOCK_SKEW_MS = 5_000;
 const HOST_ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
 const SID = /^S-1-\d+(?:-\d+){1,14}$/;
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -108,7 +107,10 @@ function checkRemoteAuthorization(authorization, { policy, digest, account, now 
     expires - issued > MAX_AUTHORIZATION_MS) {
     return 'invalid-authorization';
   }
-  if (issued > now + MAX_CLOCK_SKEW_MS || now > expires) return 'authorization-expired';
+  // Valid on this host's clock from issuedAt up to, not including, expiresAt.
+  // There is no extra skew allowance: the controller mints from a fresh
+  // sample of this host's clock (`capabilities.observedAt`).
+  if (issued > now || now >= expires) return 'authorization-expired';
   // `account` is the SID of the token the host runs under, read from Windows.
   if (typeof account !== 'string' || account !== policy.ownerSid) {
     return 'session-owner-mismatch';

@@ -874,12 +874,36 @@ class TaskHost {
         workspace: launch.record.workspace,
         origin: launch.record.origin || 'local',
       }));
-    return { ok: true, hostIncarnationId: this.hostIncarnationId, observedAt: new Date().toISOString(), launches };
+    return {
+      ok: true,
+      hostId: this._policyHostId(),
+      hostIncarnationId: this.hostIncarnationId,
+      observedAt: new Date().toISOString(),
+      launches,
+    };
   }
 
+  /** The enrolled host identity from policy.json, or null without a valid policy. */
+  _policyHostId() {
+    const policy = readPolicy(this.policyFile);
+    return policy.status === 'valid' ? policy.hostId : null;
+  }
+
+  /**
+   * One launch's public status, plus what a controller needs to reconcile an
+   * uncertain remote start: the digest of the request this host accepted
+   * under that launch ID, and which host answered.
+   */
   status(launchId) {
     const launch = this._launches.get(launchId);
-    return launch ? { ok: true, ...this._publicStatus(launch) } : { ok: false, error: 'unknown-launch' };
+    if (!launch) return { ok: false, error: 'unknown-launch' };
+    return {
+      ok: true,
+      ...this._publicStatus(launch),
+      hostId: this._policyHostId(),
+      origin: launch.record.origin || 'local',
+      requestDigest: launch.record.requestDigest,
+    };
   }
 
   result(launchId) {

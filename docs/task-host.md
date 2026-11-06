@@ -483,14 +483,13 @@ It is refused `remote-starts-disabled` unless `policy.json` enables remote
 starts, `wrong-destination` unless it names this host's `hostId`,
 `digest-mismatch` unless it binds the exact request, `invalid-authorization`
 for any other shape or a validity longer than 60 seconds,
-`authorization-expired` once expired (or issued more than 5 seconds in this
-host's future), and `session-owner-mismatch` unless the host runs as the
+`authorization-expired` once expired (or issued in this host's future), and
+`session-owner-mismatch` unless the host runs as the
 enrolled account, compared by SID (two accounts can share a user name; an
 unreadable SID never matches). A retry of an accepted launch ID returns that launch's
 observation even after expiry and never starts another task. Who may send the
 request is the transport's decision (the owner's approved route to the target
-and the owner-only ingress token); the relay itself is not part of this
-repository.
+and the owner-only ingress token); the relay below carries it over Matrix.
 
 ```json
 { "schema": 1, "kind": "agent-orchestrator.remote-task-policy", "revision": 1,
@@ -500,6 +499,78 @@ repository.
 
 Profiles are `primary` (2 concurrent, 2 h, 24 a day), `secondary` (1, 1 h, 12)
 and `light` (1, 20 min, 4).
+
+### The relay over Matrix
+
+A controller reaches the target through Matrix's existing SSH route; the
+ingress stays bound to 127.0.0.1 and its token never leaves the target. The
+controller runs:
+
+```powershell
+node scripts/task-host-remote.mjs start  --binding <binding.json> --request <request.json>
+node scripts/task-host-remote.mjs status --binding <binding.json> --launch <launchId>
+node scripts/task-host-remote.mjs list   --binding <binding.json>
+```
+
+The binding is the owner's private file; it names Matrix and the target, never
+an address, SSH option, credential or token:
+
+```json
+{ "schema": 1, "kind": "agent-orchestrator.remote-binding",
+  "matrix": ["C:\\Users\\<you>\\.local\\bin\\matrix.exe"],
+  "node": "<matrix node id>", "workspace": "<named workspace of the target's checkout>",
+  "hostId": "<the target policy's hostId>" }
+```
+
+Optional `hostsFile` selects a Matrix map, and `dataDir` pins the target's
+task-host directory if the SSH logon's `%APPDATA%` differs from the owner's.
+Each step is one `matrix remote exec … --json --timeout 20` running
+`node scripts/task-host-client.mjs` in that checkout on the target:
+
+1. **`capabilities`** must name the binding's `hostId`. Its `observedAt` is the
+   target host's clock, sampled within 5 seconds (controller monotonic time).
+   An advisory preflight refuses locally what the host would certainly refuse
+   (remote starts off, not on AC, provider unqualified for a locked session,
+   unknown workspace).
+2. **A private attempt checkpoint** (launch ID, digest, destination; no task
+   text) is written under `%APPDATA%\agent-orchestrator\task-host-remote`
+   before anything is sent. A launch ID with a checkpoint is never sent again.
+3. **The authorization is minted from the target clock**:
+   `issuedAt = observedAt + elapsed since the sample − 1 s`, valid 60 s. The
+   host accepts it from `issuedAt` up to, not including, `expiresAt`, with no
+   further skew allowance, so the controller's own clock does not matter.
+4. **One transmission**: `{ request, digest, authorization }` goes as Matrix's
+   bounded `--stdin-file -` body (at most 128 KiB, never on a command line) to
+   `task-host-client.mjs remote-start --stdin`. The target client reads it to
+   EOF within 5 seconds, parses it strictly, requires both digests to equal
+   the validated request's digest (never replacing a wrong one), and sends a
+   command it constructs itself with the locally read token.
+5. **Outcome**: `accepted` needs an acknowledgement for this launch ID;
+   `refused` only a known pre-admission code; anything else (SSH exit 255,
+   timeout, truncation, a lost answer after the write, an unknown code) is
+   `unknown`. An unknown start is reconciled by one `status` read of the same
+   launch ID, which settles it only if the stored request digest matches.
+   Not-found leaves it unknown: the relay never mints another authorization or
+   launch ID to resolve it.
+
+`status` returns the public status plus `hostId`, `origin` and the stored
+`requestDigest`. The target client's `list` is the public task-list document a
+controller view displays:
+
+```json
+{ "ok": true, "schema": 1, "kind": "agent-orchestrator.task-list", "hostId": "…",
+  "hostIncarnationId": "…", "observedAt": "…", "more": false,
+  "launches": [ { "launchId": "…", "origin": "remote", "acceptedHostIncarnationId": "…",
+                  "phase": "running", "reasonCode": null, "acceptedAt": "…", "updatedAt": "…" } ] }
+```
+
+Phases are `accepted`, `running` (preparing, window, spawning, running,
+collecting), `needs-review`, `failed` (failed to start, interrupted) and
+`unknown` for anything else. Active launches come first; at most 64 rows and
+64 KiB, with `more` set when rows were left out. It carries no task ID,
+provider, route, workspace, instruction, digest or output. The remote-facing
+client operations print only fixed error codes; an answer lost after the
+command was written is `ingress-answer-unavailable`, never a refusal.
 
 ## Verification
 

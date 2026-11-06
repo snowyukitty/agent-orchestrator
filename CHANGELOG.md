@@ -35,6 +35,11 @@ the product story; this file keeps the history.
   `minimatch` to their patched majors (GHSA-3g3m-2fjr-6pw4,
   GHSA-g3hv-75wg-m249) until `@electron/asar` moves to them. Codex 0.166.0 was
   re-qualified under the stricter boundary;
+  the relay from a controller is built: `scripts/task-host-remote.mjs` starts
+  a task on another machine over Matrix's SSH route, sending the request once
+  as a bounded private stdin body, with an authorization minted from the
+  target's own clock, and reconciles a lost answer by reading status, never
+  by sending again (design settled with `codex:default` through ATD);
   its locked-session qualification is still to be run with nobody at the
   console. The relay from another machine and the controller view are not
   built yet.
