@@ -1,6 +1,6 @@
 # Unattended remote starts (W2b policy)
 
-Status: **host side implemented; not enabled.** This records when a target's
+Status: **enabled for atlas → npc since 2026-11-08** (npc's `policy.json` revision 2); every other direction is off.
 task host may start a task requested from another of the owner's machines,
 with nobody at the target. It extends the [task host](task-host.md) contract;
 nothing here is enabled until the gates in [Before the first unattended start](#before-the-first-unattended-start)
@@ -116,12 +116,22 @@ Implemented in the task host (2026-10-31), with the exact codes and formats in
 |---|---|
 | 1. Fresh, target-bound requests | Host side done: `remote-start`, `policy.json` with `hostId`, `ownerSid` and `remoteStarts`, 60 s validity with no future skew, retry-safe. Relay built (2026-11-06): `scripts/task-host-remote.mjs` mints the authorization from a fresh sample of the target's clock, checkpoints the attempt, sends the body once over Matrix's bounded `--stdin-file`, and reconciles an uncertain answer by status only ([task-host.md](task-host.md#the-relay-over-matrix)). Bridge checked live atlas → npc the same day, with no task host running there: the SSH logon is the owner account and its `%APPDATA%` is the owner's, exact bytes reach the target client through Matrix's stdin carrier, a malformed body is refused before the ingress, and a start against the absent host stops at preflight with nothing sent. The same day npc's host was started remotely in the owner's session (tray only, loopback ingress, session 1) and the relay read its task list; a start was refused at preflight with `remote-starts-disabled`, which stays set until the locked qualification passes. |
 | 2. Process ownership | **Met where the router runs on the MSI PowerShell 7.** The provider and each host check run in a kill-on-close Job Object, strays are adopted, and the job must be empty (proven with a fixture that leaves a detached process behind, and on live Codex turns). PowerShell 7 from the Microsoft Store is an MSIX package whose children break away from every job, so Codex started outside the job and was only adopted afterwards. The owner installed the MSI build (2026-11-01); the host now starts routed sessions through `%ProgramFiles%\PowerShell\7\pwsh.exe` whatever PATH finds first, and the next live Codex turn needed no late adoption at all (six processes in the job, none outside, none surviving). The job is still joined just after spawn (see Deviations). `remote-start` is refused with `process-ownership-unavailable` when no ownership helper is available or no MSI PowerShell 7 is installed, so a host still on the Store build cannot accept one. |
-| 3. Session observation | Done: read from Windows (WTS) through a helper, stale answers refused; `provider-session-unqualified` without a locked qualification. A locked qualification now requires the lock to hold throughout: every poll locked and the host's count of departures from the locked state (Electron's unlock event and the WTS observer) unchanged. Qualifications are per target: npc's Codex 0.166.0 unlocked qualification passed on 2026-11-06 (run remotely in npc's session; every axis held, seven processes in the job, none outside or surviving). **npc's locked-session qualification is still open**; it needs npc to be locked while nobody is using it. atlas's own qualifications matter only when atlas is a target. |
+| 3. Session observation | Done: read from Windows (WTS) through a helper, stale answers refused; `provider-session-unqualified` without a locked qualification. A locked qualification requires the lock to hold throughout: every poll locked and the host's count of departures from the locked state (Electron's unlock event and the WTS observer) unchanged; a receipt names only the session actually observed. Qualifications are per target. npc: Codex 0.166.0 unlocked (2026-11-06) and **Codex 0.167.0 locked (2026-11-08, locked from admission to collection, seven processes in the job, none outside or surviving)**, both run remotely in npc's session. atlas's own qualifications matter only when atlas is a target. |
 | 4. Power | Done: AC only (an unknown AC status is not AC), `prevent-app-suspension` while any task is active, stop on battery or unknown power and cancel a running host check, `host-suspending`. |
-| 5. Owner-visible activity | Host side done: `list`, and the target client's public task-list projection (phases, no content, bounded). The Yukimado controller view is not built yet. |
+| 5. Owner-visible activity | Host side done: `list`, and the target client's public task-list projection (phases, no content, bounded). Yukimado's Machines page watches it every 30 s, keeping a failed read as last known (branch `feature/remote-task-watch`, not yet deployed); until then the relay's `list` and `status` show the same. |
 | 6. Quiet windows | Done: task windows never take focus on open; title and state line carry no route alias or instruction. |
 
 Per-host profiles are implemented as `primary`, `secondary` and `light`.
+
+**First unattended start (2026-11-08).** With npc locked, on AC, and nobody
+at it, atlas sent one harmless task through the relay into a disposable
+repository registered on npc: accepted, running, then needs-review with a
+turn-complete receipt; admission recorded `session=locked`, `origin=remote`;
+the provider's job held six processes at the boundary, none outside, none
+surviving; the host's own `npm test` check passed; the diff was one new
+one-line file, complete, with no commit. npc's host was started (and later
+restarted with `--quit` to read the new receipt) remotely in the owner's
+session, tray only.
 
 An independent review by `codex:default` through ATD (advisory,
 2026-10-31, `REQUEST_CHANGES`) found six defects in the first implementation,

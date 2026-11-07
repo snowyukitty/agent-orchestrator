@@ -17,7 +17,9 @@
 // locked from admission through collection: locked at both ends, locked at
 // every poll in between, every poll answered, and the host's count of
 // departures from the locked state (event-driven, so a quick unlock and
-// relock is seen too) unchanged. The whole run has its own deadline.
+// relock is seen too) unchanged. Without it, the run qualifies the unlocked
+// session only if the session was unlocked at admission and at collection.
+// The whole run has its own deadline.
 
 const fs = require('fs');
 const path = require('path');
@@ -120,8 +122,13 @@ async function runTaskHostQualification({
   const end = await call({ op: 'capabilities' });
   const sessionAtEnd = end.session;
   await watchLock();
-  const session = result.admission?.session === 'locked' && sessionAtEnd === 'locked' &&
-    (!awaitLocked || stayedLocked) ? 'locked' : 'unlocked';
+  // The receipt names the session actually observed, never one assumed from
+  // the flag: a run without --await-locked that was in fact locked, or one
+  // whose session changed, records no session at all (no receipt).
+  const admitted = result.admission?.session;
+  const session = awaitLocked
+    ? (admitted === 'locked' && sessionAtEnd === 'locked' && stayedLocked ? 'locked' : null)
+    : (admitted === 'unlocked' && sessionAtEnd === 'unlocked' ? 'unlocked' : null);
   const ownerCheckoutClean = execFileSync('git', ['status', '--porcelain'], {
     cwd: repo, encoding: 'utf8', windowsHide: true,
   }).trim() === '';
@@ -144,6 +151,7 @@ async function runTaskHostQualification({
   if (status.state !== 'needs-review') shortfall.unshift('needs-review');
   if (!providerVersion) shortfall.push('providerVersion');
   if (awaitLocked && session !== 'locked') shortfall.push('lockedSession');
+  if (!awaitLocked && session !== 'unlocked') shortfall.push('unlockedSession');
   if (shortfall.length) {
     // The throwaway user data is removed at exit; keep the failed turn's
     // terminal transcript privately beside the receipts so it can be read.
