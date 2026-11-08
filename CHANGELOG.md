@@ -39,10 +39,13 @@ the product story; this file keeps the history.
   a task on another machine over Matrix's SSH route, sending the request once
   as a bounded private stdin body, with an authorization minted from the
   target's own clock, and reconciles a lost answer by reading status, never
-  by sending again (design settled with `codex:default` through ATD);
-  its locked-session qualification is still to be run with nobody at the
-  console. The relay from another machine and the controller view are not
-  built yet.
+  by sending again (design settled with `codex:default` through ATD). It
+  refuses locally, as never sent, when the local Matrix cannot carry a body
+  (`--stdin-file`, snowy-matrix 608e2be). Remote starts are enabled for
+  atlas → npc since 2026-11-08: npc qualified Codex 0.167.0 in a locked
+  session, the first unattended start ran there to needs-review with its
+  host check passing, and Yukimado 0.18.4 and later watch npc's remote
+  launches on the controller's Machines page.
 
 - **The task host runs real Codex tasks after a live qualification**:
   `npm run qualify:task-host -- --confirm-live` runs one harmless,

@@ -255,9 +255,11 @@ function capabilities({ hostTime, session = 'unlocked', remoteStarts = 'enabled'
 }
 
 /** A fake Matrix: answers by client op, records every call and body. */
-function fakeMatrix(handlers) {
+function fakeMatrix(handlers, { help = '  --stdin-file STDIN_FILE\n' } = {}) {
   const calls = [];
   const run = async (argv, { input = null } = {}) => {
+    // The local help probe never reaches the target; it is not a client call.
+    if (argv.at(-1) === '--help') return { started: true, stdout: Buffer.from(help) };
     const op = argv[argv.indexOf('scripts/task-host-client.mjs') + 1];
     calls.push({ op, argv, input });
     return handlers[op]({ argv, input, calls });
@@ -297,6 +299,19 @@ test('the binding is strict and Matrix gets an argv with a named workspace, neve
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('a Matrix that cannot carry a body is refused before anything reaches the target', async (t) => {
+  const f = relayFixture();
+  t.after(f.cleanup);
+  const fake = fakeMatrix({
+    capabilities: () => assert.fail('must not contact the target'),
+    'remote-start': () => assert.fail('must not send'),
+  }, { help: '  --cwd CWD\n  --stdin-files-are-not-this\n' });
+  const req = request();
+  const r = await startRemote({ binding: BINDING, request: req, attemptsDir: f.dir, run: fake.run, monotonic: f.monotonic });
+  assert.deepEqual([r.outcome, r.reason], ['not-sent', 'matrix-lacks-body-input']);
+  assert.equal(fs.existsSync(path.join(f.dir, `${req.launchId}.json`)), false);
 });
 
 test('the authorization is minted from the target clock, never later than its now', () => {

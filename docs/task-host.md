@@ -542,6 +542,11 @@ task-host directory if the SSH logon's `%APPDATA%` differs from the owner's.
 Each step is one `matrix remote exec … --json --timeout 20` running
 `node scripts/task-host-client.mjs` in that checkout on the target:
 
+0. **The local Matrix must carry a body.** Its own `remote exec --help` must
+   list `--stdin-file` (snowy-matrix 608e2be or later). An older Matrix would
+   reject the option before SSH starts, which its observation could not tell
+   apart from a lost answer, so the start is refused locally as `not-sent`
+   with `matrix-lacks-body-input`. Nothing reaches the target.
 1. **`capabilities`** must name the binding's `hostId`. Its `observedAt` is the
    target host's clock, sampled within 5 seconds (controller monotonic time).
    An advisory preflight refuses locally what the host would certainly refuse

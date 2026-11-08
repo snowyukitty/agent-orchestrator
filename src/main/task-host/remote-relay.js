@@ -207,6 +207,18 @@ function writeAttempt(dir, record, { exclusive = false } = {}) {
   fs.renameSync(temp, file);
 }
 
+/**
+ * Ask the local Matrix whether `remote exec` can carry a body, from its own
+ * help text. Nothing reaches the target. A Matrix without `--stdin-file` would
+ * reject the argument before SSH starts, which the observation alone could not
+ * tell apart from a lost answer, so it is refused here as never sent.
+ */
+async function transportCarriesBody(binding, { run }) {
+  const help = await run([...binding.matrix, 'remote', 'exec', '--help']);
+  if (!help.started || !help.stdout) return false;
+  return /(^|\s)--stdin-file(\s|$)/m.test(help.stdout.toString('utf8'));
+}
+
 /** Read the target's capabilities with a timed clock sample. */
 async function sample(binding, { run, monotonic }) {
   const m0 = monotonic();
@@ -302,6 +314,7 @@ async function startRemote({
     // A launch ID is sent at most once. Reconcile it with `status` instead.
     return result('not-sent', { reason: 'attempt-exists' });
   }
+  if (!await transportCarriesBody(binding, { run })) return result('not-sent', { reason: 'matrix-lacks-body-input' });
   const first = await sample(binding, { run, monotonic });
   if (first.refusal) return result('not-sent', { reason: first.refusal });
   const local = preflightRefusal(first.caps, request);
