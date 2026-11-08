@@ -212,11 +212,13 @@ function writeAttempt(dir, record, { exclusive = false } = {}) {
  * help text. Nothing reaches the target. A Matrix without `--stdin-file` would
  * reject the argument before SSH starts, which the observation alone could not
  * tell apart from a lost answer, so it is refused here as never sent.
+ * Returns null when it can, otherwise the refusal reason: a Matrix that did
+ * not start or answer is `matrix-unavailable`, not a missing option.
  */
-async function transportCarriesBody(binding, { run }) {
+async function bodyTransportRefusal(binding, { run }) {
   const help = await run([...binding.matrix, 'remote', 'exec', '--help']);
-  if (!help.started || !help.stdout) return false;
-  return /(^|\s)--stdin-file(\s|$)/m.test(help.stdout.toString('utf8'));
+  if (!help.started || !help.stdout) return 'matrix-unavailable';
+  return /(^|\s)--stdin-file(\s|$)/m.test(help.stdout.toString('utf8')) ? null : 'matrix-lacks-body-input';
 }
 
 /** Read the target's capabilities with a timed clock sample. */
@@ -314,7 +316,8 @@ async function startRemote({
     // A launch ID is sent at most once. Reconcile it with `status` instead.
     return result('not-sent', { reason: 'attempt-exists' });
   }
-  if (!await transportCarriesBody(binding, { run })) return result('not-sent', { reason: 'matrix-lacks-body-input' });
+  const transport = await bodyTransportRefusal(binding, { run });
+  if (transport) return result('not-sent', { reason: transport });
   const first = await sample(binding, { run, monotonic });
   if (first.refusal) return result('not-sent', { reason: first.refusal });
   const local = preflightRefusal(first.caps, request);
