@@ -515,6 +515,14 @@ registered for the logged-on owner with an interactive logon and a limited
 token, run in that session; nothing logs in, unlocks or switches sessions,
 and a target with nobody logged on cannot be started this way.
 
+So a target's host comes back after a reboot, run
+`pwsh scripts/task-host-logon.ps1 -Action Register` once on that machine, in
+the checkout the host runs from. It registers a scheduled task, scoped to that
+account's logon, that starts the host with `--background` 20 seconds after the
+owner logs on. `-Action Status` and `-Action Remove` inspect and undo it. The
+owner still has to log on: it stores no password and never enables automatic
+sign-in.
+
 ### The relay over Matrix
 
 A controller reaches the target through Matrix's existing SSH route; the

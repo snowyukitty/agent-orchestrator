@@ -112,9 +112,9 @@ does not have. Everything below is current for v0.4.0.
   repository's project settings. The host is off by default. Remote starts
   are enabled only for atlas → npc ([policy](w2b-unattended-policy.md)), over
   Matrix's SSH route, and need a Matrix with `remote exec --stdin-file`. The
-  target's host does not start by itself: it needs the owner logged on, and
-  a reboot or logoff leaves it stopped until it is started again in that
-  session. While the workstation is locked, a provider is refused unless a
+  target's host needs the owner logged on: it starts at that logon if
+  `scripts/task-host-logon.ps1` is registered, and nothing can start it, or
+  log anyone in, before then. While the workstation is locked, a provider is refused unless a
   locked-session qualification exists for its exact version. Process ownership uses a Windows Job Object joined just after
   spawn (node-pty cannot create a process inside one), so a child created and
   gone in those milliseconds, or a process started outside the job by an
