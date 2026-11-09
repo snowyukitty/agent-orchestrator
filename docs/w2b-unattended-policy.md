@@ -133,16 +133,22 @@ one-line file, complete, with no commit. npc's host was started (and later
 restarted with `--quit` to read the new receipt) remotely in the owner's
 session, tray only.
 
-**Operating state (2026-11-09).** npc rebooted that morning, which stopped its
-host as expected: nothing starts it at logon. Once the owner had logged on, it
-was started again remotely, tray only, from the checkout at 49483f3, and
+**Operating state (2026-11-09).** npc's host now starts at the owner's logon:
+the task `Agent Orchestrator Task Host`, registered by
+`scripts/task-host-logon.ps1` from the checkout at 85fda53, with a logon trigger
+scoped to that account, an interactive logon and a limited token. Started
+through that task the same day, it ran tray only in the owner's session and
 answered with remote starts enabled and Codex 0.167.0 admitted for a locked
-session. A host that is down reads as `host-unavailable` to the relay and to
-Yukimado, and no start is sent. A logon start for the host is the open
-improvement. The transport prerequisite is on snowy-matrix main since d8466e9.
-One open observation: the task-host fixture reported 30 of 31 once on
-2026-11-08, without the failing check being captured; the 13 runs since were
-all 31 of 31.
+session. The trigger has not yet been seen to fire at a real logon, which needs
+the next one. Nothing starts the host before someone logs on; a host that is
+down reads as `host-unavailable` to the relay and to Yukimado, and no start is
+sent. The transport prerequisite is on snowy-matrix main since d8466e9.
+
+The task-host fixture's intermittent 30 of 31 is explained and fixed. node-pty
+killed a root's pid 5 seconds after failing to list its console, and the next
+task's root had been given that pid; a control run observed the signal at
+5022 ms. `src/main/pty-console-guard.js` stops it, and three rounds of Codex
+review through ATD (advisory) shaped its final form.
 
 An independent review by `codex:default` through ATD (advisory,
 2026-10-31, `REQUEST_CHANGES`) found six defects in the first implementation,
