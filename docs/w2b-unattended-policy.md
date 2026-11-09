@@ -118,7 +118,7 @@ Implemented in the task host (2026-10-31), with the exact codes and formats in
 | 2. Process ownership | **Met where the router runs on the MSI PowerShell 7.** The provider and each host check run in a kill-on-close Job Object, strays are adopted, and the job must be empty (proven with a fixture that leaves a detached process behind, and on live Codex turns). PowerShell 7 from the Microsoft Store is an MSIX package whose children break away from every job, so Codex started outside the job and was only adopted afterwards. The owner installed the MSI build (2026-11-01); the host now starts routed sessions through `%ProgramFiles%\PowerShell\7\pwsh.exe` whatever PATH finds first, and the next live Codex turn needed no late adoption at all (six processes in the job, none outside, none surviving). The job is still joined just after spawn (see Deviations). `remote-start` is refused with `process-ownership-unavailable` when no ownership helper is available or no MSI PowerShell 7 is installed, so a host still on the Store build cannot accept one. |
 | 3. Session observation | Done: read from Windows (WTS) through a helper, stale answers refused; `provider-session-unqualified` without a locked qualification. A locked qualification requires the lock to hold throughout: every poll locked and the host's count of departures from the locked state (Electron's unlock event and the WTS observer) unchanged; a receipt names only the session actually observed. Qualifications are per target. npc: Codex 0.166.0 unlocked (2026-11-06) and **Codex 0.167.0 locked (2026-11-08, locked from admission to collection, seven processes in the job, none outside or surviving)**, both run remotely in npc's session. atlas's own qualifications matter only when atlas is a target. |
 | 4. Power | Done: AC only (an unknown AC status is not AC), `prevent-app-suspension` while any task is active, stop on battery or unknown power and cancel a running host check, `host-suspending`. |
-| 5. Owner-visible activity | Host side done: `list`, and the target client's public task-list projection (phases, no content, bounded). Yukimado's Machines page watches it every 30 s, keeping a failed read as last known (Yukimado 0.18.4, deployed on atlas 2026-11-08 and watching npc). |
+| 5. Owner-visible activity | Host side done: `list`, and the target client's public task-list projection (phases, no content, bounded). Yukimado's Machines page watches it every 30 s, keeping a failed read as last known (since Yukimado 0.18.4; on Yukimado main since 2026-11-09, and watching npc from atlas). |
 | 6. Quiet windows | Done: task windows never take focus on open; title and state line carry no route alias or instruction. |
 
 Per-host profiles are implemented as `primary`, `secondary` and `light`.
@@ -132,6 +132,17 @@ surviving; the host's own `npm test` check passed; the diff was one new
 one-line file, complete, with no commit. npc's host was started (and later
 restarted with `--quit` to read the new receipt) remotely in the owner's
 session, tray only.
+
+**Operating state (2026-11-09).** npc rebooted that morning, which stopped its
+host as expected: nothing starts it at logon. Once the owner had logged on, it
+was started again remotely, tray only, from the checkout at 49483f3, and
+answered with remote starts enabled and Codex 0.167.0 admitted for a locked
+session. A host that is down reads as `host-unavailable` to the relay and to
+Yukimado, and no start is sent. A logon start for the host is the open
+improvement. The transport prerequisite is on snowy-matrix main since d8466e9.
+One open observation: the task-host fixture reported 30 of 31 once on
+2026-11-08, without the failing check being captured; the 13 runs since were
+all 31 of 31.
 
 An independent review by `codex:default` through ATD (advisory,
 2026-10-31, `REQUEST_CHANGES`) found six defects in the first implementation,
