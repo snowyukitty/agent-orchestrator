@@ -102,8 +102,9 @@ function createTaskWindowPresentation({
         win.once('closed', () => { clearTimeout(timer); reject(new Error('Task window closed while opening')); });
       });
       try {
-        await win.loadFile(entryFile);
-        await ready;
+        // Together, so a window closed during the load is reported, not left
+        // as an unhandled rejection behind the pending load.
+        await Promise.all([win.loadFile(entryFile), ready]);
       } catch (error) {
         if (!win.isDestroyed()) win.destroy();
         throw error;
@@ -112,6 +113,7 @@ function createTaskWindowPresentation({
       return {
         windowId: win.id,
         shown: win.isVisible(),
+        focusedAtOpen: win.isFocused(),
         nativeHandle: win.getNativeWindowHandle().length > 0,
       };
     },

@@ -36,7 +36,7 @@ const TEST_SID = 'S-1-5-21-1000-2000-3000-1001';
 const FIXTURE_AGENT = path.join(__dirname, 'fixtures', 'task-host', 'fixture-agent.js');
 
 function removeDir(dir) {
-  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  fs.rmSync(dir, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
 }
 
 function tempDir(t, prefix, { cleanup = true } = {}) {
@@ -1074,6 +1074,8 @@ test('task windows open with a neutral title', async (t) => {
 test('a detached process left behind by the provider is ended with its job before evidence is frozen', async (t) => {
   const jobs = createProcessJobs();
   t.after(() => jobs.stop());
+  // As the app does: on a loaded machine the helper takes longer to start than this root lives.
+  assert.equal(await jobs.start(), true);
   const { host, base } = await hostFixture(t, { hostOptions: { jobs } });
   const req = request({ baseRevision: base, route: 'orphan' });
   startTask(host, req);
@@ -1282,6 +1284,7 @@ test('going off AC ends a host check that is already running', async (t) => {
   let power = 'ac';
   const jobs = createProcessJobs();
   t.after(() => jobs.stop());
+  assert.equal(await jobs.start(), true);
   const { host, base } = await hostFixture(t, { hostOptions: { observePower: () => power, jobs } });
   const req = request({ baseRevision: base, checks: [{ kind: 'npm-script', name: 'slow' }, { kind: 'npm-script', name: 'test' }] });
   startTask(host, req);

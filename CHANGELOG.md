@@ -5,6 +5,19 @@ the product story; this file keeps the history.
 
 ## Unreleased (Journal v2 + Evidence-First Field Guide)
 
+- **Ending a terminal can no longer kill an unrelated process.** node-pty's
+  Windows `kill()` falls back, 5 seconds later, to killing the root's pid when
+  it cannot list the console, which is the usual case once the tree is already
+  gone. Windows may have reused that pid by then: a task-host fixture run lost
+  the next task's root that way, which was the fixture's intermittent 30 of 31.
+  A root known to have exited is no longer listed, and a listing that gets no
+  answer names nobody. A live console is still ended as before.
+- **A target's task host can start at logon.** `scripts/task-host-logon.ps1`
+  registers a tray-only start for the owner's own logon; it never logs in and
+  stores no password.
+- Task windows record whether they took focus at the moment they open, where
+  the fixture used to ask minutes later.
+
 - **The task host is ready, on its side, to start tasks with nobody at the
   target** (W2b gates, [policy](docs/w2b-unattended-policy.md)). Session
   lock state, AC power, and the account SID are read from Windows by a small

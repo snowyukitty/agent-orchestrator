@@ -513,6 +513,7 @@ class TaskHost {
         createdAt: new Date().toISOString(),
         windowId: opened?.windowId ?? null,
         shown: opened?.shown === true,
+        focusedAtOpen: opened?.focusedAtOpen === true,
         nativeHandle: opened?.nativeHandle === true,
         detachedCount: 0,
         reopenedCount: 0,

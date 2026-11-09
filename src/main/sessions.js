@@ -14,6 +14,7 @@
 // ============================================================
 const { randomUUID } = require('crypto');
 const { asCols, asRows } = require('./validate');
+const { guardConsoleKill } = require('./pty-console-guard');
 
 /** How long to wait for a graceful exit before force-killing the tree. */
 const KILL_GRACE_MS = 1500;
@@ -642,6 +643,7 @@ class SessionRegistry {
       lifecycleRegistration?.release?.();
       throw error;
     }
+    guardConsoleKill(proc);
 
     let resolveExit;
     const exitPromise = new Promise(resolve => { resolveExit = resolve; });

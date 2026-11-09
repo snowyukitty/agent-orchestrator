@@ -99,8 +99,10 @@ async function runTaskHostFixture({ host, presentation, dataDir, BrowserWindow, 
   const done = await waitFor(complete.launchId, s => TERMINAL.has(s.state));
   check('the complete task reaches needs-review', done.state === 'needs-review', done.state);
   const result = await call({ op: 'result', launchId: complete.launchId });
-  check('it ran in a new visible window', result.window?.created && result.window.nativeHandle && windowVisible(result.window.windowId));
-  check('the task window opened without taking focus', BrowserWindow.fromId(result.window?.windowId)?.isFocused() === false);
+  const windowDetail = `record ${JSON.stringify(result.window ?? null)}, exists ${!!BrowserWindow.fromId(result.window?.windowId ?? -1)}`;
+  check('it ran in a new visible window', result.window?.created && result.window.nativeHandle && windowVisible(result.window.windowId), windowDetail);
+  // Read where it opened: what the desktop does with focus later is not this window's doing.
+  check('the task window opened without taking focus', result.window?.focusedAtOpen === false, windowDetail);
   check('nothing the provider started was alive when evidence was frozen',
     result.collection?.stable === true && result.collection.ownership?.job === true &&
     result.collection.ownership.survivors === 0);
@@ -144,7 +146,7 @@ async function runTaskHostFixture({ host, presentation, dataDir, BrowserWindow, 
   const orphanResult = await call({ op: 'result', launchId: orphan.launchId });
   check('a descendant left behind is ended with the provider\'s job before evidence is frozen',
     orphanResult.collection?.stable === true && orphanResult.collection.ownership?.aliveAtBoundary >= 1,
-    `alive at the boundary ${orphanResult.collection?.ownership?.aliveAtBoundary ?? 'unknown'}`);
+    `alive at the boundary ${orphanResult.collection?.ownership?.aliveAtBoundary ?? 'unknown'}, collection ${JSON.stringify(orphanResult.collection ?? null)}`);
 
   // No receipt: running until stopped; closing the window only detaches it.
   const silent = makeRequest('no-receipt');
